@@ -21,10 +21,11 @@ GATE-L1 PASS, GATE-L2 PASS, GATE-S1 **PASS** (2026-08-29T09:34Z, post-reload ses
 
 ## Immediate next steps
 
-1. USER CHECKPOINT (issued): git author name/email → then `git config user.name/email` (local repo scope), first commit of Phase 1 docs + .claude/skills (secret scan + `git diff --check` first).
-2. `gh auth login` (browser checkpoint), verify `gh auth status` + fork write access.
-3. Docker Desktop discovery → install (UAC checkpoint), settings per MP §7.C, smoke tests.
-4. Stage D+ per master prompt.
+1. ~~git identity~~ DONE: repo-local user.name=e-orlov, user.email=6871670+e-orlov@users.noreply.github.com; first commit `12011583` (docs+skills, diff --check clean, secret scan clean).
+2. ~~gh auth~~ DONE: web device flow confirmed by user; logged in as e-orlov (keyring, https, scopes gist/read:org/repo); fork push=true verified via API.
+3. ~~Docker Desktop~~ DONE: 4.88.1 per-user, engine 29.7.2, Compose v5.4.0, WSL2 backend, terms accepted by user, no sign-in; settings hardened (DockerAI off, DisableUpdate true; K8s/2375/beta off by default); smoke + regression PASS; REQ-PLAT-001 PASS. DEF-001 (stale secrets-engine socket crash on stop→start) fixed and documented in prerequisite-report row 13; `%LOCALAPPDATA%\docker-secrets-engine-stale` to delete after next reboot.
+4. MCP decision (MP §7.C): existing session MCP inventory — Claude in Desktop browser-pane tools (preview_*: navigate/click/fill/inspect/screenshot/console/network), terminal reader, session mgmt, scheduled-tasks. Repo has native Playwright E2E. Microsoft Playwright MCP **not installed**: duplicate of already-available browser MCP + repo-native Playwright (MP §7.C.2/§7.C.7 — CLI/native first, no MCP "на всякий случай"); revisit only if browser-pane tools prove insufficient at stage G.
+5. Next: stage D — `pnpm install` per lockfile (supply-chain policy intact), dev/test env files with placeholders, dev/test PostgreSQL container, baseline lint/test/build, Playwright browsers, GATE-B1 + first GATE-R1.
 
 ## Key constraints already resolved (do not re-ask)
 
