@@ -6,7 +6,7 @@
 | GATE-L2 — Verification Design | **PASS** | 2026-08-29T09:30Z | fork `b3bea1e`, branch `phase1-local-production-setup` | see entry below |
 | GATE-S1 — Agent Skills Qualification | **PASS** | 2026-08-29T09:34Z | skills @ agent-skills `d2c37ef`, fork `b3bea1e` | see entry below |
 | GATE-B1 — Testable Implementation | not evaluated | — | — | — |
-| GATE-R1 — Component Verification | not evaluated | — | — | — |
+| GATE-R1 — Component Verification | **PASS** (baseline) | 2026-08-29T10:48Z | fork `b3bea1e` + docs commits, deps per pnpm-lock | see entry below |
 | GATE-R2 — Integration Verification | not evaluated | — | — | — |
 | GATE-R3 — System Verification | not evaluated | — | — | — |
 | GATE-R4 — Operational Validation | not evaluated | — | — | — |
@@ -40,3 +40,12 @@ Timestamp note: GATE-L1/L2 and the pre-reload GATE-S1 times were session estimat
 - Discovery caveat recorded: `.claude/skills/` created mid-session requires one session reload — already satisfied; future skill additions must repeat IT-SKILL-001.
 - No plugin/meta-skill/commands/agents/hooks/MCP installed; no global config touched; no auto-update path exists.
 - Result: **PASS**. Stage C installation (gh, pnpm, Docker Desktop) unblocked.
+
+## GATE-R1 entry (baseline) — 2026-08-29T10:48Z
+
+- Inputs: fork `b3bea1e`, deps installed via `pnpm install --frozen-lockfile` (exit 0, supply-chain policy untouched), dev DB `elmo_dev` migrated (19 tables), env files with placeholders (`.env*` ignored by Git).
+- Component/static/build baseline (evidence: baseline-report.md): lint PASS (606 files, 0 errors — after DEF-002 CRLF environment fix with confirmation test), unit tests PASS (13 turbo tasks, web 282 + lib 486 tests green), build PASS (16 tasks). Playwright browsers installed.
+- Defects: DEF-001 (Docker Desktop stale socket — env/vendor, fixed, confirmation+regression PASS), DEF-002 (CRLF working tree — env/config, fixed, confirmation PASS). Neither is a fork code defect; baseline of the fork itself is clean.
+- E2E/API baseline deferred to stage E test stack (CI workflow is the declared single source of truth for E2E orchestration and requires the Dockerized stack).
+- Interpretation note: MP §7.D says to record GATE-B1 at first testable build, but §6.4 defines GATE-B1 exit criteria that include dev/test/prod separation (stage E). Resolved in favor of the stricter §6.4: GATE-B1 will be evaluated after stage E. Conflict recorded, not silently resolved.
+- Result: **PASS** (component baseline). To be re-run per change (confirmation + regression) as work proceeds.
