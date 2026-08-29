@@ -13,7 +13,17 @@ Environment: Windows 10 Pro 22H2, Node 24.16.0, pnpm 11.18.0 (corepack), Docker 
 | Unit tests | `pnpm test` | 2026-08-29T10:39:46Z | 1m23s | 0 | PASS — 13 turbo tasks; @workspace/web 16 files / 282 tests, @workspace/lib 32 files / 486 tests, all green; no provider keys needed |
 | Build | `pnpm build` | 2026-08-29T10:41:23Z | 1m9s | 0 | PASS — 16 turbo tasks (8 cached), web nitro output built in 15.7s |
 | Playwright browsers | `pnpm exec playwright install` | 2026-08-29T10:47Z | ~2m | 0 | PASS |
-| E2E + Bruno API | per `.github/workflows/e2e.yaml` (single source of truth: `elmo init --dev` → compose build → seed → playwright per mode) | — | — | — | PLANNED at stage E — requires the Dockerized test stack on :1515 |
+| Docker images (test) | `docker compose build` (project aitrckr-test, dev build from local source) | 2026-08-29T10:49:19Z | ~40m | 0 | PASS — aitrckr-test-{db-migrate,web,worker} built from docker/Dockerfile |
+| Test stack up | `docker compose up -d --no-build web` + wait-for-web | 2026-08-29T~11:35Z | ~1m | 0 | PASS — db-migrate completed, web healthy on 127.0.0.1:3999 |
+| Seed | `pnpm exec tsx seed.ts` (DATABASE_URL → localhost:5433) | 2026-08-29T~11:36Z | <1m | 0 | PASS — 2 tenants, 5+2 prompts, 8 runs, 4 reports |
+| E2E local mode | `pnpm -C e2e exec playwright test --project=local` (BASE_URL=:3999) | 2026-08-29T11:42:53Z | 19.1s | 0 | PASS — **39/39** (first attempt failed: e2e's own Playwright needed `pnpm -C e2e exec playwright install chromium` — env issue, fixed; regression re-run 39/39 in 17.1s) |
+| Bruno API suite | `bru run -r --env local --env-var baseUrl=http://localhost:3999` | 2026-08-29T11:44Z | 4.9s | 0 | PASS — 54/54 requests, 116/116 assertions |
+| E2E worker | `playwright test --project=worker` (worker up with stub override, no paid calls) | 2026-08-29T11:50:28Z | 5.0s | 0 | PASS — submitted prompt dequeued and processed (RUNS_PER_PROMPT=5 volume contract) |
+| E2E cloud/whitelabel/demo modes | CI phases 3+ | — | — | — | NOT APPLICABLE — deployment modes excluded by accepted architecture (local, single user); recorded in matrix scope register |
+
+Test-environment reproduction note: CI's `cli-driver.ts` needs `script(1)` (PTY), which Windows lacks. `e2e/.elmo/.env` + `elmo.yaml` were generated to be wizard-equivalent from the CLI source at `b3bea1e` (generator: docs/phase1/ops/gen-test-env.cjs; same answers as the CI driver). Layered overrides via COMPOSE_FILE (`e2e/worker-override.yaml` + `docs/phase1/ops/test-env.override.yaml`, COMPOSE_PROJECT_NAME=aitrckr-test) keep the stack loopback-only on :3999/:5433.
+
+Environment-boundary evidence (IT-ARCH-001): dev DB `elmo_dev` still 19 empty schema tables after full test suite (seed data absent — `relation "brand" does not exist` in dev vs seeded test DB); volumes `aitrckr-dev-pgdata` vs `aitrckr-test_postgres_data`; ports 127.0.0.1:{5432,5433,3999} disjoint and loopback-bound.
 
 ## Defect register (stage C–D)
 
