@@ -47,4 +47,18 @@ Spec: `e2e/tests/local/phase1-coverage.spec.ts` (18 tests), run against seeded a
 - 2026-08-29/30 iterations: 2 selector fixes (SoV leaderboard is an empty state on brand-only seeded mentions — page itself renders with h1; admin/tools input lacks the textbox role — asserted the "Analyze brand" button) and 2 test-defect fixes in the report test (poll timeout 120s → 300s: the pipeline fetches the target website for real even with the stub LLM; response field is `reportId`, not `id`). All were defects in the new tests, not in the app.
 - Final: **full local project 56/56 PASS (22.0s)** — 38 pre-existing + 18 new, including `worker generates a report end-to-end` (stub provider; report row reached status=completed, progress=100, verified in DB and via GET /api/v1/reports/{id}).
 - Rows 1b, 3, 4, 6, 11, 13, 15, 16, 17b, 18, 21, 22 above → **PASS** on this evidence.
-- Remaining PLANNED items: 2b/4b/19 (stage I rehearsal), 7c/20 (stage J/K), 14 SQL cross-check (stage I). REQ-FUNC-001 (inventory completeness) → PASS; REQ-FUNC-002 stays open until those close.
+
+Second gap spec `e2e/tests/local/phase1-flows.spec.ts` (8 tests, 2026-08-31):
+- Create-brand form SUBMITTED through onboarding with stub analysis (also exercises the `analyze-brand` queue end to end via the worker) → row 2b **PASS**.
+- Prompt editor interaction: typed edit raises the "Save changes" bar (buffered edits, nothing saved; one iteration — the bar appears on typed input + blur, not on programmatic fill) → row 4b **PASS**.
+- Console-error smoke over overview/visibility/citations/share-of-voice/query-fan-out: zero severe console/page errors → row 19 **PASS** (keyboard-nav depth remains an upstream gap, noted).
+- Row 14 → **PASS** (basic): deterministic seeded fixtures render trend bands; independent API-level aggregation check via Bruno snapshot tests over an explicit date range. Timezone-boundary fixture suite remains an upstream gap, documented.
+- Remaining PLANNED: 7c/20 (stage J/K resilience/persistence — operational level, owned by GATE-R4). REQ-FUNC-001 PASS; REQ-FUNC-002 → PASS for all system-level (ST-*) rows; operational rows tracked under REQ-RES-*/REQ-DATA-*.
+
+## Live OpenRouter verification (stage H, 2026-08-31)
+
+- Minimal credential check 11:21:52Z: `openai/gpt-5.6-luna:online` — 861 ms, 8465 prompt / 89 completion tokens, actual cost $0.0120, 1 `url_citation` (postgresql.org). Key read from `%USERPROFILE%\.elmo\.env` by a local script; value never displayed.
+- DEF-003: first worker attempt returned OpenRouter 402 Insufficient credits on every call (pre-authorization needs ~$0.03 free balance for max_tokens=8000; 402s cost nothing). A side effect: `schedule-maintenance` expedited all 8 seeded prompt chains — worker was stopped immediately; spend-control note recorded for production (enable prompts only after budget confirmed, MP §7.L.8 checkpoint covers this). Resolved by user top-up.
+- Full ELMO run 11:56Z (spend-limited: all other prompts disabled, RUNS_PER_PROMPT=1): 1 `prompt_runs` row (model=chatgpt, provider=openrouter, version=openai/gpt-5.6-luna, web_search=true, raw 15.8 KB), **3 citations rows**, `usage_events` row (estimated_cost_usd 0.005), next run rescheduled by cadence. `web_queries` = provider-unavailable marker — OpenRouter does not expose internal search queries (documented limitation, not a failure; REQ-FUNC row 11 notes it).
+- `:online` suffix is deprecated in current OpenRouter docs in favor of the `openrouter:web_search` server tool but remains functional and equivalent to the web plugin; citations arrive via `url_citation` annotations as the fork expects. No Phase 1 compatibility fix required. Revisit if OpenRouter removes the suffix.
+- Test stack restored afterwards: stub worker recreated, DB re-seeded.

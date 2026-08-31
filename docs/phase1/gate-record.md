@@ -8,7 +8,7 @@
 | GATE-B1 — Testable Implementation | **PASS** | 2026-08-29T12:05Z (measured) | fork `b3bea1e`, Docker Desktop 4.88.1 | see entry below |
 | GATE-R1 — Component Verification | **PASS** (baseline) | 2026-08-29T10:48Z | fork `b3bea1e` + docs commits, deps per pnpm-lock | see entry below |
 | GATE-R2 — Integration Verification | **PASS** | 2026-08-29T12:05Z (measured) | fork `b3bea1e`, test stack aitrckr-test | see entry below |
-| GATE-R3 — System Verification | not evaluated | — | — | — |
+| GATE-R3 — System Verification | **PASS** | 2026-08-31T12:20Z | fork `b3bea1e` + phase1 specs, test stack aitrckr-test | see entry below |
 | GATE-R4 — Operational Validation | not evaluated | — | — | — |
 | GATE-R5 — Production Acceptance | not evaluated | — | — | — |
 
@@ -65,3 +65,11 @@ Timestamp note: GATE-L1/L2 and the pre-reload GATE-S1 times were session estimat
 - Resource verdict measured (resource-report.md): 7.6 GiB WSL sufficient; swap 12 MB; no OOM; no `.wslconfig` change. Disk watch: C: 75% used, build cache 11.2 GB reclaimable (no auto-prune per MP §5.1).
 - Deferred to later gates: crash/recovery (stage J), cold boot (stage K), production compose adaptation (postgres must not publish unbound `5432:5432` — REQ-SEC-001 note recorded).
 - Result: **PASS**.
+
+## GATE-R3 entry — 2026-08-31T12:20Z
+
+- Feature inventory complete (feature-test-matrix.md; REQ-FUNC-001 PASS). Every local-mode feature carries a status: PASS with evidence, NOT APPLICABLE / NOT CONFIGURED BY DESIGN with justification, or an operational-level PLANNED owned by GATE-R4 (resilience/persistence rows only).
+- System-level coverage executed on this VM: 63/63 local Playwright tests (upstream 38 + phase1-coverage 18 + phase1-flows 8, incl. onboarding submit via analyze-brand queue, report generation by worker, prompt-editor save bar, console-error smoke), Bruno 54 requests / 116 assertions, worker volume-contract E2E.
+- Live OpenRouter flow after user checkpoints (pricing shown, key user-entered, budget user-chosen): minimal credential call PASS ($0.0120, 1 citation), full ELMO worker run PASS (1 run, 3 citations, usage event, cadence rescheduled). DEF-003 (402 insufficient credits) resolved by user top-up; spend-control lesson recorded for stage L. Query fan-out for OpenRouter = provider-unavailable marker (documented limitation, not a failure).
+- `:online` deprecation noted; functional and citation-compatible today; no Phase 1 fix needed.
+- Result: **PASS**. REQ-AI-001/002 PASS; REQ-AI-003 partially evidenced (RUNS_PER_PROMPT=1 honored on live run; final check on production schedules at stage L).
