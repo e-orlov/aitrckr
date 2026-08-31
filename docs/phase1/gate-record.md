@@ -9,7 +9,7 @@
 | GATE-R1 — Component Verification | **PASS** (baseline) | 2026-08-29T10:48Z | fork `b3bea1e` + docs commits, deps per pnpm-lock | see entry below |
 | GATE-R2 — Integration Verification | **PASS** | 2026-08-29T12:05Z (measured) | fork `b3bea1e`, test stack aitrckr-test | see entry below |
 | GATE-R3 — System Verification | **PASS** | 2026-08-31T12:20Z | fork `b3bea1e` + phase1 specs, test stack aitrckr-test | see entry below |
-| GATE-R4 — Operational Validation | not evaluated | — | — | — |
+| GATE-R4 — Operational Validation | **PASS** | 2026-08-31T16:05Z | fork `b3bea1e` + phase1 ops scripts, stack aitrckr-prodlike, Docker Desktop 4.88.1 | see entry below |
 | GATE-R5 — Production Acceptance | not evaluated | — | — | — |
 
 ## GATE-L1 entry — 2026-08-29T09:20Z
@@ -73,3 +73,14 @@ Timestamp note: GATE-L1/L2 and the pre-reload GATE-S1 times were session estimat
 - Live OpenRouter flow after user checkpoints (pricing shown, key user-entered, budget user-chosen): minimal credential call PASS ($0.0120, 1 citation), full ELMO worker run PASS (1 run, 3 citations, usage event, cadence rescheduled). DEF-003 (402 insufficient credits) resolved by user top-up; spend-control lesson recorded for stage L. Query fan-out for OpenRouter = provider-unavailable marker (documented limitation, not a failure).
 - `:online` deprecation noted; functional and citation-compatible today; no Phase 1 fix needed.
 - Result: **PASS**. REQ-AI-001/002 PASS; REQ-AI-003 partially evidenced (RUNS_PER_PROMPT=1 honored on live run; final check on production schedules at stage L).
+
+## GATE-R4 entry — 2026-08-31T16:05Z
+
+- Inputs: resilience-report.md (stage J J1–J4/J7/J9–J12 + stage K J5/J6/J8), ops scripts docs/phase1/ops, Scheduled Tasks (S4U, session 0), stack aitrckr-prodlike @ fork `b3bea1e`, Docker Desktop 4.88.1.
+- Cold boot (OT-OPS-002): boot 13:37:39Z → stack healthy + marker 13:40:42Z → first logon 14:10:02Z (29.3 min later); zero manual action; data intact (17 prompt_runs). REQ-OPS-002 **PASS**.
+- Watchdog (OT-OPS-003): `docker desktop stop` 14:16:57Z → scheduled watchdog tick recovered engine (incl. DEF-001 cleanup) and stack in ~48s; single compose project; next tick idempotent no-op. REQ-OPS-003 **PASS**.
+- RDP (OT-OPS-001): disconnect 36.9 min (87/87 healthy host probes) and sign-out 26.8 min (66/66 healthy in-container probes, container StartedAt unchanged) — production uninterrupted. REQ-OPS-001 **PASS**.
+- Persistence: REQ-DATA-002 **PASS** (all restart classes incl. Windows reboot); REQ-DATA-001 PASS on prodlike volume (re-verify on real prod volume at stage L).
+- Also closed earlier within stage J: REQ-RES-001, REQ-JOBS-001, REQ-RESRC-001 — all PASS.
+- Open items deliberately NOT part of this gate: REQ-DATA-003 and REQ-AI-003 final check (real production UI/schedules — stage L, after cutover), REQ-ARCH-002 (dev vs prod independence — stage L).
+- Result: **PASS**. Real user data entry is now permitted (MP stage K exit rule).
