@@ -41,7 +41,8 @@ pnpm lint && pnpm test && pnpm build
 ### Test stack commands (Git Bash, from repo root)
 
 ```bash
-export PATH="$PATH:$LOCALAPPDATA/Programs/DockerDesktop/resources/bin"
+DOCKER_BIN="$(cygpath -u "$LOCALAPPDATA")/Programs/DockerDesktop/resources/bin"
+export PATH="$PATH:$DOCKER_BIN"
 export COMPOSE_FILE="e2e/.elmo/elmo.yaml;e2e/worker-override.yaml;docs/phase1/ops/test-env.override.yaml"
 export COMPOSE_PATH_SEPARATOR=";" COMPOSE_PROJECT_NAME=aitrckr-test
 docker compose build                          # images from local source
