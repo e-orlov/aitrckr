@@ -59,8 +59,10 @@ $startupTrigger = New-ScheduledTaskTrigger -AtStartup
 $startupTrigger.Delay = "PT2M"
 New-ElmoTask -Name "aitrckr-elmo-startup" -Script "start-elmo.ps1" -Trigger $startupTrigger -Interactive:$InteractiveOnly
 
+# [TimeSpan]::MaxValue serializes to an invalid task-XML Duration; ten years
+# of 5-minute repetitions is effectively indefinite and serializes cleanly.
 $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
+    -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
 New-ElmoTask -Name "aitrckr-elmo-watchdog" -Script "watchdog-elmo.ps1" -Trigger $watchTrigger -Interactive:$InteractiveOnly
 
 # Logon marker always runs interactively (fires at logon, so the user is there).
