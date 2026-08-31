@@ -21,7 +21,7 @@ Stack: disposable `aitrckr-prodlike` (config `%USERPROFILE%\.elmo-prodlike`, pro
 | J4 | Docker engine/Desktop restart | `docker desktop restart` | **PASS with caveat** — Desktop crashed on DEF-001 (expected); after scripted recovery the engine was back in ~5s and **all prodlike containers auto-started** (policy fired at engine start), data intact. Side note: containers without a restart policy (generated test compose) stay down — test env needs manual start after engine restarts (runbook note) |
 | J10 | provider 429 behavior | analysis (no live 429 injectable via stub) | **DOCUMENTED** — current behavior: process-prompt queue retries (retryLimit 3, backoff) at queue level; worker self-re-enqueue uses retryLimit 0 with run-policy `failureBackoffHours` (verified by `run-backoff.test.ts`, `scheduling-under-failure.test.ts`, 486 green unit tests). DEF-003 (402) showed a failed cycle reschedules with 0.25h backoff. Phase 2 backlog item three (429 retry/backoff hardening) NOT implemented per scope |
 | J7 | worker crash during synthetic job | covered by J2/J12 (stub jobs are sub-second; crash window covered by submit-while-down) | **PASS** (as J12) |
-| J5 | Docker Desktop stopped → watchdog revives | stage K (watchdog script) | PLANNED |
+| J5 | Docker Desktop stopped → watchdog revives | `docker desktop stop` 2026-08-31T14:16:57Z (engine confirmed down 14:17:12Z), no manual recovery | **PASS** — scheduled watchdog tick detected engine down 14:17:31Z, ran DEF-001 cleanup, engine ready 14:17:40Z, compose up restored all 3 services (~48s stop→recovered); web HTTP 307, prompt_runs 17, exactly one compose project. Next tick (14:22:22Z) was a no-op: container uptime continuous, no log entries, task result 0x0 — idempotent, no second stack |
 | J6 | RDP disconnect / logoff | stage K (needs user) | PLANNED |
 | J8 | Windows reboot / queue durability | cold boot 2026-08-31 (see Stage K section) + decomposition | **PASS with note** — reboot persistence proven (prompt_runs 17 → 17, schedules intact); an in-flight batch at the reboot instant was not separately reproducible: stub jobs complete sub-second, and job-crash durability is already proven by J12 (submit while worker down) + J3 (WAL recovery). In-flight provider HTTP at crash time remains not-resumable (documented limitation) |
 
@@ -55,4 +55,5 @@ Result: **PASS** — production-like stack healthy 3:03 after boot and **29.3 mi
 - REQ-DATA-001 (named volume persistence) → **PASS** on prodlike volume across postgres crash + engine restart + reboot; re-verify on the real prod volume at stage L.
 - REQ-JOBS-001 → **PASS** (audit + J11/J12).
 - REQ-OPS-002 → **PASS** (Stage K cold boot section above).
-- REQ-OPS-001 (RDP disconnect/logoff) and REQ-OPS-003 (watchdog full recovery incl. stack, J5) → pending final stage K tests; watchdog rehearsal evidence exists (13:25:52Z engine-down detection → engine ready 13:26:06Z) but stack-level recovery assertion still to be executed.
+- REQ-OPS-003 → **PASS** (J5: unattended engine+stack recovery in ~48s, idempotent, single stack).
+- REQ-OPS-001 (RDP disconnect/logoff) → pending final stage K test (user checkpoint).
