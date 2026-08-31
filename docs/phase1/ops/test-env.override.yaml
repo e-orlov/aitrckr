@@ -1,0 +1,13 @@
+# Phase 1 test-environment override (REQ-ARCH-001, REQ-SEC-001).
+# Layered on top of the generated e2e/.elmo/elmo.yaml via COMPOSE_FILE, with
+# COMPOSE_PROJECT_NAME=aitrckr-test so containers, network, and the
+# postgres_data volume never collide with dev or production.
+# Port remaps keep the test stack loopback-only and off the ports dev (5432)
+# and production (1515) use.
+services:
+  web:
+    ports: !override
+      - "127.0.0.1:3999:3000"
+  postgres:
+    ports: !override
+      - "127.0.0.1:5433:5432"

@@ -1,0 +1,24 @@
+# Phase 1 production compose override (REQ-SEC-001, REQ-OPS, REQ-DATA-001).
+# Layered on top of the generated elmo.yaml via COMPOSE_FILE. Fixes what the
+# generated file lacks for unattended production: restart policies, loopback
+# binding for web, no host port for PostgreSQL, bounded log rotation.
+# The same file drives the disposable production-like stack for stage J/K.
+services:
+  postgres:
+    restart: unless-stopped
+    ports: !override []
+    logging: &logrotate
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  db-migrate:
+    logging: *logrotate
+  web:
+    restart: unless-stopped
+    ports: !override
+      - "127.0.0.1:1515:3000"
+    logging: *logrotate
+  worker:
+    restart: unless-stopped
+    logging: *logrotate
