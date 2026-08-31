@@ -23,7 +23,7 @@ Stack: disposable `aitrckr-prodlike` (config `%USERPROFILE%\.elmo-prodlike`, pro
 | J7 | worker crash during synthetic job | covered by J2/J12 (stub jobs are sub-second; crash window covered by submit-while-down) | **PASS** (as J12) |
 | J5 | Docker Desktop stopped → watchdog revives | stage K (watchdog script) | PLANNED |
 | J6 | RDP disconnect / logoff | stage K (needs user) | PLANNED |
-| J8 | Windows reboot during batch | stage K cold-boot test | PLANNED |
+| J8 | Windows reboot / queue durability | cold boot 2026-08-31 (see Stage K section) + decomposition | **PASS with note** — reboot persistence proven (prompt_runs 17 → 17, schedules intact); an in-flight batch at the reboot instant was not separately reproducible: stub jobs complete sub-second, and job-crash durability is already proven by J12 (submit while worker down) + J3 (WAL recovery). In-flight provider HTTP at crash time remains not-resumable (documented limitation) |
 
 ## pg-boss configuration audit (REQ-JOBS-001)
 
@@ -31,10 +31,28 @@ From code at b3bea1e (details in feature inventory): schema `pgboss`, maintenanc
 
 **Exactly-once is NOT promised**: an in-flight HTTP call to a provider at crash time cannot be resumed; pg-boss retries the job, so a rare duplicate provider call/cost is theoretically possible (master prompt acknowledges this). Completed evaluations are not re-recorded (J11).
 
+## Stage K — cold boot acceptance test (OT-OPS-002, 2026-08-31)
+
+Setup: Scheduled Tasks (S4U principal `MEDIAWORXDE\orlov`, session 0, no stored password): `aitrckr-elmo-startup` ONSTART+2min, `aitrckr-elmo-watchdog` every 5 min, `aitrckr-elmo-logon-marker` at logon. Markers cleared pre-reboot; user confirmed reboot and stayed off RDP for ~30 min.
+
+Timeline (UTC, from `%USERPROFILE%\.elmo-prodlike\logs\elmo-ops.log`, markers, and task LastRunTime):
+
+| Event | UTC | Source |
+|---|---|---|
+| Windows boot | 13:37:39Z | `LastBootUpTime` |
+| startup task fired | 13:39:39Z | task LastRunTime (0x0) |
+| orchestrator begin, DEF-001 cleanup, Docker Desktop start | 13:39:54–55Z | elmo-ops.log |
+| Docker engine ready | 13:40:17Z | elmo-ops.log |
+| stack healthy (web HTTP 307), startup-health.marker written | 13:40:42Z | elmo-ops.log + marker content |
+| first interactive logon | 14:10:02Z | first-logon.marker (logon-marker task, 0x0) |
+
+Result: **PASS** — production-like stack healthy 3:03 after boot and **29.3 min before the first logon**, with zero manual action. Post-logon assertions: `docker ps` shows exactly one prodlike project Up since boot (web 127.0.0.1:1515→3000, postgres healthy on 127.0.0.1:5434); `prompt_runs` count 17 (unchanged across reboot); web probe HTTP 307; watchdog task running on schedule, LastTaskResult 0x0. DEF-001 cleanup executed automatically by the orchestrator as designed. Note: startup-health.marker had been re-written by a pre-reboot rehearsal at 13:34:23Z, but the surviving content (13:40:42Z) postdates boot, so the marker unambiguously proves post-boot health.
+
 ## Requirement status updates
 
 - REQ-RES-001 (kill/restart web/worker/postgres/Docker) → **PASS** (J1–J4).
-- REQ-DATA-002 → container/engine restarts **verified**; Windows reboot pending stage K.
-- REQ-DATA-001 (named volume persistence) → **PASS** on prodlike volume across postgres crash + engine restart; re-verify on the real prod volume at stage L.
+- REQ-DATA-002 → **PASS** — container/engine restarts (J1–J4) + Windows reboot (Stage K cold boot: 17 prompt_runs before/after).
+- REQ-DATA-001 (named volume persistence) → **PASS** on prodlike volume across postgres crash + engine restart + reboot; re-verify on the real prod volume at stage L.
 - REQ-JOBS-001 → **PASS** (audit + J11/J12).
-- REQ-OPS-001/002/003 → stage K.
+- REQ-OPS-002 → **PASS** (Stage K cold boot section above).
+- REQ-OPS-001 (RDP disconnect/logoff) and REQ-OPS-003 (watchdog full recovery incl. stack, J5) → pending final stage K tests; watchdog rehearsal evidence exists (13:25:52Z engine-down detection → engine ready 13:26:06Z) but stack-level recovery assertion still to be executed.
