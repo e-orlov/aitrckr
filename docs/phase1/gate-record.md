@@ -10,7 +10,7 @@
 | GATE-R2 — Integration Verification | **PASS** | 2026-08-29T12:05Z (measured) | fork `b3bea1e`, test stack aitrckr-test | see entry below |
 | GATE-R3 — System Verification | **PASS** | 2026-08-31T12:20Z | fork `b3bea1e` + phase1 specs, test stack aitrckr-test | see entry below |
 | GATE-R4 — Operational Validation | **PASS** | 2026-08-31T16:05Z | fork `b3bea1e` + phase1 ops scripts, stack aitrckr-prodlike, Docker Desktop 4.88.1 | see entry below |
-| GATE-R5 — Production Acceptance | not evaluated | — | — | — |
+| GATE-R5 — Production Acceptance | **PASS** | 2026-08-31T20:53Z | deployed images g34057521 (code b3bea1e), project elmo, Docker Desktop 4.88.1 | see entry below |
 
 ## GATE-L1 entry — 2026-08-29T09:20Z
 
@@ -84,3 +84,14 @@ Timestamp note: GATE-L1/L2 and the pre-reload GATE-S1 times were session estimat
 - Also closed earlier within stage J: REQ-RES-001, REQ-JOBS-001, REQ-RESRC-001 — all PASS.
 - Open items deliberately NOT part of this gate: REQ-DATA-003 and REQ-AI-003 final check (real production UI/schedules — stage L, after cutover), REQ-ARCH-002 (dev vs prod independence — stage L).
 - Result: **PASS**. Real user data entry is now permitted (MP stage K exit rule).
+
+## GATE-R5 entry — 2026-08-31T20:53Z
+
+- Inputs: production stack `elmo` (images g34057521), real account/brand/competitors/27 prompts entered by user via prepared checkpoints (production-checkpoints.md all 9 executed), production-manifest.md, final-report.md, phase2-backlog.md.
+- Production account/config/prompts verified: 1 user/org/member, metadata-only prompt validation clean (27 unique, 0 empty, 0 over-length, 1 tag each, sole target chatgpt/openrouter); key user-entered, never disclosed; spend-control enforced — worker held stopped (compose stop + ops-mutex hold to pause watchdog) from wizard finish until explicit user budget confirmation.
+- First allowed schedule updated the dashboard: 27/27 runs completed 2026-08-31T18:36Z, 84 citations, 27 usage events ($0.135 est.), brand mentions detected, user visually confirmed the dashboard; next cycle re-enqueued at +24h with 1 run/prompt (REQ-AI-003).
+- Rollback/runbook ready: production-manifest.md (pinned-tag rollback without touching volume), runbook.md production section.
+- Final regression on deployed HEAD: lint 0 errors, 811 unit tests fresh-green (cache bypassed), full build green. E2E/API evidence stands from GATE-R3 — app code unchanged since (branch delta is docs/e2e-specs/skills only).
+- Production reboot validation (beyond R4): boot 19:36:35Z → healthy 19:39:37Z → logon 19:56:26Z; data intact; user confirmed UI (REQ-DATA-003 PASS).
+- Traceability audit: 42 requirements, 0 orphan requirements/tests/changes; statuses 39 PASS + 3 in-flight, 0 FAIL, 0 BLOCKED. In-flight at gate time, recorded as an interpretation (like GATE-B1): REQ-GIT-002 (PR creation IS stage M's act — cannot precede this gate by definition), REQ-GIT-005 (CLA outcome observable only on that PR), REQ-VV-003 (self-referential: requires this very gate). None of the three can fail production acceptance criteria; each closes immediately after push/PR and is verified before handoff completion.
+- Result: **PASS**. Stage M (push, PR, handoff) unblocked.

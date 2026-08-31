@@ -48,6 +48,12 @@ Timeline (UTC, from `%USERPROFILE%\.elmo-prodlike\logs\elmo-ops.log`, markers, a
 
 Result: **PASS** — production-like stack healthy 3:03 after boot and **29.3 min before the first logon**, with zero manual action. Post-logon assertions: `docker ps` shows exactly one prodlike project Up since boot (web 127.0.0.1:1515→3000, postgres healthy on 127.0.0.1:5434); `prompt_runs` count 17 (unchanged across reboot); web probe HTTP 307; watchdog task running on schedule, LastTaskResult 0x0. DEF-001 cleanup executed automatically by the orchestrator as designed. Note: startup-health.marker had been re-written by a pre-reboot rehearsal at 13:34:23Z, but the surviving content (13:40:42Z) postdates boot, so the marker unambiguously proves post-boot health.
 
+## Stage L — production reboot validation (AT-DATA-001, 2026-08-31)
+
+Repeat of the cold-boot test on the REAL production stack (project `elmo`, real account/brand/27 prompts, images g34057521), after the first paid cycle completed (27 runs / 84 citations). Reboot initiated 19:35:16Z after user checkpoint; user stayed off RDP ~17 min.
+
+Boot 19:36:35Z → startup task → orchestrator 19:38:50Z (DEF-001 cleanup ran) → engine ready 19:39:12Z → **stack healthy 19:39:37Z (3:02 after boot, web HTTP 200)** → first logon 19:56:26Z (16.8 min later). Post-logon: containers Up since boot with pinned images; DB counts identical to pre-reboot snapshot (27 prompt_runs / 84 citations / 27 enabled prompts / 27 queued next-cycle jobs, start_after ≈ 2026-09-01T18:36Z); user opened the dashboard and confirmed saved data and schedules (REQ-DATA-003 **PASS**). This also re-proves REQ-OPS-002 mechanics on the production project itself.
+
 ## Requirement status updates
 
 - REQ-RES-001 (kill/restart web/worker/postgres/Docker) → **PASS** (J1–J4).
