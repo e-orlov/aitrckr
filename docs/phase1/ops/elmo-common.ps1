@@ -5,12 +5,15 @@ $ErrorActionPreference = "Stop"
 
 $script:DockerDesktopExe = Join-Path $env:LOCALAPPDATA "Programs\DockerDesktop\Docker Desktop.exe"
 $script:DockerCli = Join-Path $env:LOCALAPPDATA "Programs\DockerDesktop\resources\bin\docker.exe"
+# These scripts live at <repo-root>\docs\phase1\ops, so the repo root is three
+# levels up; -RepoRoot overrides for out-of-tree copies.
+$script:ElmoRepoRootDefault = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 
 function Get-ElmoDefaults {
     param([string]$ConfigDir, [string]$Project, [string]$RepoRoot, [string[]]$ExtraComposeFiles)
     if (-not $ConfigDir) { $ConfigDir = Join-Path $env:USERPROFILE ".elmo" }
     if (-not $Project) { $Project = "elmo" }
-    if (-not $RepoRoot) { $RepoRoot = "C:\Users\orlov\Claude-Desktop-Projects\aitrckr" }
+    if (-not $RepoRoot) { $RepoRoot = $script:ElmoRepoRootDefault }
     $files = @((Join-Path $ConfigDir "elmo.yaml"), (Join-Path $RepoRoot "docs\phase1\ops\prod-env.override.yaml"))
     if ($ExtraComposeFiles) { $files += $ExtraComposeFiles }
     [pscustomobject]@{

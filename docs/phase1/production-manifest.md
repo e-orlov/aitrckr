@@ -20,7 +20,7 @@ Deployed 2026-08-31T16:13Z (containers recreated with pinned tags ~17:05Z).
 ## Deploy (new version)
 
 ```bash
-cd /c/Users/orlov/Claude-Desktop-Projects/aitrckr
+cd <repo-root>
 export COMPOSE_FILE="$USERPROFILE/.elmo/elmo.yaml;docs/phase1/ops/prod-env.override.yaml"
 export COMPOSE_PATH_SEPARATOR=";" COMPOSE_PROJECT_NAME=elmo
 SHA=$(git rev-parse --short HEAD)

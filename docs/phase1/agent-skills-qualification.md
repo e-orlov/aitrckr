@@ -9,7 +9,7 @@
 | Commit date | 2026-08-28 16:30:57 -0700 ("chore(release): bump plugin manifests to 0.6.8") |
 | Retrieval UTC | 2026-08-29T09:08:39Z |
 | License | MIT (Copyright (c) 2025 Addy Osmani) |
-| Retrieval method | `git clone` (HTTPS, read-only) into `C:\Users\orlov\Claude-Desktop-Projects\_audit-tmp\agent-skills-audit-readonly` — explicitly marked audit folder, nothing activated or executed |
+| Retrieval method | `git clone` (HTTPS, read-only) into `<workspace>\_audit-tmp\agent-skills-audit-readonly` — explicitly marked audit folder, nothing activated or executed |
 | Skills in source | 25 |
 | Install method policy | copy approved directories only into `.claude/skills/<name>/`; no `npx skills add`, no marketplace, no plugin.json/commands/agents/hooks/meta-skill, no global install, no auto-update |
 | Update procedure | manual only: re-clone, diff against locked SHA, re-run full qualification suite, update this record |

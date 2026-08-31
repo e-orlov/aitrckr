@@ -33,7 +33,7 @@ From code at b3bea1e (details in feature inventory): schema `pgboss`, maintenanc
 
 ## Stage K — cold boot acceptance test (OT-OPS-002, 2026-08-31)
 
-Setup: Scheduled Tasks (S4U principal `MEDIAWORXDE\orlov`, session 0, no stored password): `aitrckr-elmo-startup` ONSTART+2min, `aitrckr-elmo-watchdog` every 5 min, `aitrckr-elmo-logon-marker` at logon. Markers cleared pre-reboot; user confirmed reboot and stayed off RDP for ~30 min.
+Setup: Scheduled Tasks (S4U principal `<DOMAIN\user>`, session 0, no stored password): `aitrckr-elmo-startup` ONSTART+2min, `aitrckr-elmo-watchdog` every 5 min, `aitrckr-elmo-logon-marker` at logon. Markers cleared pre-reboot; user confirmed reboot and stayed off RDP for ~30 min.
 
 Timeline (UTC, from `%USERPROFILE%\.elmo-prodlike\logs\elmo-ops.log`, markers, and task LastRunTime):
 

@@ -18,14 +18,16 @@ param(
     # runs only when the user is logged on - NOT sufficient for production
     # acceptance, useful only for rehearsal.
     [switch]$InteractiveOnly,
-    # Account the tasks run under. Registration may happen elevated as a
-    # DIFFERENT admin account, but the stack must run as the Docker Desktop
-    # per-user install owner.
-    [string]$TaskUser = "MEDIAWORXDE\orlov"
+    # Account the tasks run under (e.g. <DOMAIN\user>). Mandatory and never
+    # defaulted: registration typically happens elevated as a DIFFERENT admin
+    # account, but the stack must run as the Docker Desktop per-user install
+    # owner — only the operator knows which account that is.
+    [Parameter(Mandatory)]
+    [string]$TaskUser
 )
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
-if (-not $RepoRoot) { $RepoRoot = "C:\Users\orlov\Claude-Desktop-Projects\aitrckr" }
+if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path }
 if (-not $ConfigDir) { $ConfigDir = Join-Path $env:USERPROFILE ".elmo" }
 if (-not $Project) { $Project = "elmo" }
 

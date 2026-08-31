@@ -5,7 +5,7 @@ Diagnostics run 2026-08-29 ~09:25 UTC on the target VM. All commands executed lo
 | # | Check | Command/source | Actual result | Verdict |
 |---|---|---|---|---|
 | 1 | Windows edition/build/arch | `Get-CimInstance Win32_OperatingSystem` | Windows 10 Pro, build 19045, 64-bit (matches known 19045.6456) | PASS |
-| 2 | Account/elevation | PowerShell WindowsPrincipal | `MEDIAWORXDE\orlov` — **domain account**, process not elevated (Admin: False) | WARN narrowed 2026-08-29: official Docker docs (docs.docker.com/desktop/setup/install/windows-install, checked 2026-08-29) — per-user install needs **no admin**; admin only for first-time WSL2 enablement (already done, WSL 2.7.12 running). ONSTART Scheduled Tasks UAC checkpoint still expected at stage K |
+| 2 | Account/elevation | PowerShell WindowsPrincipal | `<DOMAIN\user>` — **domain account**, process not elevated (Admin: False) | WARN narrowed 2026-08-29: official Docker docs (docs.docker.com/desktop/setup/install/windows-install, checked 2026-08-29) — per-user install needs **no admin**; admin only for first-time WSL2 enablement (already done, WSL 2.7.12 running). ONSTART Scheduled Tasks UAC checkpoint still expected at stage K |
 | 3 | CPU/RAM/disk | Win32_ComputerSystem, Get-PSDrive | 16 logical CPU; 15.6 GB RAM (≈10.3 GB free); C: 57.2 GB free / 69.2 GB used | PASS |
 | 4 | PowerShell/installer | `$PSVersionTable`, `winget --version` | PowerShell 5.1.19041.6456 (German locale); winget v1.29.290 | PASS |
 | 5 | Git + credential helper | `git --version`, `git config credential.helper` | git 2.54.0.windows.1; helper = `manager` (Git Credential Manager, system+global) | PASS |

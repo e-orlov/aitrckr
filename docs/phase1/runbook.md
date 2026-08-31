@@ -41,7 +41,7 @@ pnpm lint && pnpm test && pnpm build
 ### Test stack commands (Git Bash, from repo root)
 
 ```bash
-export PATH="$PATH:/c/Users/orlov/AppData/Local/Programs/DockerDesktop/resources/bin"
+export PATH="$PATH:$LOCALAPPDATA/Programs/DockerDesktop/resources/bin"
 export COMPOSE_FILE="e2e/.elmo/elmo.yaml;e2e/worker-override.yaml;docs/phase1/ops/test-env.override.yaml"
 export COMPOSE_PATH_SEPARATOR=";" COMPOSE_PROJECT_NAME=aitrckr-test
 docker compose build                          # images from local source
@@ -82,4 +82,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\phase1\ops\health-elmo.
 powershell -NoProfile -ExecutionPolicy Bypass -File docs\phase1\ops\stop-elmo.ps1   # containers only; add -IncludeEngine for Desktop
 ```
 
-Deploy and rollback: see `production-manifest.md`. Auto-start: Scheduled Tasks (S4U) — reinstall with elevated `install-tasks.ps1`, remove with `remove-tasks.ps1`. Watchdog handles engine-down (incl. DEF-001) and unhealthy services every 5 minutes.
+Deploy and rollback: see `production-manifest.md`. Auto-start: Scheduled Tasks (S4U) — reinstall with elevated `install-tasks.ps1 -TaskUser "<DOMAIN\user>"` (mandatory: the account owning the per-user Docker Desktop install, which may differ from the elevated admin), remove with `remove-tasks.ps1`. Watchdog handles engine-down (incl. DEF-001) and unhealthy services every 5 minutes.
