@@ -62,4 +62,24 @@ The worker override pins the worker to `SCRAPE_TARGETS=stub:stub`; the test stac
 - **DEF-001**: Docker Desktop stop→start can crash on a stale `%LOCALAPPDATA%\docker-secrets-engine\engine.sock`. Recovery: kill leftover docker CLI processes, rename `docker-secrets-engine` aside, start Desktop. Stale renamed dir is deletable only after reboot.
 - Disk: C: at ~75%; Docker build cache ~11 GB reclaimable. Do not prune automatically — ask the user (`docker builder prune`).
 - MS Store Python virtualizes `%APPDATA%` writes — use `node` for editing files under AppData, not `python`.
-- Production sections (startup scripts, watchdog, Scheduled Tasks, deploy/rollback) are added at stages K–L.
+## Production (stage L)
+
+Deployment details, versions and pinned images: `production-manifest.md`. Ops scripts: `docs/phase1/ops/` (start/stop/health/watchdog/install-tasks/remove-tasks; all take `-ConfigDir`/`-Project`, defaults = production).
+
+```bash
+# status / logs / restart (Git Bash, from repo root)
+export COMPOSE_FILE="$USERPROFILE/.elmo/elmo.yaml;docs/phase1/ops/prod-env.override.yaml"
+export COMPOSE_PATH_SEPARATOR=";" COMPOSE_PROJECT_NAME=elmo
+docker compose ps
+docker compose logs --tail 50 web worker
+docker compose restart worker
+```
+
+```powershell
+# controlled start/stop/health (PowerShell, defaults point at production)
+powershell -NoProfile -ExecutionPolicy Bypass -File docs\phase1\ops\start-elmo.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File docs\phase1\ops\health-elmo.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File docs\phase1\ops\stop-elmo.ps1   # containers only; add -IncludeEngine for Desktop
+```
+
+Deploy and rollback: see `production-manifest.md`. Auto-start: Scheduled Tasks (S4U) — reinstall with elevated `install-tasks.ps1`, remove with `remove-tasks.ps1`. Watchdog handles engine-down (incl. DEF-001) and unhealthy services every 5 minutes.

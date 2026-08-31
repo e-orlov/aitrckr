@@ -7,13 +7,20 @@
 // DEPLOYMENT_ID from a prior .env in the target dir: the encryption key must
 // survive regeneration or stored provider credentials become unreadable.
 //
-// Usage: node gen-prod-env.cjs [configDir]   (default %USERPROFILE%\.elmo)
+// Usage: node gen-prod-env.cjs [configDir] [imageTag]
+// (defaults: %USERPROFILE%\.elmo, g<short HEAD sha>). Images are pinned to the
+// deployed commit — no `latest` in production; deploy = build → docker tag →
+// compose up (see runbook).
+const { execSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
 const configDir = process.argv[2] || path.join(process.env.USERPROFILE, ".elmo");
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
+const imageTag =
+	process.argv[3] ||
+	`g${execSync("git rev-parse --short HEAD", { cwd: repoRoot }).toString().trim()}`;
 const v = "0.2.19";
 
 const envPath = path.join(configDir, ".env");
@@ -88,6 +95,7 @@ services:
       retries: 5
       start_period: 30s
   db-migrate:
+    image: elmo-db-migrate:${imageTag}
     build:
       context: ${ctx}
       dockerfile: docker/Dockerfile
@@ -98,6 +106,7 @@ services:
       postgres:
         condition: service_healthy
   web:
+    image: elmo-web:${imageTag}
     build:
       context: ${ctx}
       dockerfile: docker/Dockerfile
@@ -113,6 +122,7 @@ services:
       db-migrate:
         condition: service_completed_successfully
   worker:
+    image: elmo-worker:${imageTag}
     build:
       context: ${ctx}
       dockerfile: docker/Dockerfile
