@@ -10,13 +10,13 @@
  * worker running (stub provider) and is skipped when WORKER_UP is not set.
  */
 import { expect, test } from "@playwright/test";
-import { REPORT_IDS, TEST_API_KEY, TEST_BRAND_ID } from "../../fixtures";
+import { brandUrl, REPORT_IDS, TEST_API_KEY, TEST_BRAND_ID } from "../../fixtures";
 
 const api = { Authorization: `Bearer ${TEST_API_KEY}` };
 
 test.describe("Dashboard pages without prior coverage", () => {
   test("share of voice page renders competitor stats", async ({ page }) => {
-    await page.goto(`/app/${TEST_BRAND_ID}/share-of-voice`);
+    await page.goto(`${brandUrl()}/share-of-voice`);
     await expect(page.getByRole("heading", { name: /share of voice/i, level: 1 })).toBeVisible();
     // The seeded runs carry brand mentions only, so the leaderboard may be an
     // empty state — assert the page body rendered rather than specific rows.
@@ -24,18 +24,18 @@ test.describe("Dashboard pages without prior coverage", () => {
   });
 
   test("query fan-out page renders its tabs", async ({ page }) => {
-    await page.goto(`/app/${TEST_BRAND_ID}/query-fan-out`);
+    await page.goto(`${brandUrl()}/query-fan-out`);
     await expect(page.getByText(/fan-out/i).first()).toBeVisible();
     await expect(page.getByRole("tab").first()).toBeVisible();
   });
 
   test("opportunities page loads without crashing", async ({ page }) => {
-    await page.goto(`/app/${TEST_BRAND_ID}/opportunities`);
+    await page.goto(`${brandUrl()}/opportunities`);
     await expect(page.getByText(/opportunit/i).first()).toBeVisible();
   });
 
   test("unknown brand subpage shows not-found, not a crash", async ({ page }) => {
-    const response = await page.goto(`/app/${TEST_BRAND_ID}/definitely-not-a-page`);
+    const response = await page.goto(`${brandUrl()}/definitely-not-a-page`);
     expect(response?.status()).toBeLessThan(500);
     await expect(page.getByText(/not found|404/i).first()).toBeVisible();
   });
@@ -43,17 +43,17 @@ test.describe("Dashboard pages without prior coverage", () => {
 
 test.describe("Settings editors render seeded data", () => {
   test("competitors settings lists seeded competitors", async ({ page }) => {
-    await page.goto(`/app/${TEST_BRAND_ID}/settings/competitors`);
+    await page.goto(`${brandUrl()}/settings/competitors`);
     await expect(page.getByText(/Competitor Alpha/i).first()).toBeVisible();
   });
 
   test("prompts settings lists seeded prompts with controls", async ({ page }) => {
-    await page.goto(`/app/${TEST_BRAND_ID}/settings/prompts`);
+    await page.goto(`${brandUrl()}/settings/prompts`);
     await expect(page.getByRole("textbox").first()).toBeVisible();
   });
 
   test("llms settings shows platform groups", async ({ page }) => {
-    await page.goto(`/app/${TEST_BRAND_ID}/settings/llms`);
+    await page.goto(`${brandUrl()}/settings/llms`);
     await expect(page.getByText(/claude|chatgpt/i).first()).toBeVisible();
   });
 });

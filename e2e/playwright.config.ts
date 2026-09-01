@@ -53,7 +53,10 @@ export default defineConfig({
 
   use: {
     baseURL: BASE_URL,
-    trace: "on-first-retry",
+    // retain-on-failure (not on-first-retry) so a first-attempt failure that
+    // passes on retry still leaves a full trace — without one, a transient
+    // error boundary in CI is undiagnosable (no console/pageerror survives).
+    trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
 

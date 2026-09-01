@@ -17,40 +17,52 @@ export const LOCAL_FEATURES: FeaturesConfig = {
 	readOnly: false,
 	showOptimizeButton: false,
 	canCreateBrands: true,
+	canCreateOrganizations: false,
+	canEditOrganizations: true,
 	selfServeSignup: false,
 	billing: false,
 	reportGeneration: true,
 	teamInvites: false,
+	platformPicksEditable: true,
 };
 
 export const DEMO_FEATURES: FeaturesConfig = {
 	readOnly: true,
 	showOptimizeButton: false,
 	canCreateBrands: false,
+	canCreateOrganizations: false,
+	canEditOrganizations: false,
 	selfServeSignup: false,
 	billing: false,
 	reportGeneration: true,
 	teamInvites: false,
+	platformPicksEditable: false,
 };
 
 export const WHITELABEL_FEATURES: FeaturesConfig = {
 	readOnly: false,
 	showOptimizeButton: true,
 	canCreateBrands: false,
+	canCreateOrganizations: false,
+	canEditOrganizations: false,
 	selfServeSignup: false,
 	billing: false,
 	reportGeneration: true,
 	teamInvites: false,
+	platformPicksEditable: false,
 };
 
 export const CLOUD_FEATURES: FeaturesConfig = {
 	readOnly: false,
 	showOptimizeButton: false,
 	canCreateBrands: true,
+	canCreateOrganizations: true,
+	canEditOrganizations: true,
 	selfServeSignup: true,
 	billing: true,
 	reportGeneration: false,
 	teamInvites: true,
+	platformPicksEditable: true,
 };
 
 // ============================================================================

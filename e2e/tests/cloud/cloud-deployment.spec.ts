@@ -10,7 +10,8 @@
  * and assert on everything around it.
  */
 import { expect, test } from "@playwright/test";
-import { CLOUD_SIGNUP, TEST_BRAND_ID, TEST_USER } from "../../fixtures";
+import { openAccountMenu } from "../account-menu-helper";
+import { CLOUD_SIGNUP, TEST_BRAND_ID, TEST_USER, brandUrl, organizationUrl } from "../../fixtures";
 import { deleteUsers, userExists, verifyEmail } from "../../session";
 
 const NEW_USER = {
@@ -75,8 +76,6 @@ test.describe("Cloud self-serve signup", () => {
     await page.getByLabel("Password").fill(NEW_USER.password);
     await page.getByRole("button", { name: "Sign in" }).click();
 
-    // Cloud provisions a workspace on signup, but app access starts only after
-    // that workspace has an active plan.
     await page.waitForURL(/\/choose-plan(?:\?.*)?$/, { timeout: 30_000 });
     await expect(page.getByRole("heading", { name: "Choose your plan" })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole("button", { name: "Subscribe to Starter" })).toBeVisible();
@@ -113,17 +112,25 @@ test.describe("Cloud features", () => {
   });
 
   test("the sidebar offers team settings and no reports", async ({ page }) => {
-    await page.goto(`/app/${TEST_BRAND_ID}`);
+    await page.goto(`${organizationUrl()}/settings`);
     await expect(
-      page.locator(`a[href="/app/${TEST_BRAND_ID}/settings/members"][data-sidebar="menu-button"]`),
+      page.locator(`a[href="${organizationUrl()}/settings/members"][data-sidebar="menu-button"]`),
     ).toBeVisible({ timeout: 30_000 });
+
+    await page.goto(`${brandUrl()}`);
+    await expect(
+      page.locator(`a[href="${organizationUrl()}/settings/members"][data-sidebar="menu-button"]`),
+    ).toHaveCount(0);
+
     // The admin section is present (this user is an admin) but has no Reports entry.
-    await expect(page.locator('a[href="/admin"][data-sidebar="menu-button"]')).toBeVisible();
-    await expect(page.locator('a[href="/reports"][data-sidebar="menu-button"]')).toHaveCount(0);
+    await openAccountMenu(page);
+    const menu = page.getByRole("menu");
+    await expect(menu.locator('a[href="/admin"]')).toBeVisible();
+    await expect(menu.locator('a[href="/reports"]')).toHaveCount(0);
   });
 
   test("teammates can be invited by email", async ({ page }) => {
-    await page.goto(`/app/${TEST_BRAND_ID}/settings/members`);
+    await page.goto(`${organizationUrl()}/settings/members`);
 
     await expect(page.getByRole("heading", { name: "Team" })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByLabel("Email")).toBeVisible();
@@ -133,8 +140,17 @@ test.describe("Cloud features", () => {
   });
 
   test("brands can be created from the UI", async ({ page }) => {
-    await page.goto("/app/new");
-    await expect(page.getByLabel("Brand name")).toBeVisible({ timeout: 30_000 });
+    await page.goto(`${organizationUrl()}/new`);
+    await expect(page.getByLabel("Brand Name")).toBeVisible({ timeout: 30_000 });
     await expect(page.getByLabel("Website")).toBeVisible();
+  });
+
+  test("another organization can be created", async ({ page }) => {
+    await page.goto("/app");
+    await expect(page.getByRole("link", { name: /new organization/i })).toBeVisible({ timeout: 30_000 });
+
+    await page.goto("/app/new");
+    await expect(page.getByLabel("Organization Name")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: "Create organization" })).toBeVisible();
   });
 });

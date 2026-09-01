@@ -10,6 +10,7 @@
  */
 import { timingSafeEqual } from "node:crypto";
 import type { FeaturesConfig } from "@workspace/config/types";
+import { READ_ONLY_ERROR, READ_ONLY_MESSAGE } from "@/lib/read-only-errors";
 
 // ============================================================================
 // Deployment Request Policy
@@ -93,8 +94,8 @@ export function evaluateDeploymentPolicy(
 			return {
 				action: "block",
 				status: 403,
-				error: "Demo Mode",
-				message: "Write operations are disabled in demo mode",
+				error: READ_ONLY_ERROR,
+				message: READ_ONLY_MESSAGE,
 			};
 		}
 	}
@@ -193,10 +194,6 @@ export function validateApiKeyFromRequest(request: Request): boolean {
 }
 
 // ============================================================================
-// Signup Allowlist
-// ============================================================================
-
-// ============================================================================
 // Auth Function-Level Policies
 // ============================================================================
 
@@ -209,32 +206,6 @@ export function evaluateRequireAdmin(isAdmin: boolean): "allow" | "deny" {
 }
 
 /**
- * Which org a newly created brand attaches to, in pure form.
- *
- * An explicit choice must be one the caller belongs to. Without one, a single
- * membership is unambiguous and anything more is not — the caller is asked
- * rather than picked for, because the answer decides who can see the brand and
- * which org is billed for it. Never falls back to an arbitrary membership.
- */
-export type BrandOrgChoice =
-	| { ok: true; organizationId: string }
-	| { ok: false; reason: "no-organization" | "forbidden" | "ambiguous" };
-
-export function resolveBrandOrganization(
-	memberOrgIds: readonly string[],
-	requestedOrgId: string | undefined,
-): BrandOrgChoice {
-	if (memberOrgIds.length === 0) return { ok: false, reason: "no-organization" };
-	if (requestedOrgId) {
-		return memberOrgIds.includes(requestedOrgId)
-			? { ok: true, organizationId: requestedOrgId }
-			: { ok: false, reason: "forbidden" };
-	}
-	if (memberOrgIds.length === 1) return { ok: true, organizationId: memberOrgIds[0] };
-	return { ok: false, reason: "ambiguous" };
-}
-
-/**
  * Evaluate read-only mode enforcement.
  * Used by `readOnlyMiddleware` for server functions.
  */
@@ -244,9 +215,9 @@ export function evaluateReadOnly(readOnly: boolean): "allow" | "deny" {
 
 /**
  * Evaluate whether the deployment allows the user to create brands from the UI.
- * Used by the create-brand server function. Local mode is the only mode that
- * allows it — whitelabel brands are provisioned through the admin API, demo is
- * read-only.
+ * Used by the create-brand server function. True in local and cloud, which sells
+ * brands by the plan — whitelabel brands are provisioned through the admin API,
+ * demo is read-only.
  */
 export function evaluateRequireCanCreateBrands(canCreateBrands: boolean): "allow" | "deny" {
 	return canCreateBrands ? "allow" : "deny";
@@ -274,12 +245,4 @@ export function evaluateAuthedRouteGuard(session: unknown | null): RouteGuardRes
 export function evaluateAdminRouteGuard(isAdmin: boolean): RouteGuardResult {
 	if (!isAdmin) return "not-found";
 	return "allow";
-}
-
-/**
- * Evaluate the `/app/$brand` layout guard.
- * Mirrors the `loader` in `_authed/app/$brand.tsx`.
- */
-export function evaluateBrandRouteGuard(hasAccess: boolean): RouteGuardResult {
-	return hasAccess ? "allow" : "not-found";
 }
