@@ -24,7 +24,7 @@ Preflight 2026-09-01: main==origin clean; CI 4/4 success on a8747c20; production
 | GATE-RC-1 | Preflight + plan | **PASS** 2026-09-01 |
 | GATE-RC-2 | Candidate images built + isolated stack on restored prod copy, migrations proven | **PASS** 2026-09-01 |
 | GATE-RC-3 | Acceptance + resilience + rollback rehearsal green | **PASS** 2026-09-01 |
-| GATE-RC-4 | PR checks green; user merge approval (deploy still NOT authorized) | pending |
+| GATE-RC-4 | PR checks green; user merge approval (deploy still NOT authorized) | **PASS** — PR #6 squash-merged with user approval; main SHA 9b49c56c04882d1024634fb466114c833bf440e3; push-to-main CI 4/4 workflows / 5/5 checks success on that SHA with only [notice] Playwright annotations (0 flaky/failure; local 80 passed / 2 skipped); production untouched on g34057521 (snapshot: same StartedAt 2026-08-31T19:39:11Z, HTTP 200, HEALTHY) |
 
 ## Candidate manifest
 
