@@ -89,3 +89,15 @@ RC stack + RC database only; exactly one enabled prompt; queue empty at start. O
 | Actual cost | **$0.0050** (≤ $0.02 budget) |
 
 Key hygiene: key entered by the user directly into `%USERPROFILE%\.elmo-rc030\.env`; after the canary the worker container was stopped AND removed (no key in any container config), the placeholder line was restored, and scans show 0 key patterns in the RC `.env` and worker logs (value never read or printed). RC containers stopped again; production untouched throughout.
+
+## Cutover execution record (2026-09-01, user-authorized)
+
+Pre-checks at 20:03:36Z all green (active jobs 0, nothing due ≤2h, backup SHA-256 MATCH, config backup present, 3 RC image IDs == manifest, prod 200). Started immediately after the 20:05:05Z watchdog tick (0x0). GO 20:05:59Z → compose up done 20:06:10Z (**downtime ≈ 11 s**).
+
+- Retag rc1→ga8747c20 (3 images); gen-prod-env preserved all values ("key preserved"); `docker compose up -d --no-build` exit 0.
+- db-migrate exit 0, 0 errors; drizzle journal 16→18 (exactly 0016+0017). PostgreSQL container/volume NOT recreated (StartedAt unchanged, Up 25h).
+- web/worker on `ga8747c20`; HTTP 200; health-elmo.ps1 HEALTHY exit 0.
+- Data: counts 1/1/27/54/161/54 unchanged; `brands.slug` NULL with id-fallback; old citations index dropped, new present.
+- Config: all 7 protected values hash-equal PRESERVED vs config backup. No unplanned worker cycle (runs stayed 54); 0 errors/secret patterns in web+worker logs; Scheduled Tasks untouched; post-deploy watchdog tick 22:10:10 local = 0x0.
+- Rollback NOT needed; `g34057521`, RC images, backups, dump and prodlike volume all retained (no prune).
+- **User visual acceptance 2026-09-01: login, org/brand dashboard, Prompts, Citations, Analytics, Settings — «всё на месте».**
