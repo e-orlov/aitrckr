@@ -74,3 +74,18 @@ Window: any time before ~18:30Z (next cycle is maintenance-driven tomorrow eveni
 ## Optional live-provider canary (RC stack, pre-cutover)
 
 Purpose: one real `openai/gpt-5.6-luna:online` call through the RC worker against the RC database only, proving v0.3.0's provider path end-to-end before production runs it. Max expected cost: **≤ $0.02** (observed $0.005–0.012/run). Key handling: the user pastes the key manually into `%USERPROFILE%\.elmo-rc030\.env` (replacing the placeholder; file outside Git, never echoed); after the canary the line is reverted to the placeholder. Requires separate user authorization; skippable — CI/stub coverage plus Phase 1 live evidence may be deemed sufficient since the provider-call code path in v0.3.0 is unchanged (no diff in packages/lib providers beyond citation-title bounding).
+
+## Live-provider canary result (user-authorized, 2026-09-01T19:59:44Z)
+
+RC stack + RC database only; exactly one enabled prompt; queue empty at start. Outcome: **PASS** —
+
+| Check | Result |
+|---|---|
+| Provider calls | exactly 1 (`usage_events` prompt_run count = 1) |
+| New prompt_run | 1: provider `openrouter`, model `chatgpt`, version `openai/gpt-5.6-luna`, `web_search_enabled=true` |
+| Response | non-empty (raw_output 7,908 chars; content not recorded here) |
+| Citations | 2 new; titles present, max length 52 (v0.3.0 title bounding in effect), none empty |
+| Worker errors | 0; run completed 1/1, next run rescheduled +24h |
+| Actual cost | **$0.0050** (≤ $0.02 budget) |
+
+Key hygiene: key entered by the user directly into `%USERPROFILE%\.elmo-rc030\.env`; after the canary the worker container was stopped AND removed (no key in any container config), the placeholder line was restored, and scans show 0 key patterns in the RC `.env` and worker logs (value never read or printed). RC containers stopped again; production untouched throughout.
