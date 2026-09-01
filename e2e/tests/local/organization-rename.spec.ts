@@ -12,8 +12,12 @@ test.describe("Organization rename", () => {
     const save = page.getByRole("button", { name: "Save", exact: true });
     await expect(save).toBeDisabled();
 
-    await slugField.fill(`${TEST_ORG_SLUG}-elsewhere`);
-    await expect(save).toBeEnabled();
+    // A fill that lands before hydration never reaches React state, so re-drive
+    // the edit until the form actually reacts (save enables) instead of typing once.
+    await expect(async () => {
+      await slugField.fill(`${TEST_ORG_SLUG}-elsewhere`);
+      await expect(save).toBeEnabled({ timeout: 2_000 });
+    }).toPass({ timeout: 30_000 });
   });
 
   test("a name padded with spaces can still be saved, and settles trimmed", async ({ page }) => {
@@ -48,13 +52,19 @@ test.describe("Brand rename", () => {
   const moved = `${RENAMEABLE_BRAND_SLUG}-moved`;
   const settingsAt = (slug: string) => `${brandUrl(slug)}/settings/brand`;
 
+  // Restore the fixture from WHICHEVER slug it is currently reachable at. The
+  // id-based URL resolves regardless of the slug value, so a mid-test failure
+  // can never strand the fixture where later runs (or reruns) miss it.
   test.afterEach(async ({ page }) => {
-    await page.goto(settingsAt(moved));
+    await page.goto(`${brandUrl(RENAMEABLE_BRAND_ID)}/settings/brand`);
     const field = page.getByLabel("Brand Slug", { exact: true });
-    if (!(await field.isVisible().catch(() => false))) return;
-    await field.fill(RENAMEABLE_BRAND_SLUG);
-    await page.getByRole("button", { name: "Save Changes" }).click();
-    await page.waitForURL(new RegExp(`${settingsAt(RENAMEABLE_BRAND_SLUG)}$`), { timeout: 30_000 });
+    await expect(field).toBeVisible({ timeout: 30_000 });
+    if ((await field.inputValue()) === RENAMEABLE_BRAND_SLUG) return;
+    await expect(async () => {
+      await field.fill(RENAMEABLE_BRAND_SLUG);
+      await page.getByRole("button", { name: "Save Changes" }).click();
+      await page.waitForURL(new RegExp(`${settingsAt(RENAMEABLE_BRAND_SLUG)}$`), { timeout: 5_000 });
+    }).toPass({ timeout: 30_000 });
   });
 
   test("moving a brand's slug moves the page, and the new address resolves", async ({ page }) => {
@@ -63,10 +73,13 @@ test.describe("Brand rename", () => {
     const slugField = page.getByLabel("Brand Slug", { exact: true });
     await expect(slugField).toHaveValue(RENAMEABLE_BRAND_SLUG, { timeout: 30_000 });
 
-    await slugField.fill(moved);
-    await page.getByRole("button", { name: "Save Changes" }).click();
-
-    await page.waitForURL(new RegExp(`${settingsAt(moved)}$`), { timeout: 30_000 });
+    // Re-drive the edit until the app actually saves and redirects: a fill or
+    // click that lands before hydration is otherwise silently lost.
+    await expect(async () => {
+      await slugField.fill(moved);
+      await page.getByRole("button", { name: "Save Changes" }).click();
+      await page.waitForURL(new RegExp(`${settingsAt(moved)}$`), { timeout: 5_000 });
+    }).toPass({ timeout: 30_000 });
     await expect(page.getByLabel("Brand Slug", { exact: true })).toHaveValue(moved);
 
     await page.goto(brandUrl(RENAMEABLE_BRAND_ID));
