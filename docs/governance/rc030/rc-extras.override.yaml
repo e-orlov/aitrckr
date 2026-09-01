@@ -1,0 +1,13 @@
+# RC prodlike stack extras: isolate from production and forbid paid providers.
+# Layered after the generated elmo.yaml and prod-env.override.yaml.
+services:
+  web:
+    ports: !override
+      - "127.0.0.1:1516:3000"
+    environment:
+      APP_URL: http://localhost:1516
+      VITE_APP_URL: http://localhost:1516
+  worker:
+    environment:
+      SCRAPE_TARGETS: stub:stub
+      ONBOARDING_LLM_TARGET: stub:stub
