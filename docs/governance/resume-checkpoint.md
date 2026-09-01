@@ -8,6 +8,5 @@ Updated 2026-09-01T06:00Z. A new session resumes from the Phase 1.1 master promp
 - GitHub mutations applied so far: none.
 - Tag/release/archive: none yet.
 - Production before-snapshot at `%USERPROFILE%\.elmo\phase11-evidence\prod-before.txt` (2026-09-01T05:52:59Z, healthy, HTTP 200). Production is READ-ONLY this phase.
-- Next action: Stage B — compute image archive size, locate OneDrive root and free space, then user checkpoint presenting: tag `baseline/phase1-production-2026-08-31` → ff23fda6, release (not latest), archive size/destination, list of GitHub settings/workflows to change later, rollback.
-- Rollback needed so far: none.
-- Blockers: none.
+- Progress: GATE-BF-L1/F1/C1 PASS; tag+release published (immutable); archives+bundle in OneDrive with SHA-256; 5 workflows disabled_manually; 4 workflows adapted (ubuntu-24.04, SHA pins, frozen lockfile, no secrets); Actions settings: selected allowlist + sha_pinning_required. GitHub mutations so far: immutable-releases ON, 5 workflow disables, actions permissions/selected-actions. Rollback: re-enable workflows, allowed_actions=all, sha_pinning_required=false (immutability/tag/release intentionally permanent).
+- Next action: push branch, open PR, wait for GATE-BF-C2 (green checks), then Stage F rulesets (main + baseline/** tags) and repo merge settings (rebase OFF, auto-delete ON), Stage G merge with user permission.
