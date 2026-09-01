@@ -7,7 +7,7 @@
 | GATE-BF-C1 | CI design safe | **PASS** | 2026-09-01T07:05Z | branch, pre-PR | see entry |
 | GATE-BF-C2 | CI operational | **PASS** | 2026-09-01T06:45Z | 60d08af0 | see entry |
 | GATE-BF-G1 | Governance enforced | **PASS** | 2026-09-01T06:52Z | 60d08af0 | see entry |
-| GATE-BF-R1 | Phase accepted | not evaluated | — | — | — |
+| GATE-BF-R1 | Phase accepted | **PASS** | 2026-09-01T09:20Z | b38f0fc6 | see entry |
 
 ## GATE-BF-L1 entry — 2026-09-01T05:58Z
 
@@ -63,3 +63,20 @@
 - GATE-BF-C2 re-confirmed on `f70711e2`: all 5 required checks re-ran green on GitHub-hosted runners (Build 2m44s, E2E 18m13s, Scheduling 2m20s, smoke 1m11s, License 54s); PR mergeable=MERGEABLE, state=CLEAN under the active ruleset. The same re-confirmation is expected on the correction commit's HEAD before merge.
 - Latest-flag deviation on the baseline release is **explicitly user-accepted (2026-09-01)**; the release is not to be deleted or recreated (REQ-FRZ-002).
 - GATE-BF-R1 is NOT declared. Closure plan (user-directed): after squash merge of PR #2 + green push-to-main CI + final read-only production snapshot, a short `chore/phase1.1-closeout` PR closes REQ-SCOPE-001 and records GATE-BF-R1; direct push to main and ruleset disabling are forbidden; the closeout PR is not merged without separate user permission.
+
+## GATE-BF-R1 entry — 2026-09-01T09:20Z
+
+- Merge: PR #2 squash-merged with explicit user permission at HEAD `928ddf3776997e92f5ad8a901cc99cb286de1845`; squash commit on `main`: **`b38f0fc68da2c26db2e62500688665f34d5c9b30`** (single parent `ff23fda6` — squash confirmed); head branch auto-deleted; exactly the 12 expected files.
+- Push-to-main CI (event=push, branch=main, head_sha=b38f0fc6, all on GitHub-hosted ubuntu-24.04, all success): Build run 33489462447; E2E Tests run 33489462462 (jobs: E2E Integration Tests 08:54:45→09:03:47Z, Scheduling Policy Verification); License Check run 33489462495; Deployment Smoke Tests run 33489462391. URLs: https://github.com/e-orlov/aitrckr/actions/runs/33489462447 , https://github.com/e-orlov/aitrckr/actions/runs/33489462462 , https://github.com/e-orlov/aitrckr/actions/runs/33489462495 , https://github.com/e-orlov/aitrckr/actions/runs/33489462391 .
+- Production comparison: snapshots before (05:52:59Z) / post-freeze (06:35Z) / post-merge (09:04:52Z) identical — container IDs `6740fbd1/7237ef2d/019b68e1`, image IDs g34057521 + pg `d3e1620b`, StartedAt 2026-08-31T19:39:11Z, volume `elmo_postgres_data`, task definitions unchanged, HTTP 200, `health-elmo.ps1` HEALTHY exit 0. REQ-SCOPE-001 **PASS**.
+- Governance re-verified read-only: rulesets 21989411 (main: PR-only, 5 required checks, deletion+non-FF blocked) and 21989413 (`baseline/**`: deletion/update/non-FF blocked) active; rebase OFF, squash+merge ON, auto-delete ON; release published+immutable with `SHA256SUMS.txt`; tag still → `ff23fda6`. Latest-flag deviation remains user-accepted documentation-only.
+- Workflow states, final and **user-accepted 2026-09-01**: cla-check/claude/publish `disabled_manually`; daily-blog-draft/test-providers `disabled_fork` (GitHub's own equivalent-disabled state for scheduled workflows in forks); all five inert; both scheduled workflows have 0 runs ever; no state re-mutation performed.
+- Explicitly NOT done: `sync/upstream-v0.3.0` not started (v0.3.0 not an ancestor of main); no production deploy/build/migration; no ruleset/setting changes in this stage.
+- Result: **PASS**. Recorded via docs-only `chore/phase1.1-closeout` PR (merge requires separate user permission).
+
+## CI flake record — closeout PR run 33493195255 (HEAD 098e820597306ea29b6943794c80831028e885a0)
+
+- Attempt 1: job "Scheduling Policy Verification" = FAILURE at step "Cloud mode: plan policy + billing lifecycle"; failing assertion `e2e/scheduling/verify-scheduling.ts:147`: `assert(revived === 6, "resubscribe: maintenance revives the chain and due targets run (got ${revived})")` — expected `6`, actual `5`. The sibling job "E2E Integration Tests" in the same run passed on attempt 1; Build/smoke/License passed attempt 1.
+- Why this is a timing race, not a functional defect: the preceding gate `waitFor(runCount > 3)` (line 145) unblocks as soon as the FIRST of the three revived provider-target runs (chatgpt, claude:web, perplexity) is committed, then the count is read immediately and asserted `=== 6`. The three runs land as independent asynchronous inserts by the worker; `got 5` means two of three had committed at the read instant and the third was still in flight — i.e. revival demonstrably worked (count was rising past the canceled-state plateau of 3) and only the fixed-instant read raced the last insert. The diff under test is three markdown files that no test consumes; the identical code passed this job 8 times earlier the same day (PR #2 ×3, push-to-main, PR #3 attempt for b29d2f42) and passed attempt 2 on the very same SHA/ref.
+- Attempt 2 (diagnosed rerun of failed jobs only, not blind): SUCCESS in 2m18s on the same SHA `098e8205…` — final state 5/5 green, PR mergeable=CLEAN.
+- Follow-up: known non-blocking CI reliability item — strengthen the wait condition (e.g. `waitFor(runCount === 6)` with the existing timeout) in a separate PR to be considered BEFORE starting `sync/upstream-v0.3.0`. Application code and workflows intentionally untouched now.
