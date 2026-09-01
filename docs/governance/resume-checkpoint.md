@@ -30,7 +30,7 @@ OneDrive `<OneDrive>\ELMO-Baselines\phase1-production-2026-08-31\`: image tar (4
 
 ## Production (READ-ONLY this phase)
 
-Three read-only snapshots identical: before (2026-09-01T05:52:59Z), post-freeze (06:35Z), post-merge (09:04:52Z) — containers `6740fbd1/7237ef2d/019b68e1`, StartedAt 2026-08-31T19:39:11Z, images `g34057521` + pg `d3e1620b`, volume `elmo_postgres_data`, 3 tasks Ready, HTTP 200; `health-elmo.ps1` → HEALTHY, exit 0 (post-merge). Evidence: `%USERPROFILE%.elmophase11-evidenceprod-{before,after-freeze,after-merge}.txt`.
+Three read-only snapshots identical: before (2026-09-01T05:52:59Z), post-freeze (06:35Z), post-merge (09:04:52Z) — containers `6740fbd1/7237ef2d/019b68e1`, StartedAt 2026-08-31T19:39:11Z, images `g34057521` + pg `d3e1620b`, volume `elmo_postgres_data`, 3 tasks Ready, HTTP 200; `health-elmo.ps1` → HEALTHY, exit 0 (post-merge). Evidence: `%USERPROFILE%\.elmo\phase11-evidence\prod-{before,after-freeze,after-merge}.txt`.
 
 ## Next exact actions
 
@@ -42,5 +42,7 @@ Three read-only snapshots identical: before (2026-09-01T05:52:59Z), post-freeze 
 6. Final read-only health check of production.
 7. Only then emit the final report (BASELINE FROZEN / GOVERNANCE READY). No further closeout PR is needed.
 8. sync/upstream-v0.3.0 only on a separate explicit user command; no production deploy.
+
+Known non-blocking follow-up: CI flake in Scheduling Policy Verification (run 33493195255 attempt 1, see gate-record §CI flake) — check-after-first-signal race in e2e/scheduling/verify-scheduling.ts:145-147; to be addressed in a separate PR BEFORE starting sync/upstream-v0.3.0.
 
 Blockers: none. Responsible party for merge decisions: user.
