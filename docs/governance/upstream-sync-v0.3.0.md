@@ -57,8 +57,8 @@ Totals: 255 files, +10249/−3804. Dirs: apps/web 152, packages/lib 23, e2e 14, 
 | Gate | Meaning | Status |
 |---|---|---|
 | GATE-US-1 | Preflight + inventory + risk review complete | **PASS** 2026-09-01 (this document; preflight: main==origin clean, 4/4 main CI green, baseline artifacts present, prod HEALTHY Up 16h, tag re-verified) |
-| GATE-US-2 | Merge done, conflicts resolved consciously, local regression green | pending |
-| GATE-US-3 | Isolated migration/feature verification green | pending |
+| GATE-US-2 | Merge done, conflicts resolved consciously, local regression green | **PASS** — merge f180800e (parents: branch, 36f4f6ad), ZERO conflicts; fork surfaces byte-identical (workflows diff 0); frozen install OK, lint 0, fresh units 944 green (lib 526/web 347/cloud 43/cli 28), build green, clean tree |
+| GATE-US-3 | Isolated migration/feature verification green | **PASS with note** — upgrade path on OLD seeded test DB: 0016/0017 applied over data, counts identical (3/7/9/15), slug NULL×3 with id-fallback, index swap done, re-apply idempotent; clean-DB stack from merge commit: local Playwright 78 passed / 2 failed / 2 skipped, Bruno full suite exit 0, worker stub phase 1/1. The 2 failures are upstream specs (account-menu reports link; brand-slug rename) failing only on the local Windows runner — consistent locally, green in upstream release CI; our fork phase1 specs adapted to workspace URLs (RS-6) and green. Authoritative arbiter: GitHub-hosted PR checks (GATE-US-4) |
 | GATE-US-4 | PR checks green; user merge approval | pending |
 
 Production deploy/rollback plan: separate phase after this PR merges (build pinned images from the new commit → prodlike acceptance → user-approved cutover; rollback = previous pinned tags per production-manifest.md; DB rollback for 0016/0017 documented above).
