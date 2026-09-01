@@ -56,3 +56,10 @@
 - Break-glass documented: owner disables ruleset in Settings with recorded reason (branching-and-release-policy.md).
 - Rollback: rulesets 21989411/21989413 deletable via API; merge settings revertible via PATCH.
 - Result: **PASS**.
+
+## Impact analysis — docs-only commits after PR HEAD 60d08af0
+
+- Commits `f70711e2` (gate evidence) and the present correction commit touch only `docs/governance/**` — no workflow, script, config or code surface of any passed gate. GATE-BF-C1 (CI design) and GATE-BF-G1 (governance settings) surfaces are unchanged; no reopening required.
+- GATE-BF-C2 re-confirmed on `f70711e2`: all 5 required checks re-ran green on GitHub-hosted runners (Build 2m44s, E2E 18m13s, Scheduling 2m20s, smoke 1m11s, License 54s); PR mergeable=MERGEABLE, state=CLEAN under the active ruleset. The same re-confirmation is expected on the correction commit's HEAD before merge.
+- Latest-flag deviation on the baseline release is **explicitly user-accepted (2026-09-01)**; the release is not to be deleted or recreated (REQ-FRZ-002).
+- GATE-BF-R1 is NOT declared. Closure plan (user-directed): after squash merge of PR #2 + green push-to-main CI + final read-only production snapshot, a short `chore/phase1.1-closeout` PR closes REQ-SCOPE-001 and records GATE-BF-R1; direct push to main and ruleset disabling are forbidden; the closeout PR is not merged without separate user permission.
