@@ -131,6 +131,11 @@ export const Route = createFileRoute("/_authed/app/org/$org/brand/$brand")({
 function BrandLayout() {
 	const { brand } = Route.useLoaderData();
 	const organization = useOrganization();
+	// A route transition can re-render this layout before the next match's
+	// loader data is committed; building sidebar links from an undefined brand
+	// or organization throws (reading .slug) and trips the error boundary, so
+	// show the pending skeleton for that frame instead.
+	if (!brand || !organization) return <BrandLayoutSkeleton />;
 
 	return (
 		<AppShell sidebar={<AppSidebar scope="brand" brand={brand} organization={organization} />} header={<SiteHeader />}>

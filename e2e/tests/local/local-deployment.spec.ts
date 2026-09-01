@@ -7,6 +7,7 @@
  * operator create as many brands as they like.
  */
 import { expect, test } from "@playwright/test";
+import { openAccountMenu } from "../account-menu-helper";
 import { TEST_BRAND_ID, TEST_USER, brandUrl, organizationUrl } from "../../fixtures";
 import { userExists } from "../../session";
 
@@ -66,12 +67,7 @@ test.describe("Local features", () => {
       0,
     );
 
-    // A click that lands before hydration attaches the menu handler is lost, so
-    // re-drive the click until the menu actually opens instead of clicking once.
-    await expect(async () => {
-      await page.getByRole("button", { name: "Account and organizations" }).click();
-      await expect(page.getByRole("menu")).toBeVisible({ timeout: 2_000 });
-    }).toPass({ timeout: 30_000 });
+    await openAccountMenu(page);
     await expect(page.getByRole("menu").locator('a[href="/reports"]')).toBeVisible({ timeout: 30_000 });
 
     await page.goto(`${organizationUrl()}/settings`);

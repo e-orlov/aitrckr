@@ -10,6 +10,7 @@
  * and assert on everything around it.
  */
 import { expect, test } from "@playwright/test";
+import { openAccountMenu } from "../account-menu-helper";
 import { CLOUD_SIGNUP, TEST_BRAND_ID, TEST_USER, brandUrl, organizationUrl } from "../../fixtures";
 import { deleteUsers, userExists, verifyEmail } from "../../session";
 
@@ -122,7 +123,7 @@ test.describe("Cloud features", () => {
     ).toHaveCount(0);
 
     // The admin section is present (this user is an admin) but has no Reports entry.
-    await page.getByRole("button", { name: "Account and organizations" }).click();
+    await openAccountMenu(page);
     const menu = page.getByRole("menu");
     await expect(menu.locator('a[href="/admin"]')).toBeVisible();
     await expect(menu.locator('a[href="/reports"]')).toHaveCount(0);

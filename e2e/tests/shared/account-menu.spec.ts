@@ -1,11 +1,12 @@
 import { expect, test } from "@playwright/test";
+import { openAccountMenu } from "../account-menu-helper";
 import { TEST_BRAND_NAME, TEST_ORGANIZATION_NAME, brandUrl, organizationUrl } from "../../fixtures";
 
 test.describe("Account menu", () => {
   test("holds the organization, its brands, and its settings", async ({ page }) => {
     await page.goto(brandUrl());
 
-    await page.getByRole("button", { name: "Account and organizations" }).click();
+    await openAccountMenu(page);
 
     await expect(page.getByRole("menuitem", { name: TEST_BRAND_NAME, exact: true })).toBeVisible({ timeout: 30_000 });
     await expect(

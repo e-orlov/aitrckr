@@ -39,6 +39,10 @@ test.describe("Citations Page", () => {
     await page.locator(`a[href="${BRAND_URL}/citations"][data-sidebar="menu-button"]`).click();
     await page.waitForURL(/\/citations/);
 
+    // The URL flips before the destination finishes rendering (the layout may
+    // still be on its transition skeleton), so wait for the page's own heading
+    // before reading the body.
+    await expect(page.getByRole("heading", { name: /citations/i })).toBeVisible({ timeout: 30_000 });
     const pageContent = await page.textContent("body");
     expect(pageContent).toContain("Citations");
   });
