@@ -18,7 +18,7 @@ Rewritten 2026-09-01 (closeout state).
 | Release immutability | `enabled=true` (PUT /immutable-releases) | intentionally permanent |
 | Tag `baseline/phase1-production-2026-08-31` | annotated, object `5cdecb96` → `ff23fda6`, pushed | keep (frozen baseline) |
 | Release for that tag | published, `prerelease=false`, `immutable=true`, asset `SHA256SUMS.txt`; user-accepted deviation: sole stable release shows as Latest despite `make_latest=false`; do NOT delete/recreate | keep |
-| 5 workflows disabled | cla-check, claude, daily-blog-draft, publish, test-providers = `disabled_manually` | API re-enable |
+| 5 workflows disabled | cla-check, claude, publish = `disabled_manually`; daily-blog-draft, test-providers = `disabled_fork` (GitHub equivalent-disabled for fork schedules); all five inert, scheduled workflows have 0 runs | API re-enable |
 | Actions permissions | `allowed_actions=selected` (GitHub-owned + `pnpm/action-setup@*`), `sha_pinning_required=true` | PATCH back |
 | Branch ruleset `main-protection` | id 21989411, active: PR-only (0 approvals, conversation resolution, squash+merge), 5 required checks strict, deletion+force-push blocked | delete ruleset |
 | Tag ruleset `baseline-tags-protection` | id 21989413, active: `baseline/**` deletion/update/non-FF blocked | delete ruleset |
@@ -30,13 +30,17 @@ OneDrive `<OneDrive>\ELMO-Baselines\phase1-production-2026-08-31\`: image tar (4
 
 ## Production (READ-ONLY this phase)
 
-Snapshots identical at 05:52:59Z and post-freeze: containers `6740fbd1/7237ef2d/019b68e1`, StartedAt 2026-08-31T19:39:11Z, images `g34057521` + pg `d3e1620b`, 3 tasks Ready, HTTP 200. Evidence: `%USERPROFILE%\.elmo\phase11-evidence\prod-{before,after-freeze}.txt`.
+Three read-only snapshots identical: before (2026-09-01T05:52:59Z), post-freeze (06:35Z), post-merge (09:04:52Z) — containers `6740fbd1/7237ef2d/019b68e1`, StartedAt 2026-08-31T19:39:11Z, images `g34057521` + pg `d3e1620b`, volume `elmo_postgres_data`, 3 tasks Ready, HTTP 200; `health-elmo.ps1` → HEALTHY, exit 0 (post-merge). Evidence: `%USERPROFILE%.elmophase11-evidenceprod-{before,after-freeze,after-merge}.txt`.
 
 ## Next exact actions
 
 1. Wait 5/5 green checks on the closeout PR HEAD; verify mergeable=CLEAN.
-2. STOP: ask the user for merge permission for the closeout PR (squash).
-3. After merge: fast-forward local main; final report starts with BASELINE FROZEN / GOVERNANCE READY.
-4. sync/upstream-v0.3.0 only on a separate explicit user command.
+2. STOP: ask the user for merge permission for PR #3.
+3. On approval: Squash and merge PR #3; determine the new squash SHA on main.
+4. Wait for 5/5 push-to-main CI on exactly that SHA.
+5. Safe fast-forward local main; verify head branch deleted and clean status.
+6. Final read-only health check of production.
+7. Only then emit the final report (BASELINE FROZEN / GOVERNANCE READY). No further closeout PR is needed.
+8. sync/upstream-v0.3.0 only on a separate explicit user command; no production deploy.
 
 Blockers: none. Responsible party for merge decisions: user.
