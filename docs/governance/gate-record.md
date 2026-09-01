@@ -5,8 +5,8 @@
 | GATE-BF-L1 | Baseline lock | **PASS** | 2026-09-01T05:58Z | ff23fda6 | see entry |
 | GATE-BF-F1 | Freeze complete | **PASS** | 2026-09-01T06:35Z | ff23fda6 | see entry |
 | GATE-BF-C1 | CI design safe | **PASS** | 2026-09-01T07:05Z | branch, pre-PR | see entry |
-| GATE-BF-C2 | CI operational | not evaluated | — | — | — |
-| GATE-BF-G1 | Governance enforced | not evaluated | — | — | — |
+| GATE-BF-C2 | CI operational | **PASS** | 2026-09-01T06:45Z | 60d08af0 | see entry |
+| GATE-BF-G1 | Governance enforced | **PASS** | 2026-09-01T06:52Z | 60d08af0 | see entry |
 | GATE-BF-R1 | Phase accepted | not evaluated | — | — | — |
 
 ## GATE-BF-L1 entry — 2026-09-01T05:58Z
@@ -40,3 +40,19 @@
 - Actions repository settings (before → after, API-verified): allowed_actions all → **selected** (GitHub-owned + `pnpm/action-setup@*`, verified_allowed=false); **sha_pinning_required=true**; default workflow token permissions read (unchanged); can_approve_pull_request_reviews=false (unchanged); 0 self-hosted runners; 0 secrets; 0 environments.
 - Isolation: no deployment jobs, no VM credentials/endpoints anywhere in enabled workflows (grep for RDP/SSH/tunnel/host patterns = 0).
 - Result: **PASS**. Operational proof (GATE-BF-C2) deferred to the GitHub-hosted PR run.
+
+## GATE-BF-C2 entry — 2026-09-01T06:45Z
+
+- PR #2 HEAD `60d08af0`, event pull_request, all 5 checks green on GitHub-hosted `ubuntu-24.04` (job labels API-verified): Build 2m40s (lint → check-types → unit → test:scripts → build + clean-tree → storybook), E2E Integration Tests 8m58s (stub worker, 5 mode phases, Bruno, worker job test, teardown), Scheduling Policy Verification 2m31s, smoke 1m19s, Dependency License Audit 50s.
+- No blind reruns needed (first attempt green). No secrets available to any run (repo has none). Runs: 33477198677, 33477198720, 33477198724, 33477198736.
+- Result: **PASS**.
+
+## GATE-BF-G1 entry — 2026-09-01T06:52Z
+
+- Branch ruleset `main-protection` (id 21989411, active): pull_request (0 approvals, conversation resolution, merge methods squash+merge), required status checks ×5 (strict up-to-date), deletion blocked, non_fast_forward blocked; no linear history, no merge queue, no deployment/signing requirement, no bypass actors.
+- Tag ruleset `baseline-tags-protection` (id 21989413, active): `refs/tags/baseline/**` — deletion, update, non_fast_forward blocked; `v*` deliberately untouched.
+- Effective-rules readback: `GET /rules/branches/main` returns all four rule types; non-destructive validation: PR #2 `mergeable=MERGEABLE, mergeStateStatus=CLEAN` under the new ruleset with green checks (no destructive push test by design).
+- Repo settings PATCH readback: rebase merge OFF, squash ON, merge commit ON, auto-delete head branches ON. Dependabot inherited (weekly npm+actions): no bypass, no auto-merge, same required checks (policy doc).
+- Break-glass documented: owner disables ruleset in Settings with recorded reason (branching-and-release-policy.md).
+- Rollback: rulesets 21989411/21989413 deletable via API; merge settings revertible via PATCH.
+- Result: **PASS**.
