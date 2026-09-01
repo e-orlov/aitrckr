@@ -4,7 +4,7 @@
 |---|---|---|---|---|---|
 | GATE-BF-L1 | Baseline lock | **PASS** | 2026-09-01T05:58Z | ff23fda6 | see entry |
 | GATE-BF-F1 | Freeze complete | **PASS** | 2026-09-01T06:35Z | ff23fda6 | see entry |
-| GATE-BF-C1 | CI design safe | not evaluated | — | — | — |
+| GATE-BF-C1 | CI design safe | **PASS** | 2026-09-01T07:05Z | branch, pre-PR | see entry |
 | GATE-BF-C2 | CI operational | not evaluated | — | — | — |
 | GATE-BF-G1 | Governance enforced | not evaluated | — | — | — |
 | GATE-BF-R1 | Phase accepted | not evaluated | — | — | — |
@@ -31,3 +31,12 @@
 - Secret scan: image env names stock-only, history 0 hits, `--network none` file scan clean, `.dockerignore` exclusions confirmed; no DB volume/data in any artifact.
 - Post-freeze production snapshot: identical container IDs and StartedAt (only the "Up N hours" text advanced), HTTP 200 — production untouched.
 - Result: **PASS** (REQ-FRZ-001…005 closed; FRZ-001 tag-ruleset protection completes at Stage F).
+
+## GATE-BF-C1 entry — 2026-09-01T07:05Z
+
+- Inapplicable workflows disabled via official workflow state (API `PUT …/disable`): cla-check.yaml, claude.yml, daily-blog-draft.yaml, publish.yaml, test-providers.yaml — all `disabled_manually`, re-verified by API; total runs in repo history still 0 (no scheduled/secret workflow ever started).
+- Adapted workflows (minimal diff on upstream files, no duplicate orchestration): build.yaml, e2e.yaml, mode-compat.yaml, license-check.yaml — runners `blacksmith-*` → `ubuntu-24.04`; every `uses:` pinned to a verified full-length commit SHA with release comment (docs/governance/action-pins.md); `nick-fields/retry` removed in favor of a shell retry loop; all installs `pnpm install --frozen-lockfile`; checkout `persist-credentials: false` everywhere; e2e log redaction (generated .env printed as key names only); e2e teardown `docker compose down -v` under `if: always()` (CI runner only); upstream `permissions: contents: read`, concurrency cancel-in-progress and timeouts retained.
+- Static checks: js-yaml parse OK for all 4 files; `secrets.*` grep = 0 in enabled workflows; no `pull_request_target`/`workflow_run`; no Blacksmith/self-hosted references; triggers = push/PR to main + workflow_dispatch only.
+- Actions repository settings (before → after, API-verified): allowed_actions all → **selected** (GitHub-owned + `pnpm/action-setup@*`, verified_allowed=false); **sha_pinning_required=true**; default workflow token permissions read (unchanged); can_approve_pull_request_reviews=false (unchanged); 0 self-hosted runners; 0 secrets; 0 environments.
+- Isolation: no deployment jobs, no VM credentials/endpoints anywhere in enabled workflows (grep for RDP/SSH/tunnel/host patterns = 0).
+- Result: **PASS**. Operational proof (GATE-BF-C2) deferred to the GitHub-hosted PR run.
