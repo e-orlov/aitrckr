@@ -45,7 +45,7 @@ concurrency:
 jobs:
   e2e:
     name: E2E Integration Tests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     env:
@@ -57,7 +57,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # NB: no free-disk-space step here — it predated the Blacksmith migration
       # and is unnecessary on these runners (publish.yaml builds the same
@@ -69,29 +71,32 @@ jobs:
       # straight into the daemon's image store.
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # Plain shell retry instead of a third-party retry action: one less
+      # external dependency to pin and audit.
       - name: Install Playwright browsers
-        uses: nick-fields/retry@v4
-        with:
-          timeout_minutes: 1
-          max_attempts: 3
-          command: pnpm -C apps/web exec playwright install chromium --with-deps
+        run: |
+          for i in 1 2 3; do
+            timeout 120 pnpm -C apps/web exec playwright install chromium --with-deps && break
+            if [ "$i" = 3 ]; then exit 1; fi
+            sleep 5
+          done
 
       - name: Build elmo CLI
         run: pnpm -C apps/cli build
@@ -112,10 +117,11 @@ jobs:
           SENTRY_DSN=https://examplePublicKey@o0.ingest.sentry.io/0
           PATCH
 
-      - name: Show generated config
+      # Key names only — even a synthetic generated .env stays out of CI logs.
+      - name: Show generated config (redacted)
         run: |
-          echo "=== .env ==="
-          cat e2e/.elmo/.env
+          echo "=== .env keys ==="
+          grep -oE '^[A-Z0-9_]+' e2e/.elmo/.env || true
           echo ""
           echo "=== elmo.yaml (services) ==="
           grep -E '^\s{2}\w' e2e/.elmo/elmo.yaml || true
@@ -224,7 +230,7 @@ jobs:
         run: docker compose logs web
 
       - name: Upload Playwright reports
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
           name: playwright-report
@@ -232,7 +238,7 @@ jobs:
           retention-days: 14
 
       - name: Upload test results
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
           name: test-results
@@ -245,6 +251,11 @@ jobs:
             e2e/test-results-worker/
           retention-days: 7
 
+      # CI-runner-only cleanup; the compose project lives and dies with the job.
+      - name: Tear down test stack
+        if: always()
+        run: docker compose down -v --remove-orphans || true
+
   # Scheduling-policy verification drives a real worker over a real database
   # with the no-network stub provider, in local mode (fixed run volume and
   # cadence enforcement) and in cloud mode (plan cadence/replication, Claude assignment,
@@ -253,7 +264,7 @@ jobs:
   # whitelabel deployments run.
   scheduling-policy:
     name: Scheduling Policy Verification
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     services:
@@ -279,19 +290,21 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Apply migrations
         run: pnpm -C packages/lib exec drizzle-kit migrate

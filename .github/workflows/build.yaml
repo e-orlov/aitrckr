@@ -30,18 +30,20 @@ concurrency:
 jobs:
   build:
     name: Build
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: pnpm
@@ -87,17 +89,20 @@ jobs:
       # build shouldn't pay for the install. The cache key matches e2e.yaml's
       # so both workflows share one entry.
       - name: Cache Playwright browsers
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # Plain shell retry instead of a third-party retry action: one less
+      # external dependency to pin and audit.
       - name: Install Playwright browsers
-        uses: nick-fields/retry@v4
-        with:
-          timeout_minutes: 1
-          max_attempts: 3
-          command: pnpm -C apps/web exec playwright install chromium --with-deps
+        run: |
+          for i in 1 2 3; do
+            timeout 120 pnpm -C apps/web exec playwright install chromium --with-deps && break
+            if [ "$i" = 3 ]; then exit 1; fi
+            sleep 5
+          done
 
       - name: Storybook tests
         run: pnpm -C apps/web test:storybook
