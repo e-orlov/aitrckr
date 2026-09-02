@@ -4,7 +4,20 @@ import { describe, expect, it, vi } from "vitest";
 import { categorizeDomain } from "../citations/domain-categories.server";
 import type { Provider } from "../providers/types";
 import { classifySourceHostname } from "./classifier";
-import { SOURCE_CLASSIFIER_VERSION, type SourceClassificationCategory } from "./types";
+import {
+	SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS,
+	SOURCE_CLASSIFIER_VERSION,
+	type SourceClassificationCategory,
+} from "./types";
+
+// F05-RC-SAFE-001 — the live harness cap is the customer-approved maximum of
+// six; every classifier call in this file goes through an injected fake, so no
+// test ever invokes the live provider.
+describe("live evaluation safety cap", () => {
+	it("caps live invocations at six", () => {
+		expect(SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS).toBe(6);
+	});
+});
 
 /**
  * The required quality-evaluation set (F05-FR-012) plus the two additional

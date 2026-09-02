@@ -70,6 +70,13 @@ export type SourceClassificationJobData = z.infer<typeof sourceClassificationJob
 
 export const SOURCE_CLASSIFICATION_QUEUE = "classify-source-domain";
 
+/**
+ * Hard cap on top-level classifier invocations per live-evaluation run — the
+ * customer-approved maximum (the six-hostname acceptance set). The live
+ * harness refuses larger input lists.
+ */
+export const SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS = 6;
+
 /** One active job per hostname + classifier version (pg-boss singletonKey). */
 export function sourceClassificationSingletonKey(hostname: string, classifierVersion: string): string {
 	return `source-classification:${hostname}:${classifierVersion}`;

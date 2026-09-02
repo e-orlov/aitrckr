@@ -34,11 +34,12 @@ import { classifySourceHostname } from "../src/source-classification/classifier"
 import { normalizeSourceHostname } from "../src/source-classification/hostname";
 import {
 	SOURCE_CLASSIFICATION_CATEGORIES,
+	SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS,
 	SOURCE_CLASSIFIER_VERSION,
 	type SourceClassificationCategory,
 } from "../src/source-classification/types";
 
-const MAX_LIVE_INVOCATIONS = 8;
+const MAX_LIVE_INVOCATIONS = SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS;
 
 function resolveHomePath(p: string): string {
 	if (p === "~") return homedir();
