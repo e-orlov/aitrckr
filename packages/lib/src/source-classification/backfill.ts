@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { categorizeDomain } from "../citations/domain-categories.server";
 import { normalizeSourceHostname } from "./hostname";
 import { SOURCE_CLASSIFIER_VERSION } from "./types";
@@ -32,6 +33,40 @@ export interface BackfillCursor {
 	key: string;
 	domain: string;
 	brandId: string;
+}
+
+/**
+ * Opaque resume-token codec for the CLI. Every `partial: true` run gets an
+ * actionable token — including a run stopped before any hostname settled,
+ * whose position is the scan start: that is encoded as an explicit start
+ * sentinel, never a literal "null". Legacy tokens (plain cursor JSON without
+ * the sentinel) keep decoding.
+ */
+export function encodeBackfillCursorToken(cursor: BackfillCursor | null): string {
+	const payload = cursor ?? { start: true };
+	return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+/**
+ * Decode a resume token: null means "scan from the beginning" (the start
+ * sentinel). Throws on anything that is not a token this codec produced.
+ */
+export function decodeBackfillCursorToken(token: string): BackfillCursor | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
+	} catch {
+		throw new Error("resume token is not valid — pass a nextCursor token printed by a previous run");
+	}
+	if (typeof parsed !== "object" || parsed === null) {
+		throw new Error("resume token is not valid — pass a nextCursor token printed by a previous run");
+	}
+	const record = parsed as Record<string, unknown>;
+	if (record.start === true) return null;
+	if (typeof record.key === "string" && typeof record.domain === "string" && typeof record.brandId === "string") {
+		return { key: record.key, domain: record.domain, brandId: record.brandId };
+	}
+	throw new Error("resume token is not valid — pass a nextCursor token printed by a previous run");
 }
 
 export interface BackfillCitationPageRow {

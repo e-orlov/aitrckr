@@ -43,6 +43,8 @@ import {
 	type BackfillBrandContext,
 	type BackfillCitationPage,
 	type BackfillCursor,
+	decodeBackfillCursorToken,
+	encodeBackfillCursorToken,
 	ensureSourceClassificationQueue,
 	runSourceClassificationBackfill,
 	SOURCE_CLASSIFICATION_QUEUE,
@@ -136,22 +138,10 @@ async function loadBrandContexts(): Promise<Map<string, BackfillBrandContext>> {
 	return brandContexts;
 }
 
-function encodeCursor(cursor: BackfillCursor): string {
-	return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-}
-
-function parseCursorToken(value: string | undefined): BackfillCursor | null {
-	if (!value) return null;
-	try {
-		const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-		if (typeof parsed?.key !== "string" || typeof parsed?.domain !== "string" || typeof parsed?.brandId !== "string") {
-			throw new Error("wrong shape");
-		}
-		return { key: parsed.key, domain: parsed.domain, brandId: parsed.brandId };
-	} catch {
-		throw new Error("--cursor must be a nextCursor token printed by a previous run");
-	}
-}
+// Token codec lives in @workspace/lib (encode/decodeBackfillCursorToken) so it
+// is testable without this script's DB/queue side effects. A partial run whose
+// nextCursor is null (stopped before any hostname settled) encodes as the
+// explicit start sentinel — never a literal "null" token.
 
 async function main(): Promise<void> {
 	const { values } = parseArgs({
@@ -206,13 +196,15 @@ async function main(): Promise<void> {
 			brandContexts,
 			batchSize,
 			maxPages,
-			cursor: parseCursorToken(values.cursor),
+			cursor: values.cursor === undefined ? null : decodeBackfillCursorToken(values.cursor),
 			enqueue,
 		});
 
 	if (values.enqueue) await boss.stop({ graceful: true, timeout: 10_000 });
 
-	const cursorToken = nextCursor ? encodeCursor(nextCursor) : null;
+	// Every partial run gets an actionable token, even when nothing settled yet
+	// (nextCursor null -> start sentinel). Completed scans report null.
+	const cursorToken = inventory.partial ? encodeBackfillCursorToken(nextCursor) : null;
 	console.log(
 		JSON.stringify(
 			{

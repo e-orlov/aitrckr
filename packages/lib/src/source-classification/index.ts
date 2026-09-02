@@ -12,6 +12,8 @@ export {
 	BACKFILL_MAX_BATCH_SIZE,
 	type BackfillRunArgs,
 	backfillOrderingKey,
+	decodeBackfillCursorToken,
+	encodeBackfillCursorToken,
 	runSourceClassificationBackfill,
 } from "./backfill";
 export { classifySourceHostname, type SourceClassifierDeps } from "./classifier";
