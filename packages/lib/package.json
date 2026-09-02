@@ -7,6 +7,7 @@
 		"check-types": "tsc --noEmit",
 		"test": "vitest run",
 		"compare:onboarding": "tsx scripts/compare-onboarding.ts",
+		"eval:source-classification": "tsx scripts/source-classification-live-eval.ts",
 		"generate:auth-schema": "bash scripts/generate-auth-schema.sh",
 		"verify:membership-dedupe": "tsx scripts/verify-membership-dedupe.ts"
 	},
@@ -19,6 +20,9 @@
 		"./auth/server": "./src/auth/server.ts",
 		"./auth/client": "./src/auth/client.ts",
 		"./auth/permissions": "./src/auth/permissions.ts",
+		"./citations/domain-categories": "./src/citations/domain-categories.ts",
+		"./citations/domain-categories.server": "./src/citations/domain-categories.server.ts",
+		"./source-classification": "./src/source-classification/index.ts",
 		"./constants": "./src/constants.ts",
 		"./app-urls": "./src/app-urls.ts",
 		"./expedite": "./src/expedite.ts",

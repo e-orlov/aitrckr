@@ -2,6 +2,7 @@ import * as Sentry from "@sentry/node";
 import { getDeployment } from "@workspace/deployment";
 import { getProvider, parseScrapeTargets, validateScrapeTargets } from "@workspace/lib/providers";
 import { startCredentialRefresh } from "@workspace/lib/secrets";
+import { ensureSourceClassificationQueue } from "@workspace/lib/source-classification";
 import boss from "./boss";
 import { registerHandlers } from "./handlers";
 import { shutdownTelemetry } from "./telemetry";
@@ -58,6 +59,9 @@ async function main() {
 		retryBackoff: false,
 		expireInSeconds: 60 * 15, // 15 minute timeout for onboarding brand analysis
 	});
+	// Exclusive policy is what makes the singleton-key dedupe real; the helper
+	// fails fast if an existing queue carries a different (immutable) policy.
+	await ensureSourceClassificationQueue(boss);
 	await boss.createQueue("schedule-maintenance", {
 		retryLimit: 3,
 		retryDelay: 300, // 5 minutes between retries

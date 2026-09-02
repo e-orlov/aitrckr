@@ -83,3 +83,9 @@ jobs:
       # selection and the resulting uniqueness constraint against seeded data.
       - name: Verify membership dedupe
         run: pnpm -C packages/lib exec tsx scripts/verify-membership-dedupe.ts
+
+      # F-05: prove on a real Postgres that concurrent classification upserts
+      # leave one row and that the exclusive queue policy deduplicates
+      # singleton-key sends. No worker handler, classifier, or LLM involved.
+      - name: Verify source classification DB behavior
+        run: pnpm -C apps/worker exec tsx scripts/verify-source-classification-db.ts

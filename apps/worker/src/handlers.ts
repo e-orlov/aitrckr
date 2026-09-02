@@ -1,8 +1,10 @@
 import * as Sentry from "@sentry/node";
 import { getDeployment } from "@workspace/deployment";
 import type { OnboardingSuggestion } from "@workspace/lib/onboarding";
+import type { SourceClassificationJobData } from "@workspace/lib/source-classification";
 import type { Job, PgBoss } from "pg-boss";
 import { type AnalyzeBrandData, analyzeBrandJob } from "./jobs/analyze-brand";
+import { classifySourceDomainJob } from "./jobs/classify-source-domain";
 import { type GenerateReportData, generateReportJob } from "./jobs/generate-report";
 import { type ProcessPromptData, processPromptJob } from "./jobs/process-prompt";
 import { type ScheduleMaintenanceData, scheduleMaintenanceJob } from "./jobs/schedule-maintenance";
@@ -54,6 +56,15 @@ export async function registerHandlers(boss: PgBoss): Promise<void> {
 		withSentry("analyze-brand", analyzeBrandJob),
 	);
 	console.log("Registered handler: analyze-brand");
+
+	// Low concurrency: each job is one bounded LLM call; the cache and singleton
+	// keys already deduplicate, so parallelism buys little and costs provider load.
+	await boss.work<SourceClassificationJobData>(
+		"classify-source-domain",
+		{ localConcurrency: 2 },
+		withSentry("classify-source-domain", classifySourceDomainJob),
+	);
+	console.log("Registered handler: classify-source-domain");
 
 	await boss.work<ScheduleMaintenanceData>(
 		"schedule-maintenance",

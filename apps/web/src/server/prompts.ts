@@ -11,7 +11,7 @@ import type { LookbackPeriod } from "@/lib/chart-utils";
 import { generateDateRange } from "@/lib/chart-utils";
 import { rollUpCitationDomains, rollUpCitationUrls, tallyCitations } from "@/lib/citation-rollup";
 import { extractDomain } from "@/lib/domain-categories";
-import { classifyUrl } from "@/lib/domain-categories.server";
+import { classifyUrl, type SupplementalDomainLookup } from "@/lib/domain-categories.server";
 import { expeditePromptRuns } from "@/lib/expedite-prompts";
 import { buildGoogleModule } from "@/lib/google-module";
 import { createMultiplePromptJobSchedulers } from "@/lib/job-scheduler";
@@ -26,6 +26,7 @@ import {
 	getPromptWebQueryCounts,
 } from "@/lib/postgres-read";
 import { promptsGainingPremium } from "@/lib/run-config-changes";
+import { loadSupplementalDomainLookup } from "@/lib/source-classification.server";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
 import { planPromptSave } from "@/server/prompt-save";
 // Server Functions
@@ -272,6 +273,7 @@ function computePromptCitationStats(input: {
 	brandDomains: Set<string>;
 	competitors: { id: string; name: string }[];
 	competitorDomains: Set<string>;
+	supplemental: SupplementalDomainLookup;
 }) {
 	const { urlStats } = input;
 	if (urlStats.length === 0) return undefined;
@@ -293,7 +295,7 @@ function computePromptCitationStats(input: {
 	);
 
 	const specificUrls = rollUpCitationUrls(urlStats, (domain, url, title) =>
-		classifyUrl(domain, url, title, input.brandDomains, input.competitorDomains),
+		classifyUrl(domain, url, title, input.brandDomains, input.competitorDomains, input.supplemental),
 	);
 	const domainDistribution = rollUpCitationDomains(specificUrls);
 	const { categoryCounts, totalCitations, pageTypeDistribution } = tallyCitations(specificUrls);
@@ -437,6 +439,10 @@ export const getPromptStatsFn = createServerFn({ method: "GET" })
 
 		const urlStats = await getPromptCitationUrlStats(data.promptId, fromDateStr, toDateStr, timezone);
 
+		// Same batched cache enrichment as the brand-wide citations view, so both
+		// surfaces resolve the same citation to the same effective category.
+		const supplemental = await loadSupplementalDomainLookup(urlStats.map((row) => row.domain));
+
 		const citationStats = computePromptCitationStats({
 			urlStats,
 			promptId: data.promptId,
@@ -445,6 +451,7 @@ export const getPromptStatsFn = createServerFn({ method: "GET" })
 			brandDomains,
 			competitors: competitorsList.map((c) => ({ id: c.id, name: c.name })),
 			competitorDomains,
+			supplemental,
 		});
 
 		return {

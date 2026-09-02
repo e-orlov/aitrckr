@@ -40,6 +40,7 @@ import {
 	type PerPromptCitationPageRow,
 	type PerPromptDailyCitationPageRow,
 } from "@/lib/postgres-read";
+import { loadSupplementalDomainLookup } from "@/lib/source-classification.server";
 
 type Classify = (domain: string, url: string, title?: string | null) => CitationCategory;
 
@@ -391,10 +392,19 @@ export const getCitationsFn = createServerFn({ method: "GET" })
 			getCitationUrlStats(data.brandId, prevFromDateStr, prevToDateStr, timezone, enabledPromptIds, data.model),
 		]);
 
+		// One batched cache read for every domain any classification below can see
+		// (current window, previous window, per-day rows) — no per-citation lookups.
+		const supplemental = await loadSupplementalDomainLookup([
+			...urlStats.map((row) => row.domain),
+			...prevUrlStats.map((row) => row.domain),
+			...perPromptDailyPages.map((row) => row.domain),
+			...perPromptPages.map((row) => row.domain),
+		]);
+
 		const categorizeDomain = (domain: string): CitationCategory =>
-			categorizeDomainShared(domain, brandDomains, competitorDomains);
+			categorizeDomainShared(domain, brandDomains, competitorDomains, supplemental);
 		const classify: Classify = (domain, url, title) =>
-			classifyUrlShared(domain, url, title, brandDomains, competitorDomains);
+			classifyUrlShared(domain, url, title, brandDomains, competitorDomains, supplemental);
 
 		const previous = rollUpPreviousPeriod(prevUrlStats);
 		const promptCounts = promptCountsByUrl(urlStats);

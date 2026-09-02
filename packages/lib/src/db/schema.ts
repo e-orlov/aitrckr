@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
 	boolean,
+	check,
 	index,
 	integer,
 	json,
@@ -305,6 +307,50 @@ export const usageEvents = pgTable(
 ).enableRLS();
 
 export type UsageEvent = typeof usageEvents.$inferSelect;
+
+/**
+ * Supplemental LLM classification of source hostnames whose built-in
+ * domain-level category is "other" — a global cache keyed by the normalized
+ * exact hostname (not the registrable root: different subdomains can play
+ * different roles). Global because it describes the source itself, not a
+ * brand's view of it; brand/competitor context still overrides it at read
+ * time. One current row per hostname: a `classifier_version` mismatch means
+ * the row is stale and the hostname is eligible for reclassification, which
+ * replaces the row through the normal upsert path. A valid `other` row is
+ * kept deliberately — it suppresses repeated LLM calls for hostnames the
+ * classifier could not place.
+ */
+export const sourceDomainClassifications = pgTable(
+	"source_domain_classifications",
+	{
+		hostname: text("hostname").primaryKey().notNull(),
+		category: text("category").notNull(),
+		confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
+		reason: text("reason").notNull(),
+		provider: text("provider").notNull(),
+		model: text("model"),
+		classifierVersion: text("classifier_version").notNull(),
+		classifiedAt: timestamp("classified_at", { withTimezone: true }).defaultNow().notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.$onUpdate(() => new Date())
+			.notNull(),
+	},
+	(table) => ({
+		categoryCheck: check(
+			"source_domain_classifications_category_check",
+			sql`${table.category} IN ('editorial', 'institutional', 'other')`,
+		),
+		confidenceCheck: check(
+			"source_domain_classifications_confidence_check",
+			sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+		),
+	}),
+).enableRLS();
+
+export type SourceDomainClassificationRecord = typeof sourceDomainClassifications.$inferSelect;
+export type NewSourceDomainClassificationRecord = typeof sourceDomainClassifications.$inferInsert;
 
 // Encrypted overrides for credential environment variables, keyed by the env-var
 // name they stand in for. Separate table, strictest access.
