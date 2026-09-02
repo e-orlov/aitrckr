@@ -6,13 +6,13 @@ Freeze of the deployed-and-accepted production state. Production runtime untouch
 
 | Item | Value |
 |---|---|
-| Final main | `95b5dea800e523bb55f683513390edf3f7774d5d` |
+| Deployed/accepted production closeout commit (tag target) | `95b5dea800e523bb55f683513390edf3f7774d5d` |
 | Application source of the running images | `a8747c20c94c9f0acfeaa60f8ad756af4444b1d8` (upstream v0.3.0 merge; the docs-only commits between it and final main are excluded from the Docker build context) |
 | Production images | `elmo-web:ga8747c20` `0c6451dfb7e4…`, `elmo-worker:ga8747c20` `8d51e8da67dc…`, `elmo-db-migrate:ga8747c20` `368b6f593a62…` |
 | PostgreSQL | `postgres:18-alpine` @ `sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2` (unchanged since Phase 1) |
 | Migrations journal | 18 (…, 0016_brand_slugs, 0017_citations_analytics_index) |
 | Rollback | forward-compatible to `g34057521` (images retained; procedure in docs/governance/rc030/deployment-plan.md) |
-| Planned tag | annotated `production/upstream-v0.3.0-2026-09-01` → final main **after** this freeze PR is merged |
+| Planned tag | annotated `production/upstream-v0.3.0-2026-09-01` → **`95b5dea800e523bb55f683513390edf3f7774d5d`** (the deployed/accepted closeout commit). The freeze PR’s own squash commit is a documentation/freeze-record commit only and is NOT the tag target |
 
 ## Recovery archive (private, off GitHub)
 
