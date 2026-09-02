@@ -434,14 +434,17 @@ async function enqueueSourceClassifications(
 		competitorsList.flatMap((competitor) => (competitor.domains || []).map(extractDomainFromUrl)).filter(Boolean),
 	);
 
-	const { enqueued } = await enqueueSourceClassificationsBestEffort({
+	const { attempted, accepted, deduplicated, failed } = await enqueueSourceClassificationsBestEffort({
 		citations: savedCitations,
 		brandDomains,
 		competitorDomains,
 		sender: boss,
 	});
-	if (enqueued > 0) {
-		console.log(`Enqueued ${enqueued} source-classification job(s) for brand ${brand.id}`);
+	if (attempted > 0) {
+		console.log(
+			`Source-classification enqueue for brand ${brand.id}: ` +
+				`${accepted} accepted, ${deduplicated} deduplicated, ${failed} failed of ${attempted} attempted`,
+		);
 	}
 }
 
