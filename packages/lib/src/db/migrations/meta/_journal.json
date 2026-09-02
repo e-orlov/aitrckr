@@ -127,6 +127,13 @@
       "when": 1788131808801,
       "tag": "0017_citations_analytics_index",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1788343819356,
+      "tag": "0018_source_domain_classifications",
+      "breakpoints": true
     }
   ]
 }
