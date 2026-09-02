@@ -24,6 +24,7 @@ import {
 	getPerPromptDailyCitationStats,
 	getPerPromptVisibilityTimeSeries,
 } from "@/lib/postgres-read";
+import { loadSupplementalDomainLookup } from "@/lib/source-classification.server";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
 
 export interface VisibilityTimeSeriesPoint {
@@ -145,11 +146,14 @@ export const getDashboardSummaryFn = createServerFn({ method: "GET" })
 			};
 		});
 
+		// Same batched cache enrichment as the citations page, so the two source-mix
+		// charts categorize a domain identically.
+		const supplemental = await loadSupplementalDomainLookup(perPromptCitations.map((row) => row.domain));
 		const smoothedCitations = applyPerPromptCitationLVCF(
 			perPromptCitations,
 			dateRange,
 			brandResult[0]?.delayOverrideHours,
-			(domain: string) => categorizeDomain(domain, brandDomains, competitorDomains),
+			(domain: string) => categorizeDomain(domain, brandDomains, competitorDomains, supplemental),
 		);
 		const citationTimeSeries: CitationTimeSeriesPoint[] = dateRange.map((date) => {
 			const c = smoothedCitations.get(date);
