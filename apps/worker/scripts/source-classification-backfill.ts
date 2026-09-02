@@ -4,32 +4,35 @@
  * classification jobs for hostnames cited historically that are still
  * unresolved for the current classifier version.
  *
- * The citation inventory is scanned in bounded keyset pages (grouped
- * (domain, brand_id) rows, `--batch-size` per page, hard max
- * BACKFILL_MAX_BATCH_SIZE) and the cache is checked one page-sized hostname
- * batch at a time — nothing table-sized is held in memory. `--max-pages N`
- * bounds a run further; a bounded run reports `partial: true` plus a
- * `nextCursor` to resume from via `--cursor "domain,brandId"`.
+ * The citation inventory is scanned in bounded keyset pages of grouped
+ * (domain, brand_id) rows ordered by the hostname normalization key, so every
+ * variant of one logical hostname is contiguous and per-run state stays
+ * bounded by the batch size (`--batch-size`, hard max BACKFILL_MAX_BATCH_SIZE;
+ * the result's `peakPendingGroups` reports the actual peak). `--max-pages N`
+ * bounds a run further. Any bounded or interrupted run reports
+ * `partial: true` plus an opaque `nextCursor` token to resume via
+ * `--cursor TOKEN`; the token always points at the last fully settled
+ * hostname, so no eligible hostname can be skipped by resuming, and a resume
+ * sequence sums to the same inventory as one uninterrupted scan.
  *
  * Modes:
  *   - DRY RUN (default): read-only counting. No DB write, no queue send, no
  *     LLM call. Repeatable with stable counts for the same data.
  *   - ENQUEUE: requires BOTH `--enqueue` and a positive `--limit N` — a hard
  *     upper bound on ACCEPTED jobs (a send deduplicated by the exclusive queue
- *     policy returns null and does not consume the limit). Still makes no LLM
- *     call itself; the worker processes the queued jobs. Reruns are idempotent
- *     and progress past already-handled hostnames via the cache filter and
- *     queue dedupe.
+ *     policy returns null and does not consume the limit; a failing send stops
+ *     the run with a cursor that retries that hostname). Still makes no LLM
+ *     call itself; the worker processes the queued jobs.
  *
  * Running this against production (or any shared database) is an operations
  * action that belongs to a separately authorized deployment phase — do not
  * point it at a database you don't own for that purpose.
  *
  * Usage (from apps/worker):
- *   pnpm backfill:source-classification                                # dry run, full inventory
- *   pnpm backfill:source-classification --max-pages 10                 # bounded dry run + cursor
+ *   pnpm backfill:source-classification                       # dry run, full inventory
+ *   pnpm backfill:source-classification --max-pages 10        # bounded dry run + resume token
  *   pnpm backfill:source-classification --enqueue --limit 100
- *   pnpm backfill:source-classification --cursor "example.com,brand-1" # resume
+ *   pnpm backfill:source-classification --cursor TOKEN        # resume a bounded run
  */
 import { parseArgs } from "node:util";
 import { db } from "@workspace/lib/db/db";
@@ -58,24 +61,34 @@ function extractDomainFromUrl(urlOrDomain: string): string {
 	}
 }
 
+// SQL twin of backfillOrderingKey (lowercase, strip trailing dots, strip one
+// leading "www.") — keeps every variant of a logical hostname contiguous.
+// Bracket classes instead of backslash escapes: drizzle's sql template
+// tag consumes backslashes from its literal chunks.
+const keyExpr = sql<string>`regexp_replace(regexp_replace(lower(${citations.domain}), '[.]+$', ''), '^www[.]', '')`;
+
 async function fetchCitationPage(cursor: BackfillCursor | null, batchSize: number): Promise<BackfillCitationPage> {
 	const rows = await db
 		.select({
+			key: sql<string>`${keyExpr}`.as("key"),
 			domain: citations.domain,
 			brandId: citations.brandId,
 			citationCount: sql<number>`count(*)::int`,
 		})
 		.from(citations)
 		.where(
-			cursor ? sql`(${citations.domain}, ${citations.brandId}) > (${cursor.domain}, ${cursor.brandId})` : sql`true`,
+			cursor
+				? sql`(${keyExpr}, ${citations.domain}, ${citations.brandId}) > (${cursor.key}, ${cursor.domain}, ${cursor.brandId})`
+				: sql`true`,
 		)
 		.groupBy(citations.domain, citations.brandId)
-		.orderBy(citations.domain, citations.brandId)
+		.orderBy(keyExpr, citations.domain, citations.brandId)
 		.limit(batchSize);
 	const last = rows[rows.length - 1];
 	return {
 		rows,
-		nextCursor: rows.length === batchSize && last ? { domain: last.domain, brandId: last.brandId } : null,
+		nextCursor:
+			rows.length === batchSize && last ? { key: last.key, domain: last.domain, brandId: last.brandId } : null,
 	};
 }
 
@@ -123,13 +136,21 @@ async function loadBrandContexts(): Promise<Map<string, BackfillBrandContext>> {
 	return brandContexts;
 }
 
-function parseCursor(value: string | undefined): BackfillCursor | null {
+function encodeCursor(cursor: BackfillCursor): string {
+	return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function parseCursorToken(value: string | undefined): BackfillCursor | null {
 	if (!value) return null;
-	const comma = value.indexOf(",");
-	if (comma <= 0 || comma === value.length - 1) {
-		throw new Error(`--cursor must be "domain,brandId", got "${value}"`);
+	try {
+		const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+		if (typeof parsed?.key !== "string" || typeof parsed?.domain !== "string" || typeof parsed?.brandId !== "string") {
+			throw new Error("wrong shape");
+		}
+		return { key: parsed.key, domain: parsed.domain, brandId: parsed.brandId };
+	} catch {
+		throw new Error("--cursor must be a nextCursor token printed by a previous run");
 	}
-	return { domain: value.slice(0, comma), brandId: value.slice(comma + 1) };
 }
 
 async function main(): Promise<void> {
@@ -179,17 +200,19 @@ async function main(): Promise<void> {
 	const mode = values.enqueue ? "ENQUEUE" : "DRY RUN";
 	console.log(`F-05 backfill (${mode}) — classifier version ${SOURCE_CLASSIFIER_VERSION}, batch size ${batchSize}`);
 
-	const { inventory, nextCursor, attempted, accepted, deduplicated, failed } = await runSourceClassificationBackfill({
-		source: { fetchCitationPage, fetchCachedVersions },
-		brandContexts,
-		batchSize,
-		maxPages,
-		cursor: parseCursor(values.cursor),
-		enqueue,
-	});
+	const { inventory, nextCursor, attempted, accepted, deduplicated, failed, peakPendingGroups } =
+		await runSourceClassificationBackfill({
+			source: { fetchCitationPage, fetchCachedVersions },
+			brandContexts,
+			batchSize,
+			maxPages,
+			cursor: parseCursorToken(values.cursor),
+			enqueue,
+		});
 
 	if (values.enqueue) await boss.stop({ graceful: true, timeout: 10_000 });
 
+	const cursorToken = nextCursor ? encodeCursor(nextCursor) : null;
 	console.log(
 		JSON.stringify(
 			{
@@ -199,8 +222,9 @@ async function main(): Promise<void> {
 				accepted,
 				deduplicated,
 				failed,
+				peakPendingGroups,
 				limit: limit ?? null,
-				nextCursor: nextCursor ? `${nextCursor.domain},${nextCursor.brandId}` : null,
+				nextCursor: cursorToken,
 			},
 			null,
 			2,
@@ -210,7 +234,7 @@ async function main(): Promise<void> {
 		console.log("Dry run: no jobs enqueued, no rows written, no LLM calls made.");
 	}
 	if (inventory.partial) {
-		console.log(`Partial scan: resume with --cursor "${nextCursor?.domain},${nextCursor?.brandId}".`);
+		console.log(`Partial scan: resume with --cursor "${cursorToken}".`);
 	}
 }
 

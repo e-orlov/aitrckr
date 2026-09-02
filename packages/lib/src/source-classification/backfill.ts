@@ -7,13 +7,36 @@ export interface BackfillBrandContext {
 	competitorDomains: Set<string>;
 }
 
-/** Keyset cursor over the grouped (domain, brand_id) citation scan. */
+/**
+ * The ordering key the citation scan sorts and groups by: a cheap normalization
+ * (lowercase, trailing dots and one leading `www.` stripped) that makes every
+ * raw-domain variant of one logical hostname CONTIGUOUS in the scan. That
+ * contiguity is what lets the runner aggregate a logical hostname in a single
+ * carry-over buffer instead of a table-sized seen-set. The SQL side must order
+ * by the equivalent expression:
+ *   regexp_replace(regexp_replace(lower(domain), '[.]+$', ''), '^www[.]', '')
+ */
+export function backfillOrderingKey(domain: string): string {
+	return domain
+		.toLowerCase()
+		.replace(/\.+$/, "")
+		.replace(/^www\./, "");
+}
+
+/**
+ * Resume position: the last row of the last fully settled hostname group, in
+ * the scan's (key, domain, brandId) order. Never points past a hostname that
+ * was not yet sent or provably processed.
+ */
 export interface BackfillCursor {
+	key: string;
 	domain: string;
 	brandId: string;
 }
 
 export interface BackfillCitationPageRow {
+	/** `backfillOrderingKey(domain)` — computed by the source's SQL/ordering. */
+	key: string;
 	domain: string;
 	brandId: string;
 	/** Citations behind this (domain, brand) pair. */
@@ -21,7 +44,7 @@ export interface BackfillCitationPageRow {
 }
 
 export interface BackfillCitationPage {
-	/** Rows ordered by (domain, brandId) ascending. */
+	/** Rows ordered by (key, domain, brandId) ascending. */
 	rows: BackfillCitationPageRow[];
 	/** Cursor of the last row when more data may follow, else null. */
 	nextCursor: BackfillCursor | null;
@@ -37,6 +60,11 @@ export interface BackfillPagedSource {
 	fetchCachedVersions(hostnames: string[]): Promise<Map<string, string>>;
 }
 
+/**
+ * Hostname-level counters, incremented ONLY when a hostname group is settled.
+ * Because every group settles exactly once across a resume sequence, summing
+ * these counters over the sequence equals one uninterrupted full scan.
+ */
 export interface BackfillInventory {
 	scannedCitations: number;
 	distinctHostnames: number;
@@ -46,8 +74,9 @@ export interface BackfillInventory {
 	cachedCurrentSkipped: number;
 	staleCached: number;
 	eligible: number;
+	/** Pages read by THIS run (mechanical, not part of the settle-once contract). */
 	pagesScanned: number;
-	/** True when the scan stopped before exhausting the table (maxPages or accept limit). */
+	/** True when unprocessed data remains; resume from `nextCursor`. */
 	partial: boolean;
 }
 
@@ -55,23 +84,50 @@ export interface BackfillRunResult {
 	inventory: BackfillInventory;
 	/** Resume point when `inventory.partial`; null when the scan completed. */
 	nextCursor: BackfillCursor | null;
-	/** Eligible hostnames a send was attempted for (0 in dry-run). */
+	/** Per-run send counters (mechanical): attempts made by THIS run. */
 	attempted: number;
 	/** Sends pg-boss accepted (non-null job id). */
 	accepted: number;
 	/** Sends deduplicated by the exclusive queue policy (null job id). */
 	deduplicated: number;
-	/** Sends that threw. */
+	/** Sends that threw; the failing hostname stays AFTER `nextCursor` for retry. */
 	failed: number;
+	/**
+	 * Bounded-state evidence: the most hostname groups this run ever held in
+	 * memory at once. By construction ≤ batchSize + 1, independent of how many
+	 * distinct domains the citations table contains.
+	 */
+	peakPendingGroups: number;
 }
 
 /** Hard ceiling on a citation page so no run can ask for an unbounded scan. */
 export const BACKFILL_MAX_BATCH_SIZE = 20_000;
 export const BACKFILL_DEFAULT_BATCH_SIZE = 5_000;
 
-interface DomainAggregate {
-	domain: string;
+export interface BackfillRunArgs {
+	source: BackfillPagedSource;
+	brandContexts: Map<string, BackfillBrandContext>;
+	batchSize?: number;
+	maxPages?: number;
+	cursor?: BackfillCursor | null;
+	classifierVersion?: string;
+	enqueue?: { send: (hostname: string) => Promise<string | null>; limit: number } | null;
+}
+
+export async function runSourceClassificationBackfill(args: BackfillRunArgs): Promise<BackfillRunResult> {
+	if (args.enqueue && (!Number.isInteger(args.enqueue.limit) || args.enqueue.limit <= 0)) {
+		throw new Error("enqueue mode requires an explicit positive integer limit");
+	}
+	return new BackfillScan(args).run();
+}
+
+/** One logical hostname's aggregate: every contiguous row sharing one key. */
+interface HostnameGroup {
+	key: string;
 	brandIds: Set<string>;
+	citationCount: number;
+	/** Last (domain, brandId) row of the group — the cursor once it settles. */
+	endPosition: BackfillCursor;
 }
 
 function emptyInventory(): BackfillInventory {
@@ -91,10 +147,7 @@ function emptyInventory(): BackfillInventory {
 
 const EMPTY_SET: Set<string> = new Set();
 
-/**
- * Decide one hostname (all citing brands aggregated). Returns which inventory
- * bucket it lands in short of the cache check.
- */
+/** Decide one hostname group short of the cache check. */
 function decideHostname(
 	hostname: string,
 	brandIds: Set<string>,
@@ -114,172 +167,218 @@ function decideHostname(
 }
 
 /**
- * Paged, bounded backfill scan. Reads the citation inventory in keyset pages of
- * at most `batchSize` grouped (domain, brand) rows and checks the cache one
- * bounded hostname batch per page — the full citation inventory, the full
- * cache, and a full eligible-hostname list are never materialized at once (the
- * only cross-page state is the set of already-decided normalized hostnames,
- * bounded by distinct hostnames, which preserves normalization/dedup across
- * page boundaries).
+ * Paged, bounded backfill scan with exact resume semantics.
  *
- * Dry-run (no `enqueue` argument) performs no write, no queue send, and no LLM
- * call — it only counts, either over the whole table or, with `maxPages`, over
- * a bounded prefix reported as `partial` with a resumable `nextCursor`.
+ * The scan is ordered by `backfillOrderingKey`, so all rows of one logical
+ * normalized hostname are contiguous and aggregate into one carry-over group —
+ * no global seen-set exists. Per-run state is one page of rows plus at most
+ * batchSize + 1 pending groups (reported as `peakPendingGroups`), independent
+ * of the total number of distinct citation domains.
  *
- * Enqueue mode is explicit opt-in: `enqueue.limit` is a hard upper bound on
- * ACCEPTED jobs (null send results count as deduplicated, not accepted; a
- * throwing send counts as failed and never resets earlier successes). Repeat
- * runs are idempotent and make progress: previously accepted hostnames are
- * filtered by the cache or deduplicated by the exclusive queue policy, so a
- * rerun spends its limit on new hostnames instead of the first page.
+ * A group is SETTLED when it is counted into the inventory and, if eligible in
+ * enqueue mode, its send has resolved (accepted or deduplicated). The returned
+ * `nextCursor` is always the end position of the last settled group, so it can
+ * never lie past an eligible hostname that was not sent: hitting the accepted
+ * limit, a throwing send, or `maxPages` stops BEFORE the first unsettled group
+ * and a resumed run re-reads it in full (same aggregation, same decision, and
+ * counted exactly once across the sequence — a resume sequence sums to the
+ * same inventory as one uninterrupted scan). A throwing send leaves its own
+ * hostname unsettled too, so a rerun retries it instead of silently losing it.
  *
- * A raw domain whose grouped rows straddle a page boundary is held in a
- * carry-over buffer and decided only when the next domain (or the end of the
- * scan) is seen, so page boundaries neither drop nor double-process it.
+ * Dry-run (no `enqueue`) performs no write, no queue send, and no LLM call.
+ * Enqueue mode is explicit opt-in with `limit` as a hard cap on ACCEPTED jobs
+ * (deduplicated null sends do not consume it).
  */
-export interface BackfillRunArgs {
-	source: BackfillPagedSource;
-	brandContexts: Map<string, BackfillBrandContext>;
-	batchSize?: number;
-	maxPages?: number;
-	cursor?: BackfillCursor | null;
-	classifierVersion?: string;
-	enqueue?: { send: (hostname: string) => Promise<string | null>; limit: number } | null;
-}
-
-export async function runSourceClassificationBackfill(args: BackfillRunArgs): Promise<BackfillRunResult> {
-	if (args.enqueue && (!Number.isInteger(args.enqueue.limit) || args.enqueue.limit <= 0)) {
-		throw new Error("enqueue mode requires an explicit positive integer limit");
-	}
-	return new BackfillScan(args).run();
-}
-
-/** One scan's state: counts, cross-page dedupe, and the carry-over buffer. */
 class BackfillScan {
 	private readonly inventory = emptyInventory();
-	private readonly decided = new Set<string>();
-	private readonly invalidDomains = new Set<string>();
 	private readonly classifierVersion: string;
 	private readonly batchSize: number;
-	private buffer: DomainAggregate | null = null;
-	private cursor: BackfillCursor | null;
-	private stop = false;
+	private buffer: HostnameGroup | null = null;
+	/** End position of the last settled group — the exact resume point. */
+	private settledCursor: BackfillCursor | null;
+	private stopped = false;
+	private settledCount = 0;
 	private attempted = 0;
 	private accepted = 0;
 	private deduplicated = 0;
 	private failed = 0;
+	private peakPendingGroups = 0;
 
 	constructor(private readonly args: BackfillRunArgs) {
 		this.classifierVersion = args.classifierVersion ?? SOURCE_CLASSIFIER_VERSION;
 		this.batchSize = Math.max(1, Math.min(args.batchSize ?? BACKFILL_DEFAULT_BATCH_SIZE, BACKFILL_MAX_BATCH_SIZE));
-		this.cursor = args.cursor ?? null;
+		this.settledCursor = args.cursor ?? null;
 	}
 
 	async run(): Promise<BackfillRunResult> {
-		while (!this.stop) {
-			const page = await this.args.source.fetchCitationPage(this.cursor, this.batchSize);
+		let scanCursor: BackfillCursor | null = this.args.cursor ?? null;
+		let scanComplete = false;
+
+		while (!this.stopped) {
+			const page = await this.args.source.fetchCitationPage(scanCursor, this.batchSize);
 			if (page.rows.length === 0) {
-				this.cursor = null; // the previous page was the last full one; the scan is complete
+				// No rows after the cursor: the buffered group (if any) is complete.
+				if (this.buffer) await this.settleGroups([this.takeBuffer()]);
+				scanComplete = !this.stopped;
 				break;
 			}
-			await this.processPage(page);
-			if (this.cursor === null) break;
-			if (this.args.maxPages !== undefined && this.inventory.pagesScanned >= this.args.maxPages) this.stop = true;
+			this.inventory.pagesScanned++;
+
+			const completed = this.absorbPage(page.rows);
+			await this.settleGroups(completed);
+			if (this.stopped) break;
+
+			scanCursor = page.nextCursor;
+			if (scanCursor === null) {
+				// Final page: the buffered group can no longer grow.
+				if (this.buffer) await this.settleGroups([this.takeBuffer()]);
+				scanComplete = !this.stopped;
+				break;
+			}
+			if (
+				this.args.maxPages !== undefined &&
+				this.inventory.pagesScanned >= this.args.maxPages &&
+				this.settledCount > 0
+			) {
+				// Page budget exhausted. The buffered group is NOT settled — the
+				// resumed run re-reads its rows (they sort after the settled cursor),
+				// aggregates them in full, and counts it exactly once. The budget is
+				// soft while nothing has settled yet: a single hostname group larger
+				// than the budget is read to its end so every run makes progress
+				// (state stays bounded — it is still just one buffered group).
+				this.stopped = true;
+			}
 		}
 
-		// Decide the still-buffered (possibly page-straddling) domain from what was
-		// seen. On a bounded stop the resumed run re-reads its remaining rows and
-		// may re-decide it — the cache filter and the exclusive queue policy keep
-		// that safe (no duplicate paid work), at the cost of one possibly
-		// double-counted hostname across resumed bounded runs.
-		if (this.buffer) {
-			const candidates: string[] = [];
-			this.finalizeDomain(this.buffer, candidates);
-			this.buffer = null;
-			await this.settleCandidates(candidates);
-		}
-
-		this.inventory.partial = this.cursor !== null;
+		const nextCursor = scanComplete ? null : this.settledCursor;
+		this.inventory.partial = !scanComplete;
 		return {
 			inventory: this.inventory,
-			nextCursor: this.cursor,
+			nextCursor,
 			attempted: this.attempted,
 			accepted: this.accepted,
 			deduplicated: this.deduplicated,
 			failed: this.failed,
+			peakPendingGroups: this.peakPendingGroups,
 		};
 	}
 
-	private async processPage(page: BackfillCitationPage): Promise<void> {
-		this.inventory.pagesScanned++;
-		const candidates: string[] = [];
-		for (const row of page.rows) {
-			this.inventory.scannedCitations += row.citationCount;
-			if (this.buffer && this.buffer.domain === row.domain) {
+	/** Fold one page of rows into groups; returns the groups the page closed. */
+	private absorbPage(rows: BackfillCitationPageRow[]): HostnameGroup[] {
+		const completed: HostnameGroup[] = [];
+		for (const row of rows) {
+			if (this.buffer && this.buffer.key === row.key) {
 				this.buffer.brandIds.add(row.brandId);
+				this.buffer.citationCount += row.citationCount;
+				this.buffer.endPosition = { key: row.key, domain: row.domain, brandId: row.brandId };
 				continue;
 			}
-			if (this.buffer) this.finalizeDomain(this.buffer, candidates);
-			this.buffer = { domain: row.domain, brandIds: new Set([row.brandId]) };
+			if (this.buffer) completed.push(this.buffer);
+			this.buffer = {
+				key: row.key,
+				brandIds: new Set([row.brandId]),
+				citationCount: row.citationCount,
+				endPosition: { key: row.key, domain: row.domain, brandId: row.brandId },
+			};
 		}
-		// The buffered (possibly page-straddling) domain is finalized either by the
-		// next page's first differing row or by run() after the last page.
-		if (page.nextCursor === null && this.buffer) {
-			this.finalizeDomain(this.buffer, candidates);
-			this.buffer = null;
-		}
-		await this.settleCandidates(candidates);
-		this.cursor = page.nextCursor;
+		this.peakPendingGroups = Math.max(this.peakPendingGroups, completed.length + (this.buffer ? 1 : 0));
+		return completed;
 	}
 
-	/** Aggregate one finalized raw domain into a per-page candidate list. */
-	private finalizeDomain(aggregate: DomainAggregate, candidates: string[]): void {
-		const hostname = normalizeSourceHostname(aggregate.domain);
-		if (!hostname) {
-			if (!this.invalidDomains.has(aggregate.domain)) {
-				this.invalidDomains.add(aggregate.domain);
-				this.inventory.invalid++;
-				this.inventory.distinctHostnames++;
+	private takeBuffer(): HostnameGroup {
+		const group = this.buffer as HostnameGroup;
+		this.buffer = null;
+		return group;
+	}
+
+	/**
+	 * Settle groups in scan order: one bounded cache lookup for the batch, then
+	 * count each group and (in enqueue mode) send its hostname. Stops before the
+	 * first group it cannot settle — accepted limit reached or a send failure —
+	 * leaving `settledCursor` exactly at the last settled group.
+	 */
+	private async settleGroups(groups: HostnameGroup[]): Promise<void> {
+		if (groups.length === 0 || this.stopped) return;
+
+		const decisions = groups.map((group) => {
+			const hostname = normalizeSourceHostname(group.key);
+			return {
+				group,
+				hostname,
+				decision: hostname === null ? null : decideHostname(hostname, group.brandIds, this.args.brandContexts),
+			};
+		});
+		const candidateHostnames = decisions
+			.filter((entry) => entry.decision === "candidate")
+			.map((entry) => entry.hostname as string);
+		const cachedVersions =
+			candidateHostnames.length > 0
+				? await this.args.source.fetchCachedVersions(candidateHostnames)
+				: new Map<string, string>();
+
+		for (const { group, hostname, decision } of decisions) {
+			if (this.stopped) return;
+			const settled = await this.settleOne(group, hostname, decision, cachedVersions);
+			if (!settled) {
+				this.stopped = true;
+				return;
 			}
-			return;
-		}
-		if (this.decided.has(hostname)) return;
-		this.decided.add(hostname);
-		this.inventory.distinctHostnames++;
-		const decision = decideHostname(hostname, aggregate.brandIds, this.args.brandContexts);
-		if (decision === "candidate") candidates.push(hostname);
-		else this.inventory[decision]++;
-	}
-
-	/** Cache-check one bounded candidate batch, then count/enqueue the eligible. */
-	private async settleCandidates(candidates: string[]): Promise<void> {
-		if (candidates.length === 0) return;
-		const cachedVersions = await this.args.source.fetchCachedVersions(candidates);
-		for (const hostname of candidates) {
-			const cachedVersion = cachedVersions.get(hostname);
-			if (cachedVersion === this.classifierVersion) {
-				this.inventory.cachedCurrentSkipped++;
-				continue;
-			}
-			if (cachedVersion !== undefined) this.inventory.staleCached++;
-			this.inventory.eligible++;
-			await this.maybeEnqueue(hostname);
+			this.settledCursor = group.endPosition;
+			this.settledCount++;
 		}
 	}
 
-	/** Send one eligible hostname while the accepted-jobs hard cap allows it. */
-	private async maybeEnqueue(hostname: string): Promise<void> {
+	/** Settle a single group; false when it must be left for a resumed run. */
+	private async settleOne(
+		group: HostnameGroup,
+		hostname: string | null,
+		decision: "brandOrCompetitorSkipped" | "deterministicSkipped" | "candidate" | null,
+		cachedVersions: Map<string, string>,
+	): Promise<boolean> {
+		if (hostname === null || decision === null) {
+			this.count(group, "invalid");
+			return true;
+		}
+		if (decision !== "candidate") {
+			this.count(group, decision);
+			return true;
+		}
+
+		const cachedVersion = cachedVersions.get(hostname);
+		if (cachedVersion === this.classifierVersion) {
+			this.count(group, "cachedCurrentSkipped");
+			return true;
+		}
+
 		const enqueue = this.args.enqueue;
-		if (!enqueue || this.accepted >= enqueue.limit) return;
-		this.attempted++;
-		try {
-			const jobId = await enqueue.send(hostname);
-			if (jobId === null) this.deduplicated++;
-			else this.accepted++;
-		} catch (error) {
-			this.failed++;
-			console.error(`Backfill: failed to enqueue "${hostname}" (continuing):`, error);
+		if (enqueue) {
+			// The hard cap: an eligible hostname beyond the limit stays unsettled so
+			// the cursor stops before it and a resumed run picks it up.
+			if (this.accepted >= enqueue.limit) return false;
+			this.attempted++;
+			try {
+				const jobId = await enqueue.send(hostname);
+				if (jobId === null) this.deduplicated++;
+				else this.accepted++;
+			} catch (error) {
+				// The failed hostname itself stays unsettled and is retried on resume.
+				this.failed++;
+				console.error(`Backfill: failed to enqueue "${hostname}" (resume to retry it):`, error);
+				return false;
+			}
 		}
-		if (this.accepted >= enqueue.limit) this.stop = true;
+
+		if (cachedVersion !== undefined) this.inventory.staleCached++;
+		this.count(group, "eligible");
+		return true;
+	}
+
+	private count(
+		group: HostnameGroup,
+		bucket: "invalid" | "brandOrCompetitorSkipped" | "deterministicSkipped" | "cachedCurrentSkipped" | "eligible",
+	): void {
+		this.inventory.scannedCitations += group.citationCount;
+		this.inventory.distinctHostnames++;
+		this.inventory[bucket]++;
 	}
 }

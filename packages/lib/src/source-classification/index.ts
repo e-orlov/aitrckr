@@ -10,6 +10,8 @@ export type {
 export {
 	BACKFILL_DEFAULT_BATCH_SIZE,
 	BACKFILL_MAX_BATCH_SIZE,
+	type BackfillRunArgs,
+	backfillOrderingKey,
 	runSourceClassificationBackfill,
 } from "./backfill";
 export { classifySourceHostname, type SourceClassifierDeps } from "./classifier";
