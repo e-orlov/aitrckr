@@ -60,6 +60,7 @@ The worker override pins the worker to `SCRAPE_TARGETS=stub:stub`; the test stac
 
 ## Known issues / operational notes
 
+- Right after a deploy, a browser tab that was open across the cutover may log `Server function info not found for <hash>` — the stale client bundle calls a server function the new build no longer exposes. A full page reload fixes it; if it recurs AFTER a reload, treat it as a defect and investigate.
 - **DEF-001**: Docker Desktop stop→start can crash on a stale `%LOCALAPPDATA%\docker-secrets-engine\engine.sock`. Recovery: kill leftover docker CLI processes, rename `docker-secrets-engine` aside, start Desktop. Stale renamed dir is deletable only after reboot.
 - Disk: C: at ~75%; Docker build cache ~11 GB reclaimable. Do not prune automatically — ask the user (`docker builder prune`).
 - MS Store Python virtualizes `%APPDATA%` writes — use `node` for editing files under AppData, not `python`.
