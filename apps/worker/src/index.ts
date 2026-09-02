@@ -58,6 +58,12 @@ async function main() {
 		retryBackoff: false,
 		expireInSeconds: 60 * 15, // 15 minute timeout for onboarding brand analysis
 	});
+	await boss.createQueue("classify-source-domain", {
+		retryLimit: 3,
+		retryDelay: 60,
+		retryBackoff: true,
+		expireInSeconds: 60 * 10, // one bounded LLM call per job
+	});
 	await boss.createQueue("schedule-maintenance", {
 		retryLimit: 3,
 		retryDelay: 300, // 5 minutes between retries

@@ -23,6 +23,7 @@ import {
 	selectDueTargets,
 	targetKey,
 } from "@workspace/lib/run-policy";
+import { enqueueSourceClassificationsBestEffort } from "@workspace/lib/source-classification";
 import type { Citation } from "@workspace/lib/text-extraction";
 import { estimateRunCostUsd } from "@workspace/lib/usage";
 import { and, eq, gt, sql } from "drizzle-orm";
@@ -343,7 +344,7 @@ async function runModelIteration({
 	config: ModelConfig;
 	providerImpl: Provider;
 	runIndex: number;
-}): Promise<void> {
+}): Promise<Citation[]> {
 	const logPrefix = `[${config.model}_${runIndex}]`;
 
 	try {
@@ -388,6 +389,7 @@ async function runModelIteration({
 			eventType: "prompt_run",
 			config,
 		});
+		return extractedCitations;
 	} catch (error) {
 		// A single run's failure doesn't fail the job, so report it here to keep
 		// per-provider failure rates visible.
@@ -406,6 +408,40 @@ async function runModelIteration({
 			config,
 		});
 		throw error;
+	}
+}
+
+/**
+ * Best-effort supplemental source classification for freshly persisted
+ * citations: unique eligible hostnames (valid, not brand/competitor for this
+ * brand, domain-level "other", no current-version cache row) become one queued
+ * classify-source-domain job each, deduplicated against in-flight jobs by
+ * singleton key. Runs only after citations are durably saved, and never fails
+ * the prompt run — an outage here just means the hostname is retried on a
+ * later citation ingest or backfill.
+ */
+async function enqueueSourceClassifications(
+	savedCitations: Citation[],
+	brand: Brand,
+	competitorsList: Competitor[],
+): Promise<void> {
+	if (savedCitations.length === 0) return;
+
+	const brandDomains = new Set(
+		[extractDomainFromUrl(brand.website), ...(brand.additionalDomains || []).map(extractDomainFromUrl)].filter(Boolean),
+	);
+	const competitorDomains = new Set(
+		competitorsList.flatMap((competitor) => (competitor.domains || []).map(extractDomainFromUrl)).filter(Boolean),
+	);
+
+	const { enqueued } = await enqueueSourceClassificationsBestEffort({
+		citations: savedCitations,
+		brandDomains,
+		competitorDomains,
+		sender: boss,
+	});
+	if (enqueued > 0) {
+		console.log(`Enqueued ${enqueued} source-classification job(s) for brand ${brand.id}`);
 	}
 }
 
@@ -493,6 +529,9 @@ async function processPrompt(
 
 	const results = await Promise.allSettled(runPromises);
 	const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+
+	const savedCitations = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+	await enqueueSourceClassifications(savedCitations, brand, competitorsList);
 
 	if (failures.length > 0) {
 		const errorMessages = failures
