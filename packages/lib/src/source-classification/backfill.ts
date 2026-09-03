@@ -105,7 +105,6 @@ export interface BackfillInventory {
 	distinctHostnames: number;
 	invalid: number;
 	brandOrCompetitorSkipped: number;
-	deterministicSkipped: number;
 	cachedCurrentSkipped: number;
 	staleCached: number;
 	eligible: number;
@@ -171,7 +170,6 @@ function emptyInventory(): BackfillInventory {
 		distinctHostnames: 0,
 		invalid: 0,
 		brandOrCompetitorSkipped: 0,
-		deterministicSkipped: 0,
 		cachedCurrentSkipped: 0,
 		staleCached: 0,
 		eligible: 0,
@@ -180,14 +178,12 @@ function emptyInventory(): BackfillInventory {
 	};
 }
 
-const EMPTY_SET: Set<string> = new Set();
-
 /** Decide one hostname group short of the cache check. */
 function decideHostname(
 	hostname: string,
 	brandIds: Set<string>,
 	brandContexts: Map<string, BackfillBrandContext>,
-): "brandOrCompetitorSkipped" | "deterministicSkipped" | "candidate" {
+): "brandOrCompetitorSkipped" | "candidate" {
 	const contexts = [...brandIds].map((brandId) => brandContexts.get(brandId));
 	const brandOrCompetitorEverywhere =
 		contexts.length > 0 &&
@@ -197,7 +193,6 @@ function decideHostname(
 			return category === "brand" || category === "competitor";
 		});
 	if (brandOrCompetitorEverywhere) return "brandOrCompetitorSkipped";
-	if (categorizeDomain(hostname, EMPTY_SET, EMPTY_SET) !== "other") return "deterministicSkipped";
 	return "candidate";
 }
 
@@ -367,7 +362,7 @@ class BackfillScan {
 	private async settleOne(
 		group: HostnameGroup,
 		hostname: string | null,
-		decision: "brandOrCompetitorSkipped" | "deterministicSkipped" | "candidate" | null,
+		decision: "brandOrCompetitorSkipped" | "candidate" | null,
 		cachedVersions: Map<string, string>,
 	): Promise<boolean> {
 		if (hostname === null || decision === null) {
@@ -410,7 +405,7 @@ class BackfillScan {
 
 	private count(
 		group: HostnameGroup,
-		bucket: "invalid" | "brandOrCompetitorSkipped" | "deterministicSkipped" | "cachedCurrentSkipped" | "eligible",
+		bucket: "invalid" | "brandOrCompetitorSkipped" | "cachedCurrentSkipped" | "eligible",
 	): void {
 		this.inventory.scannedCitations += group.citationCount;
 		this.inventory.distinctHostnames++;

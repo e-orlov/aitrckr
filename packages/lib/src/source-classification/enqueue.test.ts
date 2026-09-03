@@ -27,7 +27,7 @@ describe("enqueueSourceClassificationsBestEffort", () => {
 				citation("unknown-a.de"),
 				citation("www.unknown-a.de"),
 				citation("unknown-b.de"),
-				citation("wikipedia.org"), // deterministic — never enqueued
+				citation("wikipedia.org"), // deterministically known — still eligible, hint rides along
 				citation("mybrand.com"), // brand — never enqueued
 			],
 			brandDomains: new Set(["mybrand.com"]),
@@ -36,8 +36,12 @@ describe("enqueueSourceClassificationsBestEffort", () => {
 			deps: { filterNeeded: passthroughFilter },
 		});
 
-		expect(result).toEqual({ attempted: 2, accepted: 2, deduplicated: 0, failed: 0 });
-		expect(send).toHaveBeenCalledTimes(2);
+		expect(result).toEqual({ attempted: 3, accepted: 3, deduplicated: 0, failed: 0 });
+		expect(send).toHaveBeenCalledTimes(3);
+		const wikipediaCall = send.mock.calls.find(
+			(call) => (call as unknown as [string, { hostname: string }])[1].hostname === "wikipedia.org",
+		) as unknown as [string, { hostname: string; deterministicHint?: string }];
+		expect(wikipediaCall[1].deterministicHint).toBe("reference");
 		const [queue, data, options] = send.mock.calls[0] as unknown as [
 			string,
 			{ hostname: string },
@@ -140,8 +144,8 @@ describe("enqueueSourceClassificationsBestEffort", () => {
 		expect(
 			(
 				await enqueueSourceClassificationsBestEffort({
-					citations: [citation("wikipedia.org")],
-					brandDomains: none,
+					citations: [citation("mybrand.com"), citation("not a domain")],
+					brandDomains: new Set(["mybrand.com"]),
 					competitorDomains: none,
 					sender: s,
 					deps: { filterNeeded },

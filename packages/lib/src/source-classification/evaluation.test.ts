@@ -5,17 +5,18 @@ import { categorizeDomain } from "../citations/domain-categories.server";
 import type { Provider } from "../providers/types";
 import { classifySourceHostname } from "./classifier";
 import {
+	SOURCE_CLASSIFICATION_CATEGORIES,
 	SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS,
 	SOURCE_CLASSIFIER_VERSION,
 	type SourceClassificationCategory,
 } from "./types";
 
 // F05-RC-SAFE-001 — the live harness cap is the customer-approved maximum of
-// six; every classifier call in this file goes through an injected fake, so no
-// test ever invokes the live provider.
+// ten (the full-taxonomy acceptance set); every classifier call in this file
+// goes through an injected fake, so no test ever invokes the live provider.
 describe("live evaluation safety cap", () => {
-	it("caps live invocations at six", () => {
-		expect(SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS).toBe(6);
+	it("caps live invocations at ten", () => {
+		expect(SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS).toBe(10);
 	});
 });
 
@@ -72,12 +73,13 @@ describe("four-domain (plus extended) evaluation fixture", () => {
 	it("classifies every evaluation hostname as expected through classifySourceHostname", async () => {
 		const provider = fixtureProvider(EVALUATION_SET);
 		for (const [hostname, expected] of Object.entries(EVALUATION_SET)) {
-			// Each evaluation hostname must be genuinely eligible: built-in
-			// domain-level classification leaves it in "other".
-			expect(categorizeDomain(hostname, new Set(), new Set()), hostname).toBe("other");
+			// These hostnames are unknown to the built-in lists, so their fixture
+			// answers can only have come through the LLM boundary.
+			const deterministicHint = categorizeDomain(hostname, new Set(), new Set());
+			expect(deterministicHint, hostname).toBe("other");
 
 			const result = await classifySourceHostname(
-				{ hostname, classifierVersion: SOURCE_CLASSIFIER_VERSION, builtInCategory: "other" },
+				{ hostname, classifierVersion: SOURCE_CLASSIFIER_VERSION, deterministicHint: "other" },
 				{ resolveProvider: () => provider },
 			);
 			expect(result.category, hostname).toBe(expected);
@@ -92,11 +94,22 @@ describe("four-domain (plus extended) evaluation fixture", () => {
 			{
 				hostname: "any-other-source.example.org",
 				classifierVersion: SOURCE_CLASSIFIER_VERSION,
-				builtInCategory: "other",
 			},
 			{ resolveProvider: () => provider },
 		);
 		expect(result.category).toBe("editorial");
+	});
+
+	it("returns every one of the nine categories through the production boundary", async () => {
+		for (const category of SOURCE_CLASSIFICATION_CATEGORIES) {
+			const hostname = `fixture-${category}.example.org`;
+			const provider = fixtureProvider({ [hostname]: category });
+			const result = await classifySourceHostname(
+				{ hostname, classifierVersion: SOURCE_CLASSIFIER_VERSION, deterministicHint: "other" },
+				{ resolveProvider: () => provider },
+			);
+			expect(result.category, category).toBe(category);
+		}
 	});
 
 	it("validates the fixture's output through the same strict schema as production", async () => {
@@ -108,7 +121,7 @@ describe("four-domain (plus extended) evaluation fixture", () => {
 		};
 		await expect(
 			classifySourceHostname(
-				{ hostname: "broken.example.org", classifierVersion: SOURCE_CLASSIFIER_VERSION, builtInCategory: "other" },
+				{ hostname: "broken.example.org", classifierVersion: SOURCE_CLASSIFIER_VERSION },
 				{ resolveProvider: () => brokenProvider },
 			),
 		).rejects.toThrow();

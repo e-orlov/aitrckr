@@ -340,7 +340,7 @@ export const sourceDomainClassifications = pgTable(
 	(table) => ({
 		categoryCheck: check(
 			"source_domain_classifications_category_check",
-			sql`${table.category} IN ('editorial', 'institutional', 'other')`,
+			sql`${table.category} IN ('editorial', 'reviews', 'ecommerce', 'social', 'developer', 'pr', 'reference', 'institutional', 'other')`,
 		),
 		confidenceCheck: check(
 			"source_domain_classifications_confidence_check",

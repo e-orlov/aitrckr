@@ -1,4 +1,3 @@
-import { categorizeDomain } from "../citations/domain-categories.server";
 import { classifySourceHostname, type SourceClassifierDeps } from "./classifier";
 import { getCurrentSourceClassifications, upsertSourceClassification } from "./store";
 import {
@@ -19,16 +18,14 @@ export interface SourceClassificationJobDeps extends SourceClassifierDeps {
 	classify?: typeof classifySourceHostname;
 }
 
-const EMPTY_SET: Set<string> = new Set();
-
 /**
  * Worker-side core for one classify-source-domain job. Duplicate/racing jobs
  * are safe: the current cache is re-checked here, after the singleton-key
  * dedupe at enqueue, so a hostname classified while this job waited makes no
- * provider call. Invalid payloads and hostnames that stopped being eligible
- * (domain lists updated since enqueue) are skipped without a provider call and
- * without failing the job; provider/validation errors propagate so pg-boss
- * applies its bounded retry policy, and no row is written for them.
+ * provider call. Invalid payloads and stale-version payloads are skipped
+ * without a provider call and without failing the job; provider/validation
+ * errors propagate so pg-boss applies its bounded retry policy, and no row is
+ * written for them.
  */
 export async function runSourceClassificationJob(
 	data: unknown,
@@ -47,12 +44,6 @@ export async function runSourceClassificationJob(
 	const getCurrent = deps.getCurrent ?? getCurrentSourceClassifications;
 	const cached = await getCurrent([payload.hostname]);
 	if (cached.has(payload.hostname)) return { status: "cached" };
-
-	// Deterministic re-check without brand context: the global domain lists may
-	// have learned this hostname since the job was enqueued.
-	if (categorizeDomain(payload.hostname, EMPTY_SET, EMPTY_SET) !== "other") {
-		return { status: "skipped", reason: "hostname is no longer domain-level other" };
-	}
 
 	const classify = deps.classify ?? classifySourceHostname;
 	const classification = await classify(payload, deps);

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "../providers/types";
 import { classifySourceHostname } from "./classifier";
 import {
+	SOURCE_CLASSIFICATION_CATEGORIES,
 	SOURCE_CLASSIFICATION_REASON_MAX_LENGTH,
 	SOURCE_CLASSIFIER_VERSION,
 	type SourceClassificationJobData,
@@ -31,7 +32,6 @@ function fakeProvider(object: unknown, modelVersion?: string): { provider: Provi
 const request = (overrides: Partial<SourceClassificationJobData> = {}): SourceClassificationJobData => ({
 	hostname: "unknown-source.de",
 	classifierVersion: SOURCE_CLASSIFIER_VERSION,
-	builtInCategory: "other",
 	...overrides,
 });
 
@@ -39,28 +39,17 @@ const request = (overrides: Partial<SourceClassificationJobData> = {}): SourceCl
 describe("sourceClassificationResultSchema", () => {
 	const valid = { category: "editorial", confidence: 0.9, reason: "independent publication" };
 
-	it("accepts each allowed category and boundary confidences", () => {
-		for (const category of ["editorial", "institutional", "other"]) {
+	it("accepts each of the nine classifiable categories and boundary confidences", () => {
+		expect(SOURCE_CLASSIFICATION_CATEGORIES).toHaveLength(9);
+		for (const category of SOURCE_CLASSIFICATION_CATEGORIES) {
 			expect(sourceClassificationResultSchema.parse({ ...valid, category })).toMatchObject({ category });
 		}
 		expect(sourceClassificationResultSchema.parse({ ...valid, confidence: 0 }).confidence).toBe(0);
 		expect(sourceClassificationResultSchema.parse({ ...valid, confidence: 1 }).confidence).toBe(1);
 	});
 
-	it("rejects unknown labels — including every reserved built-in category and Google", () => {
-		for (const category of [
-			"brand",
-			"competitor",
-			"reviews",
-			"ecommerce",
-			"social",
-			"developer",
-			"pr",
-			"reference",
-			"Google",
-			"google",
-			"news",
-		]) {
+	it("rejects brand, competitor, and unknown labels", () => {
+		for (const category of ["brand", "competitor", "Google", "google", "news", "Editorial", ""]) {
 			expect(sourceClassificationResultSchema.safeParse({ ...valid, category }).success, category).toBe(false);
 		}
 	});
@@ -106,17 +95,13 @@ describe("classifySourceHostname", () => {
 		});
 	});
 
-	// F05-UT-011 — non-"other" built-in input causes no provider call.
-	it("throws before any provider call when the built-in category is not other", async () => {
-		const { provider, calls } = fakeProvider({ category: "other", confidence: 0.5, reason: "n/a" });
-		const resolveProvider = vi.fn(() => provider);
-		for (const category of ["editorial", "institutional", "reviews", "brand"]) {
-			await expect(
-				classifySourceHostname(request({ builtInCategory: category as never }), { resolveProvider }),
-			).rejects.toThrow(/only "other" is eligible/);
-		}
-		expect(resolveProvider).not.toHaveBeenCalled();
-		expect(calls()).toBe(0);
+	// F05R — a deterministic hint never blocks the call and every LLM category is returnable.
+	it("classifies a hostname carrying any deterministic hint into any of the nine categories", async () => {
+		const { provider } = fakeProvider({ category: "reviews", confidence: 0.95, reason: "comparison platform" });
+		const result = await classifySourceHostname(request({ deterministicHint: "other" }), {
+			resolveProvider: () => provider,
+		});
+		expect(result.category).toBe("reviews");
 	});
 
 	it("rejects non-normalized or invalid hostnames before any provider call", async () => {

@@ -134,6 +134,13 @@
       "when": 1788343819356,
       "tag": "0018_source_domain_classifications",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1788452104012,
+      "tag": "0019_full_source_taxonomy",
+      "breakpoints": true
     }
   ]
 }

@@ -2,7 +2,12 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { SupplementalDomainCategory } from "../citations/domain-categories.server";
 import { db } from "../db/db";
 import { type SourceDomainClassificationRecord, sourceDomainClassifications } from "../db/schema";
-import { SOURCE_CLASSIFIER_VERSION, type SourceClassification, sourceClassificationResultSchema } from "./types";
+import {
+	SOURCE_CLASSIFICATION_CATEGORIES,
+	SOURCE_CLASSIFIER_VERSION,
+	type SourceClassification,
+	sourceClassificationResultSchema,
+} from "./types";
 
 // Bound on hostnames per SELECT so a read never builds an unbounded IN list.
 const LOOKUP_CHUNK_SIZE = 1000;
@@ -41,10 +46,14 @@ export async function getCurrentSourceClassifications(
 	return result;
 }
 
+const SUPPLEMENTAL_CATEGORY_SET: ReadonlySet<string> = new Set(SOURCE_CLASSIFICATION_CATEGORIES);
+
 /**
- * Read-path lookup: current-version `editorial`/`institutional` rows only.
- * A cached `other` is deliberately absent — it must not be promoted and the
- * existing URL/title page fallback still applies to those hostnames.
+ * Read-path lookup: every current-version cache row, as one of the nine
+ * classifiable categories. A cached `other` is a full result — it is returned
+ * so the read path treats the hostname as classified (no page fallback) and no
+ * repeat LLM call is warranted. Rows with an out-of-contract category (only
+ * possible through outside interference) are dropped rather than surfaced.
  */
 export async function getSupplementalDomainCategories(
 	hostnames: string[],
@@ -52,8 +61,8 @@ export async function getSupplementalDomainCategories(
 	const rows = await getCurrentSourceClassifications(hostnames);
 	const result = new Map<string, SupplementalDomainCategory>();
 	for (const [hostname, row] of rows) {
-		if (row.category === "editorial" || row.category === "institutional") {
-			result.set(hostname, row.category);
+		if (SUPPLEMENTAL_CATEGORY_SET.has(row.category)) {
+			result.set(hostname, row.category as SupplementalDomainCategory);
 		}
 	}
 	return result;

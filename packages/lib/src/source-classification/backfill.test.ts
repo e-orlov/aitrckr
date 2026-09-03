@@ -102,7 +102,6 @@ function sumInventories(results: BackfillRunResult[]): Omit<BackfillInventory, "
 		distinctHostnames: 0,
 		invalid: 0,
 		brandOrCompetitorSkipped: 0,
-		deterministicSkipped: 0,
 		cachedCurrentSkipped: 0,
 		staleCached: 0,
 		eligible: 0,
@@ -140,10 +139,11 @@ const FULL_SCAN_COUNTS = {
 	distinctHostnames: 9,
 	invalid: 1,
 	brandOrCompetitorSkipped: 2,
-	deterministicSkipped: 1,
 	cachedCurrentSkipped: 1,
 	staleCached: 1,
-	eligible: 4, // unknown-source.de, otherbrand.com, cached-stale.de, zeta-source.de
+	// unknown-source.de, otherbrand.com, wikipedia.org (deterministically known
+	// domains stay eligible), cached-stale.de, zeta-source.de
+	eligible: 5,
 };
 
 describe("runSourceClassificationBackfill — dry run", () => {
@@ -289,10 +289,10 @@ describe("runSourceClassificationBackfill — enqueue mode", () => {
 	// F05-RC2-AT-002 — the limit lands on the first eligible hostname of a page
 	// that still holds more eligible hostnames after it.
 	it("resumes the remaining eligible hostnames of the same page", async () => {
-		// alpha (eligible) | amazon (deterministic skip) | beta, gamma (eligible)
+		// alpha (eligible) | mybrand (brand skip) | beta, gamma (eligible)
 		const data = [
 			row("alpha-source.de", "brand-a"),
-			row("amazon.com", "brand-a"),
+			row("mybrand.com", "brand-a"),
 			row("beta-source.de", "brand-a"),
 			row("gamma-source.de", "brand-b"),
 		];
@@ -311,7 +311,7 @@ describe("runSourceClassificationBackfill — enqueue mode", () => {
 			},
 		}));
 		expect(sent.sort()).toEqual(["alpha-source.de", "beta-source.de", "gamma-source.de"]);
-		expect(sumInventories(results)).toMatchObject({ eligible: 3, deterministicSkipped: 1 });
+		expect(sumInventories(results)).toMatchObject({ eligible: 3, brandOrCompetitorSkipped: 1 });
 	});
 
 	// F05-RC-AT-002 (retained) — a null send is deduplicated, not accepted, and

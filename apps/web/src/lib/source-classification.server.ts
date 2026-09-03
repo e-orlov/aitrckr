@@ -9,10 +9,10 @@ import { getSupplementalDomainCategories, normalizeSourceHostname } from "@works
 const EMPTY_LOOKUP: SupplementalDomainLookup = () => undefined;
 
 /**
- * Load current-version `editorial`/`institutional` cache rows for the distinct
- * hostnames in a citation set and return the lookup `categorizeDomain` /
- * `classifyUrl` accept. A cache outage degrades to built-in behavior instead of
- * failing the page.
+ * Load current-version cache rows (any of the nine classifiable categories,
+ * including a definitive `other`) for the distinct hostnames in a citation set
+ * and return the lookup `categorizeDomain` / `classifyUrl` accept. A cache
+ * outage degrades to built-in behavior instead of failing the page.
  */
 export async function loadSupplementalDomainLookup(domains: Iterable<string>): Promise<SupplementalDomainLookup> {
 	const hostnames = new Set<string>();

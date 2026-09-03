@@ -27,7 +27,7 @@ export {
 export { normalizeSourceHostname } from "./hostname";
 export type { SourceClassificationJobDeps, SourceClassificationJobOutcome } from "./job";
 export { runSourceClassificationJob } from "./job";
-export { BUILT_IN_CATEGORY_ROLES, buildSourceClassificationPrompt } from "./prompt";
+export { buildSourceClassificationPrompt, SOURCE_CATEGORY_DEFINITIONS } from "./prompt";
 export {
 	ensureSourceClassificationQueue,
 	SOURCE_CLASSIFICATION_QUEUE_OPTIONS,
