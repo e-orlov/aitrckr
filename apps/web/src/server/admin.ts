@@ -812,10 +812,15 @@ export const retryJobFn = createServerFn({ method: "POST" })
 		z.object({
 			promptId: z.string().optional(),
 			jobId: z.string().optional(),
+			/**
+			 * Run the prompt's targets now even if none is due by cadence. This is a
+			 * paid out-of-cadence run, so it is opt-in per call and never the default.
+			 */
+			forceDue: z.boolean().optional(),
 		}),
 	)
 	.handler(async ({ data }) => {
-		await requireAdmin();
+		const session = await requireAdmin();
 
 		const targetPromptId = data.promptId;
 		if (!targetPromptId) {
@@ -829,7 +834,14 @@ export const retryJobFn = createServerFn({ method: "POST" })
 		if (!prompt) throw new Error("Prompt not found");
 		if (!prompt.enabled) throw new Error("Prompt is disabled");
 
-		const success = await sendImmediatePromptJob(targetPromptId);
+		const forceDue = data.forceDue === true;
+		if (forceDue) {
+			// Audit trail: a forced run spends provider budget outside the cadence,
+			// so record which admin asked for it.
+			console.warn(`Admin ${session.user.id} force-triggered prompt ${targetPromptId} past the cadence gate`);
+		}
+
+		const success = await sendImmediatePromptJob(targetPromptId, { forceDue });
 		if (!success) throw new Error("Failed to send job");
 
 		return { success: true, message: `Triggered immediate job for prompt ${targetPromptId}` };

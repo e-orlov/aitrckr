@@ -15,6 +15,7 @@ import {
 	type ResolveRunPlanInput,
 	resolvePromptRunPlan,
 	selectDueTargets,
+	selectRunTargets,
 	targetKey,
 	targetOverdueStatus,
 } from "./policy";
@@ -495,6 +496,17 @@ describe("cadence enforcement", () => {
 			[targetKey(fresh.config), new Date(NOW.getTime() - 1 * 3600 * 1000)], // healthy, fresh
 		]);
 		expect(selectDueTargets([plan, fresh], lastRuns, NOW).map((t) => t.config.model)).toEqual(["chatgpt"]);
+	});
+
+	it("selectRunTargets keeps the cadence gate on the scheduled path", () => {
+		const freshRuns = new Map([[targetKey(plan.config), new Date(NOW.getTime() - 1 * 3600 * 1000)]]);
+		expect(selectRunTargets([plan], freshRuns, NOW, false)).toEqual([]);
+	});
+
+	it("selectRunTargets runs every planned target on a forced run, fresh or not", () => {
+		const fresh = { ...plan, config: { ...plan.config, model: "perplexity" } };
+		const lastRuns = new Map([[targetKey(fresh.config), new Date(NOW.getTime() - 1 * 3600 * 1000)]]);
+		expect(selectRunTargets([plan, fresh], lastRuns, NOW, true)).toEqual([plan, fresh]);
 	});
 });
 

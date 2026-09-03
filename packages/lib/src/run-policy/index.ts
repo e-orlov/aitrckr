@@ -21,6 +21,7 @@ export {
 	resolveBrandPicks,
 	resolvePromptRunPlan,
 	selectDueTargets,
+	selectRunTargets,
 	type TargetOverdueStatus,
 	type TargetPlan,
 	targetKey,

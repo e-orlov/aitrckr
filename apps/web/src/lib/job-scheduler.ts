@@ -147,17 +147,24 @@ export async function recreatePromptJobScheduler(promptId: string, options: Sche
 /**
  * Sends an immediate job to process a prompt (outside of the schedule).
  * Useful for manual retries from the admin UI.
+ *
+ * `forceDue` makes the worker run every planned target even when none is due
+ * by cadence — an operator-paid run. A forced job gets retryLimit 0: by the
+ * time it can fail it has already submitted paid provider calls, and a queue
+ * retry would pay for the whole fan-out again (same reasoning as the
+ * scheduled path's PROMPT_JOB_OPTIONS).
  */
-export async function sendImmediatePromptJob(promptId: string): Promise<boolean> {
+export async function sendImmediatePromptJob(promptId: string, options: { forceDue?: boolean } = {}): Promise<boolean> {
 	try {
 		const boss = await getBoss();
 		const cadenceHours = await getPromptCadenceHours(promptId);
+		const forceDue = options.forceDue === true;
 
 		await boss.send(
 			"process-prompt",
-			{ promptId, cadenceHours },
+			{ promptId, cadenceHours, ...(forceDue ? { forceDue } : {}) },
 			{
-				retryLimit: 3,
+				retryLimit: forceDue ? 0 : 3,
 				retryDelay: 60,
 				retryBackoff: true,
 				expireInSeconds: 60 * 15,

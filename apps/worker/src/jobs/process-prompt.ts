@@ -20,7 +20,7 @@ import {
 	lastRunQueryWindowMs,
 	type PromptRunPlan,
 	resolveBrandPromptRunPlans,
-	selectDueTargets,
+	selectRunTargets,
 	targetKey,
 } from "@workspace/lib/run-policy";
 import { enqueueSourceClassificationsBestEffort } from "@workspace/lib/source-classification";
@@ -37,6 +37,12 @@ export interface ProcessPromptData {
 	cadenceHours?: number;
 	/** Cycles in a row where every run failed, carried forward to size the backoff. */
 	consecutiveFailures?: number;
+	/**
+	 * Operator-triggered run that bypasses the cadence gate. Only the admin
+	 * retry endpoint sets it; the job it queues carries retryLimit 0 so a failed
+	 * forced fan-out is never re-paid by a queue retry.
+	 */
+	forceDue?: boolean;
 }
 
 /**
@@ -457,6 +463,7 @@ async function processPrompt(
 	promptId: string,
 	scrapeConfigs: ModelConfig[],
 	consecutiveFailures: number,
+	forceDue: boolean,
 ): Promise<void> {
 	console.log(`Processing prompt ${promptId}`);
 
@@ -488,7 +495,12 @@ async function processPrompt(
 
 	const maxIntervalHours = Math.max(...plan.targets.map((t) => t.intervalHours));
 	const lastRuns = await getLastRunsByTargetKey(promptId, maxIntervalHours);
-	const dueTargets = selectDueTargets(plan.targets, lastRuns, new Date());
+	if (forceDue) {
+		// Audit trail for a paid out-of-cadence run: who asked is logged by the
+		// admin endpoint; this records that the worker honored it.
+		console.warn(`Force-run: prompt ${promptId} bypassing the cadence gate (operator-triggered)`);
+	}
+	const dueTargets = selectRunTargets(plan.targets, lastRuns, new Date(), forceDue);
 
 	if (dueTargets.length === 0) {
 		// Fired early (expedite, duplicate send): everything is fresh. Keep the
@@ -577,6 +589,11 @@ export async function processPromptJob(jobs: Job<ProcessPromptData>[]): Promise<
 
 	// pg-boss v12 passes an array of jobs - process each one
 	for (const job of jobs) {
-		await processPrompt(job.data.promptId, scrapeConfigs, job.data.consecutiveFailures ?? 0);
+		await processPrompt(
+			job.data.promptId,
+			scrapeConfigs,
+			job.data.consecutiveFailures ?? 0,
+			job.data.forceDue === true,
+		);
 	}
 }
