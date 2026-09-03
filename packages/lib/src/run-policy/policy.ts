@@ -240,6 +240,22 @@ export function selectDueTargets(targets: TargetPlan[], lastRunAtByKey: Map<stri
 }
 
 /**
+ * The one seam where an operator may bypass the cadence gate: a force-run
+ * executes every planned target regardless of run history, while everything
+ * downstream (daily ceiling, dedup, rescheduling) stays on the normal path.
+ * Kept next to selectDueTargets so the gate and its only sanctioned bypass
+ * can't drift apart.
+ */
+export function selectRunTargets(
+	targets: TargetPlan[],
+	lastRunAtByKey: Map<string, Date>,
+	now: Date,
+	forceDue: boolean,
+): TargetPlan[] {
+	return forceDue ? targets : selectDueTargets(targets, lastRunAtByKey, now);
+}
+
+/**
  * Runaway-tenant ceiling: the theoretical daily maximum the plan
  * can produce, with headroom for pick changes and retries. Null = no ceiling.
  * Deliberately derived from plan limits (not current usage) so it's stable
