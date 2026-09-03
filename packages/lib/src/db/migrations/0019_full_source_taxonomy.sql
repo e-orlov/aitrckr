@@ -1,0 +1,2 @@
+ALTER TABLE "source_domain_classifications" DROP CONSTRAINT "source_domain_classifications_category_check";--> statement-breakpoint
+ALTER TABLE "source_domain_classifications" ADD CONSTRAINT "source_domain_classifications_category_check" CHECK ("source_domain_classifications"."category" IN ('editorial', 'reviews', 'ecommerce', 'social', 'developer', 'pr', 'reference', 'institutional', 'other'));

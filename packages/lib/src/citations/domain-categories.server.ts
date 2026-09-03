@@ -543,13 +543,13 @@ export function isInstitutionalDomain(domain: string): boolean {
 
 /**
  * Supplemental domain-role knowledge (the F-05 LLM classification cache),
- * injected by read paths as a plain lookup. It is consulted only after every
- * built-in rule above it has passed — brand/competitor and the deterministic
- * lists always win — and can only add `editorial`/`institutional` for a domain
- * the built-in classifier leaves in `other`. A cached `other` is not present in
- * the lookup, so the URL/title page fallback still applies to those domains.
+ * injected by read paths as a plain lookup. Only the configured brand/
+ * competitor domains outrank it: a current cache row — any of the nine
+ * non-contextual categories, including a definitive `other` — wins over the
+ * built-in domain lists, which stay as the fallback for hostnames the
+ * classifier has not (yet) resolved.
  */
-export type SupplementalDomainCategory = Extract<CitationCategory, "editorial" | "institutional">;
+export type SupplementalDomainCategory = Exclude<CitationCategory, "brand" | "competitor">;
 export type SupplementalDomainLookup = (domain: string) => SupplementalDomainCategory | undefined;
 
 export function categorizeDomain(
@@ -564,6 +564,8 @@ export function categorizeDomain(
 	for (const cd of competitorDomains) {
 		if (domain === cd || domain.endsWith(`.${cd}`)) return "competitor";
 	}
+	const supplementalCategory = supplemental?.(domain);
+	if (supplementalCategory) return supplementalCategory;
 	// Forums (incl. community.X / forums.X subdomains) win over the generic lists
 	// below so a forum on an ecommerce/editorial site isn't miscounted as a store.
 	if (isForumDomain(domain)) return "social";
@@ -575,8 +577,6 @@ export function categorizeDomain(
 	if (isReferenceDomain(domain)) return "reference";
 	if (isEditorialDomain(domain)) return "editorial";
 	if (isInstitutionalDomain(domain)) return "institutional";
-	const supplementalCategory = supplemental?.(domain);
-	if (supplementalCategory === "editorial" || supplementalCategory === "institutional") return supplementalCategory;
 	return "other";
 }
 
@@ -617,6 +617,9 @@ export function classifyUrl(
 ): CitationCategory {
 	const cat = categorizeDomain(domain, brandDomains, competitorDomains, supplemental);
 	if (cat !== "other") return cat;
+	// A cached `other` is a definitive classification of the source — the
+	// URL/title page fallback only applies while no cache row exists.
+	if (supplemental?.(domain) === "other") return "other";
 	const pt = inferPageType(url, title);
 	if (pt === "forum") return "social"; // a forum page on an unlisted domain is still community / UGC
 	if (EDITORIAL_PAGE_TYPES.has(pt)) return "editorial";

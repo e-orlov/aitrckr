@@ -5,6 +5,7 @@ import {
 	PAGE_FALLBACK_HINTS,
 	type PageFallbackHint,
 	SOURCE_CLASSIFIER_VERSION,
+	type SourceClassificationCategory,
 	type SourceClassificationJobData,
 } from "./types";
 
@@ -28,13 +29,16 @@ const PAGE_TYPE_FALLBACK: Partial<Record<string, PageFallbackHint>> = {
 	forum: "social",
 };
 
+const EMPTY_SET: Set<string> = new Set();
+
 /**
  * Turn a freshly persisted citation set into the F-05 job payloads it makes
- * eligible. Pure: normalization, dedupe, brand/competitor exclusion, and the
- * domain-level deterministic gate all happen here; the current-version cache
- * filter is a separate (DB) step. Eligibility is decided on the domain-level
- * built-in result — the URL/title page fallback must not suppress enqueueing,
- * it only contributes bounded enum hints to the payload.
+ * eligible. Pure: normalization, dedupe, and brand/competitor exclusion happen
+ * here; the current-version cache filter is a separate (DB) step. Every valid
+ * hostname that is not a configured brand/competitor domain is eligible — the
+ * built-in domain lists no longer gate classification, they only contribute the
+ * non-authoritative `deterministicHint` (and remain the read-time fallback
+ * until a cache row lands).
  */
 export function collectSourceClassificationCandidates(
 	citationsList: CitationLike[],
@@ -52,15 +56,19 @@ export function collectSourceClassificationCandidates(
 
 	const candidates: SourceClassificationJobData[] = [];
 	for (const [hostname, group] of byHostname) {
-		// Domain-level built-in decision, including brand/competitor context: only
-		// a residual "other" hostname may reach the LLM.
-		if (categorizeDomain(hostname, brandDomains, competitorDomains) !== "other") continue;
+		// Contextual exclusion: configured brand/competitor domains are authoritative
+		// facts, never a classification question.
+		const contextual = categorizeDomain(hostname, brandDomains, competitorDomains);
+		if (contextual === "brand" || contextual === "competitor") continue;
+
+		// The context-free deterministic opinion travels as a hint only.
+		const deterministicHint = categorizeDomain(hostname, EMPTY_SET, EMPTY_SET) as SourceClassificationCategory;
 
 		const { pageTypes, pageFallbackHint } = collectPageHints(group);
 		candidates.push({
 			hostname,
 			classifierVersion: SOURCE_CLASSIFIER_VERSION,
-			builtInCategory: "other",
+			deterministicHint,
 			...(pageTypes.length ? { pageTypeHints: pageTypes as SourceClassificationJobData["pageTypeHints"] } : {}),
 			...(pageFallbackHint ? { pageFallbackHint } : {}),
 		});

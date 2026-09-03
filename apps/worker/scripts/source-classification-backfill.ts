@@ -35,6 +35,7 @@
  *   pnpm backfill:source-classification --cursor TOKEN        # resume a bounded run
  */
 import { parseArgs } from "node:util";
+import { categorizeDomain } from "@workspace/lib/citations/domain-categories.server";
 import { db } from "@workspace/lib/db/db";
 import { brands, citations, competitors, sourceDomainClassifications } from "@workspace/lib/db/schema";
 import {
@@ -181,7 +182,11 @@ async function main(): Promise<void> {
 			send: (hostname) =>
 				boss.send(
 					SOURCE_CLASSIFICATION_QUEUE,
-					{ hostname, classifierVersion: SOURCE_CLASSIFIER_VERSION, builtInCategory: "other" as const },
+					{
+						hostname,
+						classifierVersion: SOURCE_CLASSIFIER_VERSION,
+						deterministicHint: categorizeDomain(hostname, new Set(), new Set()),
+					},
 					{ singletonKey: sourceClassificationSingletonKey(hostname, SOURCE_CLASSIFIER_VERSION) },
 				),
 		};

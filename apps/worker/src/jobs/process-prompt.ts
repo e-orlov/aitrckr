@@ -420,7 +420,7 @@ async function runModelIteration({
 /**
  * Best-effort supplemental source classification for freshly persisted
  * citations: unique eligible hostnames (valid, not brand/competitor for this
- * brand, domain-level "other", no current-version cache row) become one queued
+ * brand, no current-version cache row) become one queued
  * classify-source-domain job each, deduplicated against in-flight jobs by
  * singleton key. Runs only after citations are durably saved, and never fails
  * the prompt run — an outage here just means the hostname is retried on a

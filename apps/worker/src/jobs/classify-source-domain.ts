@@ -2,11 +2,12 @@ import { runSourceClassificationJob, type SourceClassificationJobData } from "@w
 import type { Job } from "pg-boss";
 
 /**
- * Supplemental source classification for one hostname whose built-in
- * domain-level category is "other". All semantics (payload validation, cache
- * re-check, non-`other` guard, provider call, atomic upsert) live in
- * runSourceClassificationJob; a thrown error propagates so pg-boss applies the
- * queue's bounded retry policy without ever writing a false cache row.
+ * Supplemental source classification for one eligible hostname (any valid
+ * cited hostname that is not a configured brand/competitor domain). All
+ * semantics (payload validation, cache re-check, provider call, atomic upsert)
+ * live in runSourceClassificationJob; a thrown error propagates so pg-boss
+ * applies the queue's bounded retry policy without ever writing a false cache
+ * row.
  */
 export async function classifySourceDomainJob(jobs: Job<SourceClassificationJobData>[]): Promise<void> {
 	for (const job of jobs) {

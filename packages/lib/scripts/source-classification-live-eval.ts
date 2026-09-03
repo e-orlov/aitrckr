@@ -97,12 +97,13 @@ function parseExpectations(positionals: string[]): Expectation[] {
 async function evaluateHostnameOnce(
 	hostname: string,
 	expected: SourceClassificationCategory,
+	deterministicHint: SourceClassificationCategory,
 ): Promise<Record<string, unknown> & { status: "PASS" | "FAIL" }> {
 	try {
 		const classification = await classifySourceHostname({
 			hostname,
 			classifierVersion: SOURCE_CLASSIFIER_VERSION,
-			builtInCategory: "other",
+			deterministicHint,
 		});
 		const pass = classification.category === expected;
 		console.log(
@@ -172,16 +173,12 @@ async function main(): Promise<void> {
 	const results: Record<string, unknown>[] = [];
 
 	for (const { hostname, expected } of expectations) {
-		const builtIn = categorizeDomain(hostname, new Set(), new Set());
-		if (builtIn !== "other") {
-			failures++;
-			results.push({ hostname, expected, status: "FAIL", error: `built-in domain-level category is "${builtIn}"` });
-			console.log(`FAIL ${hostname}: built-in category is "${builtIn}", not eligible for F-05 (no LLM call made)`);
-			continue;
-		}
+		// The built-in lists no longer gate eligibility — their context-free result
+		// travels only as the same non-authoritative hint production jobs carry.
+		const deterministicHint = categorizeDomain(hostname, new Set(), new Set()) as SourceClassificationCategory;
 
 		invocations++;
-		const result = await evaluateHostnameOnce(hostname, expected);
+		const result = await evaluateHostnameOnce(hostname, expected, deterministicHint);
 		if (result.status === "FAIL") failures++;
 		results.push(result);
 	}

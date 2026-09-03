@@ -22,6 +22,7 @@
  */
 import {
 	ensureSourceClassificationQueue,
+	SOURCE_CLASSIFICATION_CATEGORIES,
 	SOURCE_CLASSIFICATION_QUEUE,
 	SOURCE_CLASSIFIER_VERSION,
 	sourceClassificationSingletonKey,
@@ -82,11 +83,57 @@ async function verifyConcurrentUpsert(client: Client): Promise<void> {
 	assert(rows.length === 1, `exactly one row remains for the hostname (got ${rows.length})`);
 	assert(rows[0].classifier_version === SOURCE_CLASSIFIER_VERSION, "the surviving row carries the current version");
 	assert(
-		["editorial", "institutional", "other"].includes(rows[0].category),
+		(SOURCE_CLASSIFICATION_CATEGORIES as readonly string[]).includes(rows[0].category),
 		`the surviving row is valid (category ${rows[0].category})`,
 	);
 	const confidence = Number(rows[0].confidence);
 	assert(confidence >= 0 && confidence <= 1, `confidence within bounds (${confidence})`);
+
+	await client.query("DELETE FROM source_domain_classifications WHERE hostname = $1", [HOSTNAME]);
+}
+
+/**
+ * The DB itself enforces the nine-category contract: every classifiable
+ * category persists and reads back, while `brand`, `competitor`, unknown
+ * labels, and out-of-range confidence are rejected by the CHECK constraints.
+ */
+async function verifyCategoryConstraint(client: Client): Promise<void> {
+	await client.query("DELETE FROM source_domain_classifications WHERE hostname = $1", [HOSTNAME]);
+
+	for (const category of SOURCE_CLASSIFICATION_CATEGORIES) {
+		await upsertSourceClassification({
+			hostname: HOSTNAME,
+			category,
+			confidence: 0.5,
+			reason: `category round-trip probe (${category})`,
+			provider: "db-verify",
+			model: "db-verify-model",
+			classifierVersion: SOURCE_CLASSIFIER_VERSION,
+		});
+		const { rows } = await client.query("SELECT category FROM source_domain_classifications WHERE hostname = $1", [
+			HOSTNAME,
+		]);
+		assert(rows.length === 1 && rows[0].category === category, `category "${category}" persists and reads back`);
+	}
+
+	const rejectedInsert = async (category: string, confidence: string): Promise<boolean> => {
+		try {
+			await client.query(
+				`INSERT INTO source_domain_classifications (hostname, category, confidence, reason, provider, classifier_version)
+				 VALUES ($1, $2, $3, 'constraint probe', 'db-verify', $4)
+				 ON CONFLICT (hostname) DO UPDATE SET category = $2, confidence = $3`,
+				[HOSTNAME, category, confidence, SOURCE_CLASSIFIER_VERSION],
+			);
+			return false;
+		} catch {
+			return true;
+		}
+	};
+	for (const forbidden of ["brand", "competitor", "unknown-category"]) {
+		assert(await rejectedInsert(forbidden, "0.5"), `DB rejects category "${forbidden}"`);
+	}
+	assert(await rejectedInsert("other", "1.5"), "DB rejects confidence above 1");
+	assert(await rejectedInsert("other", "-0.5"), "DB rejects confidence below 0");
 
 	await client.query("DELETE FROM source_domain_classifications WHERE hostname = $1", [HOSTNAME]);
 }
@@ -98,7 +145,7 @@ async function verifyQueueDedupe(client: Client, boss: PgBoss): Promise<void> {
 	assert(queue?.policy === "exclusive", `queue policy is exclusive (got ${queue?.policy ?? "missing"})`);
 
 	const singletonKey = sourceClassificationSingletonKey(HOSTNAME, SOURCE_CLASSIFIER_VERSION);
-	const payload = { hostname: HOSTNAME, classifierVersion: SOURCE_CLASSIFIER_VERSION, builtInCategory: "other" };
+	const payload = { hostname: HOSTNAME, classifierVersion: SOURCE_CLASSIFIER_VERSION, deterministicHint: "other" };
 
 	// Start clean in case an earlier run left the probe job behind.
 	await client.query("DELETE FROM pgboss.job WHERE name = $1 AND singleton_key = $2", [
@@ -135,6 +182,7 @@ async function main(): Promise<void> {
 	const boss = new PgBoss({ connectionString: DATABASE_URL, schema: "pgboss", supervise: false });
 	try {
 		await verifyConcurrentUpsert(client);
+		await verifyCategoryConstraint(client);
 		await boss.start();
 		await verifyQueueDedupe(client, boss);
 	} finally {

@@ -7,7 +7,7 @@ import { CITATION_PAGE_TYPES, type CitationPageType } from "../citations/domain-
  * Rows with any other version are stale: ignored at read time and replaced
  * through the normal successful-classification path.
  */
-export const SOURCE_CLASSIFIER_VERSION = "f05-v1";
+export const SOURCE_CLASSIFIER_VERSION = "f05-v2";
 
 /**
  * Identifier for the built-in taxonomy revision described to the LLM. The
@@ -16,16 +16,32 @@ export const SOURCE_CLASSIFIER_VERSION = "f05-v1";
  */
 export const SOURCE_TAXONOMY_VERSION = "elmo-v0.3.0";
 
-/** The only categories the supplemental classifier may produce. */
-export const SOURCE_CLASSIFICATION_CATEGORIES = ["editorial", "institutional", "other"] as const;
+/**
+ * The categories the supplemental classifier may produce: every product
+ * category except `brand` and `competitor`, which are contextual facts resolved
+ * from the configured brand/competitor domain lists and are never a
+ * classification question.
+ */
+export const SOURCE_CLASSIFICATION_CATEGORIES = [
+	"editorial",
+	"reviews",
+	"ecommerce",
+	"social",
+	"developer",
+	"pr",
+	"reference",
+	"institutional",
+	"other",
+] as const;
 export type SourceClassificationCategory = (typeof SOURCE_CLASSIFICATION_CATEGORIES)[number];
 
 export const SOURCE_CLASSIFICATION_REASON_MAX_LENGTH = 500;
 
 /**
  * Strict contract for the LLM's structured answer. Anything outside it —
- * unknown labels, extra keys, NaN/out-of-range confidence, empty or oversized
- * reasons — is a validation error, never coerced into a stored `other`.
+ * unknown labels, `brand`/`competitor`, extra keys, NaN/out-of-range
+ * confidence, empty or oversized reasons — is a validation error, never
+ * coerced into a stored `other`.
  */
 export const sourceClassificationResultSchema = z.strictObject({
 	category: z.enum(SOURCE_CLASSIFICATION_CATEGORIES),
@@ -51,14 +67,15 @@ const MAX_PAGE_TYPE_HINTS = 5;
 
 /**
  * Queue payload: the minimum safe data. Normalized hostname, classifier
- * version, the producer's domain-level built-in result (which must be "other"
- * — the worker refuses anything else before any provider call), and bounded
- * enum-only hints. Never answer text, brand/competitor lists, or secrets.
+ * version, and bounded enum-only hints. `deterministicHint` is the built-in
+ * domain lists' non-authoritative opinion — context the model may weigh and a
+ * read-time fallback while no cache row exists, never ground truth and never a
+ * gate on classifying. Never answer text, brand/competitor lists, or secrets.
  */
 export const sourceClassificationJobSchema = z.strictObject({
 	hostname: z.string().min(1),
 	classifierVersion: z.string().min(1),
-	builtInCategory: z.literal("other"),
+	deterministicHint: z.enum(SOURCE_CLASSIFICATION_CATEGORIES).optional(),
 	pageTypeHints: z
 		.array(z.enum(CITATION_PAGE_TYPES as [CitationPageType, ...CitationPageType[]]))
 		.max(MAX_PAGE_TYPE_HINTS)
@@ -72,10 +89,10 @@ export const SOURCE_CLASSIFICATION_QUEUE = "classify-source-domain";
 
 /**
  * Hard cap on top-level classifier invocations per live-evaluation run — the
- * customer-approved maximum (the six-hostname acceptance set). The live
- * harness refuses larger input lists.
+ * customer-approved maximum (the ten-hostname full-taxonomy acceptance set).
+ * The live harness refuses larger input lists.
  */
-export const SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS = 6;
+export const SOURCE_CLASSIFICATION_LIVE_MAX_INVOCATIONS = 10;
 
 /** One active job per hostname + classifier version (pg-boss singletonKey). */
 export function sourceClassificationSingletonKey(hostname: string, classifierVersion: string): string {

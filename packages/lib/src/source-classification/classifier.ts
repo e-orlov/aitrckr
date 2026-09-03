@@ -22,11 +22,9 @@ export interface SourceClassifierDeps {
  * belongs to the queue (and to the provider's own bounded internal transport
  * policy), not to this function.
  *
- * Guards, in order: the hostname must normalize (and already be normalized),
- * and the supplied domain-level built-in category must be "other" — any other
- * value throws before a provider is even resolved, so a non-eligible hostname
- * can never cause an LLM request. The provider's answer is validated again
- * locally; an invalid answer throws and is never persisted as `other`.
+ * The hostname must normalize (and already be normalized). The provider's
+ * answer is validated again locally; an invalid answer throws and is never
+ * persisted as `other`.
  */
 export async function classifySourceHostname(
 	input: SourceClassificationJobData,
@@ -35,14 +33,6 @@ export async function classifySourceHostname(
 	const normalized = normalizeSourceHostname(input.hostname);
 	if (!normalized || normalized !== input.hostname) {
 		throw new Error(`source classification requires a normalized hostname; got "${input.hostname}"`);
-	}
-
-	// Also enforced by buildSourceClassificationPrompt; checked here first so the
-	// guard holds even if the prompt builder changes.
-	if (input.builtInCategory !== "other") {
-		throw new Error(
-			`source classification requested for built-in category "${input.builtInCategory}" — only "other" is eligible`,
-		);
 	}
 
 	const prompt = buildSourceClassificationPrompt(input);
