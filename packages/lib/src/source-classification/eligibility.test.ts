@@ -7,7 +7,8 @@ const citation = (domain: string, url = `https://${domain}/`, title: string | nu
 
 describe("collectSourceClassificationCandidates", () => {
 	// F05-UT-002 / F05-UT-003 — brand and competitor hostnames (and their
-	// subdomains) never become candidates.
+	// subdomains) never become candidates: they are configured facts, not a
+	// classification question.
 	it("excludes brand and competitor domains including subdomains", () => {
 		const candidates = collectSourceClassificationCandidates(
 			[
@@ -23,26 +24,30 @@ describe("collectSourceClassificationCandidates", () => {
 		expect(candidates.map((c) => c.hostname)).toEqual(["unknown-source.de"]);
 	});
 
-	// F05-AT-003 — every deterministic category is ineligible; only residual
-	// domain-level "other" hostnames become candidates.
-	it("excludes every deterministically categorized domain", () => {
-		const deterministic = [
-			"nytimes.com", // editorial
-			"g2.com", // reviews
-			"amazon.com", // ecommerce
-			"reddit.com", // social
-			"github.com", // developer
-			"prnewswire.com", // pr
-			"wikipedia.org", // reference
-			"nih.gov", // institutional
-			"forums.example-shop.com", // forum subdomain -> social
-		];
+	// F05R — the built-in lists no longer gate eligibility: a deterministically
+	// known reviews/ecommerce/social/... domain is still a candidate, with the
+	// deterministic result carried only as a non-authoritative hint.
+	it("keeps deterministically categorized domains eligible and carries the deterministic hint", () => {
+		const expectations: Record<string, string> = {
+			"nytimes.com": "editorial",
+			"g2.com": "reviews",
+			"amazon.com": "ecommerce",
+			"reddit.com": "social",
+			"github.com": "developer",
+			"prnewswire.com": "pr",
+			"wikipedia.org": "reference",
+			"nih.gov": "institutional",
+			"unknown-source.de": "other",
+		};
 		const candidates = collectSourceClassificationCandidates(
-			[...deterministic.map((d) => citation(d)), citation("unknown-source.de")],
+			Object.keys(expectations).map((d) => citation(d)),
 			none,
 			none,
 		);
-		expect(candidates.map((c) => c.hostname)).toEqual(["unknown-source.de"]);
+		expect(candidates.map((c) => c.hostname).sort()).toEqual(Object.keys(expectations).sort());
+		for (const candidate of candidates) {
+			expect(candidate.deterministicHint, candidate.hostname).toBe(expectations[candidate.hostname]);
+		}
 	});
 
 	// F05-AT-004 / F05-IT-004 — many citations of one hostname yield one candidate.
@@ -61,9 +66,8 @@ describe("collectSourceClassificationCandidates", () => {
 		expect(candidates[0].hostname).toBe("unknown-source.de");
 	});
 
-	// F05-FR-003 — an article-looking page does not suppress domain-level
-	// eligibility; the page signal rides along as a bounded hint instead.
-	it("keeps an unknown hostname eligible when its pages look editorial, and carries bounded enum hints", () => {
+	// F05-FR-003 — page-type signals ride along as bounded hints, never as the answer.
+	it("carries bounded enum page hints and a payload that validates against the queue contract", () => {
 		const candidates = collectSourceClassificationCandidates(
 			[
 				citation("unknown-source.de", "https://unknown-source.de/blog/best-10-tools", "Best 10 tools reviewed"),
@@ -74,21 +78,20 @@ describe("collectSourceClassificationCandidates", () => {
 		);
 		expect(candidates).toHaveLength(1);
 		const candidate = candidates[0];
-		expect(candidate.builtInCategory).toBe("other");
+		expect(candidate.deterministicHint).toBe("other");
 		expect(candidate.classifierVersion).toBe(SOURCE_CLASSIFIER_VERSION);
 		expect(candidate.pageFallbackHint).toBe("editorial");
 		expect(candidate.pageTypeHints?.length).toBeLessThanOrEqual(5);
-		// F05-IT-011 — the payload validates against the queue contract and holds
-		// nothing beyond hostname, version, built-in result, and enum hints.
+		// F05-IT-011 — nothing beyond hostname, version, and enum hints.
 		expect(sourceClassificationJobSchema.parse(candidate)).toEqual(candidate);
 	});
 
-	it("returns no candidates when everything is invalid, brand, or deterministic", () => {
+	it("returns no candidates when everything is invalid or brand/competitor", () => {
 		expect(
 			collectSourceClassificationCandidates(
-				[citation("localhost"), citation("mybrand.com"), citation("wikipedia.org")],
+				[citation("localhost"), citation("mybrand.com"), citation("rival.io")],
 				new Set(["mybrand.com"]),
-				none,
+				new Set(["rival.io"]),
 			),
 		).toEqual([]);
 	});

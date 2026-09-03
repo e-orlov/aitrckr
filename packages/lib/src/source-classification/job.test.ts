@@ -11,7 +11,7 @@ import { SOURCE_CLASSIFIER_VERSION, type SourceClassification } from "./types";
 const payload = (overrides: Record<string, unknown> = {}) => ({
 	hostname: "unknown-source.de",
 	classifierVersion: SOURCE_CLASSIFIER_VERSION,
-	builtInCategory: "other" as const,
+	deterministicHint: "other" as const,
 	...overrides,
 });
 
@@ -73,11 +73,14 @@ describe("runSourceClassificationJob", () => {
 		expect(d.persist).toHaveBeenCalledTimes(1);
 	});
 
-	// F05-UT-011 (worker side) — a payload whose built-in category is not "other"
-	// never reaches the provider.
-	it("rejects payloads whose built-in category is not other, without a provider call", async () => {
+	// F05R — payloads keep the old builtInCategory shape after a deploy race; the
+	// strict schema rejects them without a provider call rather than misreading them.
+	it("rejects payloads carrying the retired builtInCategory field, without a provider call", async () => {
 		const d = deps();
-		const outcome = await runSourceClassificationJob(payload({ builtInCategory: "editorial" }), d);
+		const outcome = await runSourceClassificationJob(
+			payload({ deterministicHint: undefined, builtInCategory: "other" }),
+			d,
+		);
 		expect(outcome).toMatchObject({ status: "skipped" });
 		expect(d.classify).not.toHaveBeenCalled();
 		expect(d.persist).not.toHaveBeenCalled();
@@ -92,12 +95,18 @@ describe("runSourceClassificationJob", () => {
 		expect(d.classify).not.toHaveBeenCalled();
 	});
 
-	it("skips without a provider call when the hostname is no longer domain-level other", async () => {
-		// wikipedia.org is deterministically "reference" — the global re-check catches it.
-		const d = deps();
-		const outcome = await runSourceClassificationJob(payload({ hostname: "wikipedia.org" }), d);
-		expect(outcome).toMatchObject({ status: "skipped", reason: "hostname is no longer domain-level other" });
-		expect(d.classify).not.toHaveBeenCalled();
+	// F05R — deterministically known domains are classifiable; the built-in lists
+	// no longer veto the provider call.
+	it("classifies a deterministically known hostname instead of skipping it", async () => {
+		const d = deps({
+			classify: vi.fn(async () => ({ ...classification, hostname: "wikipedia.org", category: "reference" as const })),
+		});
+		const outcome = await runSourceClassificationJob(
+			payload({ hostname: "wikipedia.org", deterministicHint: "reference" }),
+			d,
+		);
+		expect(outcome).toMatchObject({ status: "classified" });
+		expect(d.classify).toHaveBeenCalledTimes(1);
 	});
 
 	// F05-IT-002 / F05-AT-008 — provider or validation failure propagates (bounded

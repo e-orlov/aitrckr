@@ -2,24 +2,43 @@
  * F-05 effective-category precedence over the shared classifier
  * (@workspace/lib re-exported through @/lib/domain-categories.server):
  *
- *   1. brand/competitor (current config)  2. deterministic domain rules
- *   3. cached F-05 editorial/institutional  4. URL/title page fallback  5. other
+ *   1. brand/competitor (current config)  2. cached current-version LLM result
+ *   (any of the nine categories, including a definitive "other")
+ *   3. deterministic domain rules  4. URL/title page fallback  5. other
  */
 import { describe, expect, it } from "vitest";
 import { CITATION_CATEGORIES, type CitationCategory } from "@/lib/domain-categories";
-import { categorizeDomain, classifyUrl, type SupplementalDomainLookup } from "@/lib/domain-categories.server";
+import {
+	categorizeDomain,
+	classifyUrl,
+	type SupplementalDomainCategory,
+	type SupplementalDomainLookup,
+} from "@/lib/domain-categories.server";
 
 const none = new Set<string>();
 const supplementalFor =
-	(entries: Record<string, "editorial" | "institutional">): SupplementalDomainLookup =>
+	(entries: Record<string, SupplementalDomainCategory>): SupplementalDomainLookup =>
 	(domain) =>
 		entries[domain];
 
-describe("F05-UT-004 — eleven-category taxonomy regression with supplemental lookup active", () => {
-	it("keeps every deterministic category and never yields a Google category", () => {
-		// A supplemental lookup that would relabel everything institutional — it
-		// must never be consulted for a deterministically categorized domain.
-		const aggressive: SupplementalDomainLookup = () => "institutional";
+describe("F05-UT-004 — eleven-category product taxonomy", () => {
+	it("has exactly the eleven product categories", () => {
+		expect(CITATION_CATEGORIES).toEqual([
+			"brand",
+			"competitor",
+			"editorial",
+			"reviews",
+			"ecommerce",
+			"social",
+			"developer",
+			"pr",
+			"reference",
+			"institutional",
+			"other",
+		]);
+	});
+
+	it("resolves every deterministic category when no cache row exists", () => {
 		const expectations: [string, CitationCategory][] = [
 			["mybrand.com", "brand"],
 			["rival.io", "competitor"],
@@ -31,19 +50,18 @@ describe("F05-UT-004 — eleven-category taxonomy regression with supplemental l
 			["prnewswire.com", "pr"],
 			["wikipedia.org", "reference"],
 			["nih.gov", "institutional"],
-			["unlisted-company.de", "institutional"], // only the residual case reaches the lookup
+			["unlisted-company.de", "other"],
 		];
 		for (const [domain, expected] of expectations) {
-			expect(categorizeDomain(domain, new Set(["mybrand.com"]), new Set(["rival.io"]), aggressive), domain).toBe(
-				expected,
-			);
+			expect(
+				categorizeDomain(domain, new Set(["mybrand.com"]), new Set(["rival.io"]), supplementalFor({})),
+				domain,
+			).toBe(expected);
 		}
-		expect(CITATION_CATEGORIES).toHaveLength(11);
-		expect(CITATION_CATEGORIES).not.toContain("google");
 	});
 });
 
-describe("F05-UT-005 — five-stage effective order", () => {
+describe("F05-UT-005 — effective precedence order", () => {
 	const cached = supplementalFor({ "cached.de": "institutional" });
 
 	// F05-AT-001 — brand (incl. subdomain) wins over a cached F-05 result.
@@ -63,22 +81,57 @@ describe("F05-UT-005 — five-stage effective order", () => {
 		expect(afterRemoval).toBe("institutional"); // reveals the cached classification
 	});
 
-	it("deterministic domain rules beat the cached classification", () => {
-		const conflicting = supplementalFor({ "wikipedia.org": "editorial" } as never);
-		expect(categorizeDomain("wikipedia.org", none, none, conflicting)).toBe("reference");
+	// F05R — a current cache row corrects the deterministic domain lists.
+	it("a cached classification beats a conflicting deterministic list entry", () => {
+		const corrections = supplementalFor({
+			"wikipedia.org": "editorial",
+			"g2.com": "ecommerce",
+			"reddit.com": "other",
+		});
+		expect(categorizeDomain("wikipedia.org", none, none, corrections)).toBe("editorial");
+		expect(categorizeDomain("g2.com", none, none, corrections)).toBe("ecommerce");
+		expect(categorizeDomain("reddit.com", none, none, corrections)).toBe("other");
 	});
 
-	// F05-AT-006 — a cached editorial/institutional result precedes the page-type fallback.
+	it("every one of the nine cached categories is surfaced as the effective category", () => {
+		const categories: SupplementalDomainCategory[] = [
+			"editorial",
+			"reviews",
+			"ecommerce",
+			"social",
+			"developer",
+			"pr",
+			"reference",
+			"institutional",
+			"other",
+		];
+		for (const category of categories) {
+			const lookup = supplementalFor({ "cached.de": category });
+			expect(categorizeDomain("cached.de", none, none, lookup), category).toBe(category);
+		}
+	});
+
+	// F05-AT-006 — a cached result precedes the page-type fallback.
 	it("cached institutional wins over an article-looking URL", () => {
 		expect(classifyUrl("cached.de", "https://cached.de/blog/10-best-tips", "10 best tips", none, none, cached)).toBe(
 			"institutional",
 		);
 	});
 
-	// F05-AT-007 / F05-UT-006 — absent from the lookup (incl. a valid cached
-	// "other") falls through to the existing page-type fallback.
-	it("a domain without a promotable cache entry falls through to page-type fallback", () => {
+	// F05R — a cached "other" is a definitive source classification: it also
+	// suppresses the page-type fallback.
+	it("cached other wins over an article-looking URL", () => {
+		const lookup = supplementalFor({ "plain.de": "other" });
+		expect(classifyUrl("plain.de", "https://plain.de/blog/review-of-x", "Review of X", none, none, lookup)).toBe(
+			"other",
+		);
+	});
+
+	// F05-AT-007 — a domain absent from the lookup falls through to the
+	// deterministic lists, then the page-type fallback.
+	it("a domain without a cache entry falls through to deterministic rules and page-type fallback", () => {
 		const lookup = supplementalFor({});
+		expect(categorizeDomain("wikipedia.org", none, none, lookup)).toBe("reference");
 		expect(classifyUrl("plain.de", "https://plain.de/blog/review-of-x", "Review of X", none, none, lookup)).toBe(
 			"editorial",
 		);

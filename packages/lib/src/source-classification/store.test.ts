@@ -36,7 +36,7 @@ import {
 	getSupplementalDomainCategories,
 	upsertSourceClassification,
 } from "./store";
-import { SOURCE_CLASSIFIER_VERSION, type SourceClassification } from "./types";
+import { SOURCE_CLASSIFICATION_CATEGORIES, SOURCE_CLASSIFIER_VERSION, type SourceClassification } from "./types";
 
 beforeEach(() => {
 	dbState.rows = [];
@@ -65,14 +65,18 @@ describe("getCurrentSourceClassifications", () => {
 });
 
 describe("getSupplementalDomainCategories", () => {
-	// F05-FR-009 / F05-AT-007 — only editorial/institutional are promotable; a
-	// valid cached "other" is not part of the read-path lookup.
-	it("keeps editorial/institutional and drops cached other", async () => {
-		dbState.rows = [row("edit.de", "editorial"), row("inst.de", "institutional"), row("plain.de", "other")];
-		const result = await getSupplementalDomainCategories(["edit.de", "inst.de", "plain.de"]);
-		expect(result.get("edit.de")).toBe("editorial");
-		expect(result.get("inst.de")).toBe("institutional");
-		expect(result.has("plain.de")).toBe(false);
+	// F05R — every current-version row surfaces, including a definitive cached
+	// "other"; only out-of-contract categories are dropped.
+	it("returns each of the nine categories including cached other, dropping out-of-contract rows", async () => {
+		dbState.rows = [
+			...SOURCE_CLASSIFICATION_CATEGORIES.map((category) => row(`${category}.example`, category)),
+			row("corrupt.example", "brand"),
+		];
+		const result = await getSupplementalDomainCategories(dbState.rows.map((r) => (r as { hostname: string }).hostname));
+		for (const category of SOURCE_CLASSIFICATION_CATEGORIES) {
+			expect(result.get(`${category}.example`)).toBe(category);
+		}
+		expect(result.has("corrupt.example")).toBe(false);
 	});
 });
 
@@ -120,7 +124,8 @@ describe("upsertSourceClassification", () => {
 	// F05-FR-004 / F05-UT-007 — an invalid value can never become a cache row,
 	// whatever path produced it.
 	it("re-validates at the persistence boundary and writes nothing for invalid values", async () => {
-		await expect(upsertSourceClassification({ ...classification, category: "ecommerce" as never })).rejects.toThrow();
+		await expect(upsertSourceClassification({ ...classification, category: "brand" as never })).rejects.toThrow();
+		await expect(upsertSourceClassification({ ...classification, category: "competitor" as never })).rejects.toThrow();
 		await expect(upsertSourceClassification({ ...classification, confidence: 1.5 })).rejects.toThrow();
 		await expect(upsertSourceClassification({ ...classification, reason: "" })).rejects.toThrow();
 		expect(dbState.upserts).toHaveLength(0);

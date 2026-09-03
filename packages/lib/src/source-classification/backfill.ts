@@ -178,7 +178,6 @@ function emptyInventory(): BackfillInventory {
 	};
 }
 
-
 /** Decide one hostname group short of the cache check. */
 function decideHostname(
 	hostname: string,
