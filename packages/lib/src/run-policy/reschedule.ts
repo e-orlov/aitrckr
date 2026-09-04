@@ -42,8 +42,10 @@ export interface RescheduleDeps {
 		data: { promptId: string; consecutiveFailures: number },
 		options: Record<string, unknown>,
 	): Promise<string | null>;
-	/** True when a future `created` process-prompt job with this key exists. */
-	hasScheduledChainJob(singletonKey: string): Promise<boolean>;
+	/** Ids of `created` process-prompt jobs with this key, oldest first. */
+	listScheduledChainJobs(singletonKey: string): Promise<string[]>;
+	/** pg-boss cancel of one `created` chain job (supported API, idempotent). */
+	cancelChainJob(jobId: string): Promise<void>;
 }
 
 export type RescheduleOutcome =
@@ -57,6 +59,19 @@ export type RescheduleOutcome =
 	 * otherwise silently kills the chain (send resolves null, no job exists).
 	 */
 	| { status: "revived"; jobId: string };
+
+/**
+ * Converge on exactly one `created` chain job: keep the oldest, cancel the
+ * rest. Concurrent revives can each pass the pre-check before any of them
+ * commits (the unthrottled resend has no slot, so pg-boss cannot dedupe it on
+ * a standard-policy queue); every racer runs this sweep, all compute the same
+ * survivor, and cancelling an already-cancelled job is a no-op.
+ */
+async function convergeToOneChainJob(singletonKey: string, deps: RescheduleDeps): Promise<boolean> {
+	const jobs = await deps.listScheduledChainJobs(singletonKey);
+	for (const duplicate of jobs.slice(1)) await deps.cancelChainJob(duplicate);
+	return jobs.length > 0;
+}
 
 /**
  * Idempotently ensure a prompt has EXACTLY ONE future cadence chain job.
@@ -75,7 +90,7 @@ export async function ensureNextRunScheduled(
 	deps: RescheduleDeps,
 ): Promise<RescheduleOutcome> {
 	const singletonKey = promptChainSingletonKey(promptId);
-	if (await deps.hasScheduledChainJob(singletonKey)) return { status: "existing" };
+	if (await convergeToOneChainJob(singletonKey, deps)) return { status: "existing" };
 
 	const delayHours = failureBackoffHours(consecutiveFailures, cadenceHours);
 	const startAfterSeconds = Math.round(delayHours * 60 * 60);
@@ -87,12 +102,15 @@ export async function ensureNextRunScheduled(
 		startAfter: startAfterSeconds,
 		...PROMPT_JOB_OPTIONS,
 	});
-	if (jobId !== null) return { status: "scheduled", jobId };
+	if (jobId !== null) {
+		await convergeToOneChainJob(singletonKey, deps);
+		return { status: "scheduled", jobId };
+	}
 
 	// Throttled. If a live future job exists after all (racing sender won), the
 	// chain is intact; otherwise the slot was occupied by a finished job and the
 	// chain must be revived with an unthrottled send.
-	if (await deps.hasScheduledChainJob(singletonKey)) return { status: "existing" };
+	if (await convergeToOneChainJob(singletonKey, deps)) return { status: "existing" };
 	const revivedId = await deps.send("process-prompt", data, {
 		singletonKey,
 		startAfter: startAfterSeconds,
@@ -101,5 +119,7 @@ export async function ensureNextRunScheduled(
 	if (revivedId === null) {
 		throw new Error(`pg-boss dropped the unthrottled chain send for prompt ${promptId}`);
 	}
+	// Racing revivers can each insert an unthrottled job; converge afterwards.
+	await convergeToOneChainJob(singletonKey, deps);
 	return { status: "revived", jobId: revivedId };
 }
