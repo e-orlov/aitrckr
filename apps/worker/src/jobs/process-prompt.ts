@@ -63,11 +63,14 @@ async function scheduleNextRun(promptId: string, cadenceHours: number, consecuti
 	try {
 		const outcome = await ensureNextRunScheduled(promptId, cadenceHours, consecutiveFailures, {
 			send: (queue, data, options) => boss.send(queue, data, options),
-			hasScheduledChainJob: async (singletonKey) => {
+			listScheduledChainJobs: async (singletonKey) => {
 				const rows = await db.execute(
-					sql`select 1 from pgboss.job where name = 'process-prompt' and singleton_key = ${singletonKey} and state = 'created' limit 1`,
+					sql`select id from pgboss.job where name = 'process-prompt' and singleton_key = ${singletonKey} and state = 'created' order by created_on`,
 				);
-				return rows.rows.length > 0;
+				return rows.rows.map((row) => String((row as { id: unknown }).id));
+			},
+			cancelChainJob: async (jobId) => {
+				await boss.cancel("process-prompt", jobId);
 			},
 		});
 		const reason = consecutiveFailures > 0 ? ` (after ${consecutiveFailures} failed cycle(s))` : "";

@@ -10,14 +10,18 @@ import {
 const PROMPT = "11111111-2222-3333-4444-555555555555";
 
 /**
- * A fake pg-boss chain store faithful to the production failure mode:
+ * A fake pg-boss chain store faithful to the production failure modes:
  * `send` with singletonSeconds resolves null whenever ANY job with the same
  * singleton key was created in the same throttle slot — including one that has
- * already completed (the slot does not care about state). `created` jobs are
- * the live chain.
+ * already completed (the slot does not care about state) — while an
+ * unthrottled send always inserts (a standard-policy queue cannot dedupe a
+ * bare singletonKey). `created` jobs are the live chain.
  */
-function chainStore(initial: { key: string; state: "created" | "completed" }[] = []) {
-	const jobs = [...initial];
+function chainStore(initial: { key: string; state: "created" | "completed" | "cancelled" }[] = []) {
+	const jobs: { id: string; key: string; state: "created" | "completed" | "cancelled" }[] = initial.map((j, i) => ({
+		id: `seed-${i}`,
+		...j,
+	}));
 	let nextId = 1;
 	const sentOptions: Record<string, unknown>[] = [];
 	const deps: RescheduleDeps = {
@@ -25,12 +29,23 @@ function chainStore(initial: { key: string; state: "created" | "completed" }[] =
 			sentOptions.push(options);
 			const key = options.singletonKey as string;
 			if (options.singletonSeconds !== undefined && jobs.some((j) => j.key === key)) return null;
-			jobs.push({ key, state: "created" });
-			return `job-${nextId++}`;
+			const id = `job-${nextId++}`;
+			jobs.push({ id, key, state: "created" });
+			return id;
 		}),
-		hasScheduledChainJob: vi.fn(async (key) => jobs.some((j) => j.key === key && j.state === "created")),
+		listScheduledChainJobs: vi.fn(async (key) =>
+			jobs.filter((j) => j.key === key && j.state === "created").map((j) => j.id),
+		),
+		cancelChainJob: vi.fn(async (jobId) => {
+			const job = jobs.find((j) => j.id === jobId);
+			if (job && job.state === "created") job.state = "cancelled";
+		}),
 	};
 	return { jobs, deps, sentOptions, send: deps.send as ReturnType<typeof vi.fn> };
+}
+
+function createdJobs(store: ReturnType<typeof chainStore>) {
+	return store.jobs.filter((j) => j.state === "created");
 }
 
 describe("ensureNextRunScheduled", () => {
@@ -41,7 +56,7 @@ describe("ensureNextRunScheduled", () => {
 		const outcome = await ensureNextRunScheduled(PROMPT, 12, 0, store.deps);
 		expect(outcome).toEqual({ status: "existing" });
 		expect(store.send).not.toHaveBeenCalled();
-		expect(store.jobs.filter((j) => j.state === "created")).toHaveLength(1);
+		expect(createdJobs(store)).toHaveLength(1);
 	});
 
 	// F05R-F2 #2 — no future schedule: exactly one chain job is created.
@@ -64,7 +79,7 @@ describe("ensureNextRunScheduled", () => {
 		const store = chainStore([{ key: promptChainSingletonKey(PROMPT), state: "completed" }]);
 		const outcome = await ensureNextRunScheduled(PROMPT, 12, 0, store.deps);
 		expect(outcome).toMatchObject({ status: "revived" });
-		expect(store.jobs.filter((j) => j.state === "created")).toHaveLength(1);
+		expect(createdJobs(store)).toHaveLength(1);
 		// The revive send must not carry the slot throttle that nulled the first.
 		expect(store.sentOptions[1].singletonSeconds).toBeUndefined();
 	});
@@ -76,7 +91,7 @@ describe("ensureNextRunScheduled", () => {
 		const second = await ensureNextRunScheduled(PROMPT, 12, 0, store.deps);
 		expect(first).toMatchObject({ status: "scheduled" });
 		expect(second).toEqual({ status: "existing" });
-		expect(store.jobs.filter((j) => j.state === "created")).toHaveLength(1);
+		expect(createdJobs(store)).toHaveLength(1);
 	});
 
 	// F05R-F2 #5/#6 — every chain send carries the shared options: retryLimit 0
@@ -103,7 +118,7 @@ describe("ensureNextRunScheduled", () => {
 		const store = chainStore([{ key: otherKey, state: "created" }]);
 		const outcome = await ensureNextRunScheduled(PROMPT, 12, 0, store.deps);
 		expect(outcome).toMatchObject({ status: "scheduled" });
-		expect(store.deps.hasScheduledChainJob).toHaveBeenCalledWith(promptChainSingletonKey(PROMPT));
+		expect(store.deps.listScheduledChainJobs).toHaveBeenCalledWith(promptChainSingletonKey(PROMPT));
 		for (const options of store.sentOptions) {
 			expect(options.singletonKey).toBe(promptChainSingletonKey(PROMPT));
 		}
@@ -113,15 +128,46 @@ describe("ensureNextRunScheduled", () => {
 	// A racing sender that committed its chain between the null send and the
 	// re-check is respected — no revive, no duplicate.
 	it("does not revive when a racing sender already created the chain", async () => {
-		const key = promptChainSingletonKey(PROMPT);
 		let checks = 0;
 		const send = vi.fn(async () => null);
 		const outcome = await ensureNextRunScheduled(PROMPT, 12, 0, {
 			send,
-			hasScheduledChainJob: async () => ++checks === 2, // absent before send, present after
+			listScheduledChainJobs: async () => (++checks === 2 ? ["racer-job"] : []), // absent before send, present after
+			cancelChainJob: async () => {},
 		});
 		expect(outcome).toEqual({ status: "existing" });
 		expect(send).toHaveBeenCalledTimes(1);
+	});
+
+	// SCHED-01 rehearsal regression — three completions of one prompt's jobs can
+	// each pass the pre-check before any revive commits (the unthrottled resend
+	// is not deduped by a standard-policy queue). Every racer's convergence
+	// sweep must leave exactly one created chain job.
+	it("converges concurrent revives onto exactly one chain job", async () => {
+		const store = chainStore([{ key: promptChainSingletonKey(PROMPT), state: "completed" }]);
+		await Promise.all([
+			ensureNextRunScheduled(PROMPT, 12, 0, store.deps),
+			ensureNextRunScheduled(PROMPT, 12, 0, store.deps),
+			ensureNextRunScheduled(PROMPT, 12, 0, store.deps),
+		]);
+		// One more pass models the next completion; whatever the race left, the
+		// store must already be (and stay) at exactly one created job.
+		await ensureNextRunScheduled(PROMPT, 12, 0, store.deps);
+		expect(createdJobs(store)).toHaveLength(1);
+	});
+
+	it("sweeps pre-existing duplicate chain jobs down to the oldest one", async () => {
+		const key = promptChainSingletonKey(PROMPT);
+		const store = chainStore([
+			{ key, state: "created" },
+			{ key, state: "created" },
+			{ key, state: "created" },
+		]);
+		const outcome = await ensureNextRunScheduled(PROMPT, 12, 0, store.deps);
+		expect(outcome).toEqual({ status: "existing" });
+		expect(createdJobs(store)).toHaveLength(1);
+		expect(createdJobs(store)[0].id).toBe("seed-0");
+		expect(store.send).not.toHaveBeenCalled();
 	});
 
 	// The failure backoff still shortens the delay on failed cycles.
