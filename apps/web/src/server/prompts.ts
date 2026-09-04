@@ -563,7 +563,7 @@ export const updatePromptsFn = createServerFn({ method: "POST" })
 					.set({
 						value: prompt.value,
 						enabled: prompt.enabled,
-						tags: prompt.tags || [],
+						tags: after.tags,
 						systemTags: computeSystemTags(prompt.value, brand.name, brand.website),
 						premiumModels: after.premiumModels,
 					})
@@ -576,7 +576,7 @@ export const updatePromptsFn = createServerFn({ method: "POST" })
 						brandId: data.brandId,
 						value: prompt.value,
 						enabled: prompt.enabled,
-						tags: prompt.tags || [],
+						tags: after.tags,
 						systemTags: computeSystemTags(prompt.value, brand.name, brand.website),
 						premiumModels: after.premiumModels,
 					})),
