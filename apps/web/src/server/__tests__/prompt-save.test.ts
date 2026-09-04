@@ -65,7 +65,7 @@ describe("what grounded models a row ends up carrying", () => {
 		const existing = [stored("own", { enabled: false, premiumModels: ["claude"] })];
 		const plan = planPromptSave([submitted({ id: "own", enabled: false, premiumModels: ["claude"] })], existing);
 
-		expect(plan.updates[0].after).toEqual({ enabled: false, premiumModels: ["claude"] });
+		expect(plan.updates[0].after).toEqual({ enabled: false, tags: [], premiumModels: ["claude"] });
 	});
 });
 
@@ -75,12 +75,43 @@ describe("the plan prices the save", () => {
 		const plan = planPromptSave([submitted({ id: "own", premiumModels: ["claude"] })], existing);
 
 		expect(plan.updates[0].before).toEqual(existing[0]);
-		expect(plan.updates[0].after).toEqual({ enabled: true, premiumModels: ["claude"] });
+		expect(plan.updates[0].after).toEqual({ enabled: true, tags: [], premiumModels: ["claude"] });
 	});
 
 	it("leaves an insert with no before", () => {
 		const plan = planPromptSave([submitted()], []);
 
 		expect(plan.inserts[0]).not.toHaveProperty("before");
+	});
+});
+
+describe("what tags a row ends up carrying", () => {
+	// F04-IT-002 / F04-FR-010 — the save normalizes tags itself rather than
+	// trusting the browser to have done it.
+	it("normalizes an insert's tags: trimmed, lowercased, empties and repeats dropped, order kept", () => {
+		const plan = planPromptSave(
+			[submitted({ tags: [" Insurance ", "COMPARISON", "insurance", "", "  ", "Family"] })],
+			[],
+		);
+
+		expect(plan.inserts[0].after.tags).toEqual(["insurance", "comparison", "family"]);
+	});
+
+	it("normalizes an update's tags the same way", () => {
+		const plan = planPromptSave([submitted({ id: "own", tags: ["Seo", "seo", " tools"] })], [stored("own")]);
+
+		expect(plan.updates[0].after.tags).toEqual(["seo", "tools"]);
+	});
+
+	it("treats missing tags as none", () => {
+		const plan = planPromptSave([submitted({ tags: undefined })], []);
+
+		expect(plan.inserts[0].after.tags).toEqual([]);
+	});
+
+	it("keeps branded and unbranded as user tags, since they are the override mechanism", () => {
+		const plan = planPromptSave([submitted({ tags: ["Branded", "unbranded"] })], []);
+
+		expect(plan.inserts[0].after.tags).toEqual(["branded", "unbranded"]);
 	});
 });

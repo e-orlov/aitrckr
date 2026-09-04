@@ -1,4 +1,5 @@
 import { selectPremiumModels } from "@workspace/config/plans";
+import { sanitizeUserTags } from "@workspace/lib/tag-utils";
 
 export interface SubmittedPrompt {
 	id?: string;
@@ -16,6 +17,7 @@ export interface StoredPrompt {
 
 export interface PlannedState {
 	enabled: boolean;
+	tags: string[];
 	premiumModels: string[];
 }
 
@@ -47,7 +49,13 @@ export function planPromptSave(
 	const inserts: PlannedInsert[] = [];
 
 	for (const prompt of submitted) {
-		const after = { enabled: prompt.enabled, premiumModels: selectPremiumModels(prompt.premiumModels) };
+		// Tags are normalized here, at the trusted boundary, so a row ends up the
+		// same whether it came from the editor, a bulk paste, or a hand-built call.
+		const after = {
+			enabled: prompt.enabled,
+			tags: sanitizeUserTags(prompt.tags ?? []),
+			premiumModels: selectPremiumModels(prompt.premiumModels),
+		};
 		if (prompt.id === undefined) {
 			inserts.push({ prompt, after });
 			continue;
