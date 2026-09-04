@@ -14,10 +14,11 @@ import {
 } from "@workspace/lib/db/schema";
 import { type Entitlements, getOrgEntitlements } from "@workspace/lib/entitlements";
 import { getProvider, type ModelConfig, type Provider, parseScrapeTargets } from "@workspace/lib/providers";
-import { failureBackoffHours } from "@workspace/lib/run-backoff";
 import {
 	dailyRunCeiling,
+	ensureNextRunScheduled,
 	lastRunQueryWindowMs,
+	PROMPT_JOB_OPTIONS,
 	type PromptRunPlan,
 	resolveBrandPromptRunPlans,
 	selectRunTargets,
@@ -45,26 +46,7 @@ export interface ProcessPromptData {
 	forceDue?: boolean;
 }
 
-/**
- * Queue options for a process-prompt job, wherever it's scheduled from.
- *
- * The expiry has to outlast the whole fan-out. A cycle submits every one of its
- * runs at once and each is bounded by the provider's own task ceiling, so the
- * job runs for about as long as its slowest run — which, behind a provider
- * queue deep enough to matter, is that ceiling. If pg-boss expires the job it
- * cannot cancel the running promises, and a retry would pay for the fan-out a
- * second time.
- *
- * `retryLimit: 0` for the same reason from the other side. By the time this job
- * can fail it has already submitted paid requests, and a queue-level retry
- * re-submits the whole fan-out including the runs that succeeded. Recovery goes
- * through the handler's own backoff reschedule instead, or through
- * schedule-maintenance for a job that died before reaching it.
- */
-export const PROMPT_JOB_OPTIONS = {
-	retryLimit: 0,
-	expireInSeconds: 90 * 60,
-} as const;
+export { PROMPT_JOB_OPTIONS };
 
 interface PromptContext {
 	prompt: typeof prompts.$inferSelect;
@@ -73,29 +55,23 @@ interface PromptContext {
 }
 
 /**
- * Schedule the next run for a prompt.
- *
- * Normally that's one cadence away; after a cycle where every run failed it's
- * the shorter backoff from failureBackoffHours, and `consecutiveFailures` rides
- * along on the job so the next failure can lengthen it again.
+ * Schedule the next run for a prompt through the shared exactly-one-chain
+ * logic (see ensureNextRunScheduled): an existing future chain job is kept
+ * as-is, a missing one is created, and a silently throttled send is revived.
  */
 async function scheduleNextRun(promptId: string, cadenceHours: number, consecutiveFailures: number): Promise<void> {
-	const delayHours = failureBackoffHours(consecutiveFailures, cadenceHours);
-	const startAfterSeconds = Math.round(delayHours * 60 * 60);
-
 	try {
-		await boss.send(
-			"process-prompt",
-			{ promptId, consecutiveFailures },
-			{
-				singletonKey: `prompt-${promptId}`,
-				singletonSeconds: startAfterSeconds, // Prevent duplicates until the next attempt is due
-				startAfter: startAfterSeconds,
-				...PROMPT_JOB_OPTIONS,
+		const outcome = await ensureNextRunScheduled(promptId, cadenceHours, consecutiveFailures, {
+			send: (queue, data, options) => boss.send(queue, data, options),
+			hasScheduledChainJob: async (singletonKey) => {
+				const rows = await db.execute(
+					sql`select 1 from pgboss.job where name = 'process-prompt' and singleton_key = ${singletonKey} and state = 'created' limit 1`,
+				);
+				return rows.rows.length > 0;
 			},
-		);
-		const reason = consecutiveFailures > 0 ? ` (backing off after ${consecutiveFailures} failed cycle(s))` : "";
-		console.log(`Scheduled next run for prompt ${promptId} in ${delayHours}h${reason}`);
+		});
+		const reason = consecutiveFailures > 0 ? ` (after ${consecutiveFailures} failed cycle(s))` : "";
+		console.log(`Next run for prompt ${promptId}: ${outcome.status}${reason}`);
 	} catch (error) {
 		console.error(`Failed to schedule next run for prompt ${promptId}:`, error);
 		// Don't throw - we don't want to fail the job just because rescheduling failed

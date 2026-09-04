@@ -1,6 +1,7 @@
 import { getDefaultDelayHours } from "@workspace/lib/constants";
 import { db } from "@workspace/lib/db/db";
 import { brands, prompts } from "@workspace/lib/db/schema";
+import { PROMPT_RUN_MAX_SECONDS } from "@workspace/lib/run-policy";
 import { eq } from "drizzle-orm";
 import { getBoss } from "@/lib/boss-client";
 
@@ -152,7 +153,10 @@ export async function recreatePromptJobScheduler(promptId: string, options: Sche
  * by cadence — an operator-paid run. A forced job gets retryLimit 0: by the
  * time it can fail it has already submitted paid provider calls, and a queue
  * retry would pay for the whole fan-out again (same reasoning as the
- * scheduled path's PROMPT_JOB_OPTIONS).
+ * scheduled path's PROMPT_JOB_OPTIONS). The expiry is the shared
+ * PROMPT_RUN_MAX_SECONDS ceiling — an immediate run takes exactly as long as a
+ * scheduled one, and pg-boss expiring it mid-cycle cannot cancel the running
+ * paid promises.
  */
 export async function sendImmediatePromptJob(promptId: string, options: { forceDue?: boolean } = {}): Promise<boolean> {
 	try {
@@ -167,7 +171,7 @@ export async function sendImmediatePromptJob(promptId: string, options: { forceD
 				retryLimit: forceDue ? 0 : 3,
 				retryDelay: 60,
 				retryBackoff: true,
-				expireInSeconds: 60 * 15,
+				expireInSeconds: PROMPT_RUN_MAX_SECONDS,
 			},
 		);
 

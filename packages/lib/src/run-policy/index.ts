@@ -27,3 +27,11 @@ export {
 	targetKey,
 	targetOverdueStatus,
 } from "./policy";
+export {
+	ensureNextRunScheduled,
+	PROMPT_JOB_OPTIONS,
+	PROMPT_RUN_MAX_SECONDS,
+	promptChainSingletonKey,
+	type RescheduleDeps,
+	type RescheduleOutcome,
+} from "./reschedule";
