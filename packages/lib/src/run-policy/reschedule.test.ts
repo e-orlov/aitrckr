@@ -83,7 +83,12 @@ describe("ensureNextRunScheduled", () => {
 	// and the 90-minute production cycle expiry, from one source of truth.
 	it("sends every chain job with retryLimit 0 and the 90-minute expiry", async () => {
 		expect(PROMPT_RUN_MAX_SECONDS).toBe(90 * 60);
-		expect(PROMPT_JOB_OPTIONS).toEqual({ retryLimit: 0, expireInSeconds: PROMPT_RUN_MAX_SECONDS });
+		expect(PROMPT_JOB_OPTIONS).toEqual({
+			retryLimit: 0,
+			retryDelay: 0,
+			retryBackoff: false,
+			expireInSeconds: PROMPT_RUN_MAX_SECONDS,
+		});
 		const throttled = chainStore([{ key: promptChainSingletonKey(PROMPT), state: "completed" }]);
 		await ensureNextRunScheduled(PROMPT, 12, 0, throttled.deps);
 		for (const options of throttled.sentOptions) {

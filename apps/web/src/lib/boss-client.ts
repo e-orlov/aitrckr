@@ -1,3 +1,4 @@
+import { ensurePromptQueue } from "@workspace/lib/run-policy";
 import { PgBoss } from "pg-boss";
 
 let bossInstance: PgBoss | null = null;
@@ -33,12 +34,7 @@ export async function getBoss(): Promise<PgBoss> {
 
 		// Create queues if they don't exist (required in pg-boss v12)
 		// createQueue is idempotent - safe to call multiple times
-		await boss.createQueue("process-prompt", {
-			retryLimit: 3,
-			retryDelay: 60,
-			retryBackoff: true,
-			expireInSeconds: 60 * 15,
-		});
+		await ensurePromptQueue(boss);
 		await boss.createQueue("generate-report", {
 			retryLimit: 3,
 			retryDelay: 60,

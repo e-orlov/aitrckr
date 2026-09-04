@@ -9,16 +9,20 @@ import { failureBackoffHours } from "../run-backoff";
 export const PROMPT_RUN_MAX_SECONDS = 90 * 60;
 
 /**
- * Shared pg-boss options for every process-prompt job.
+ * Shared pg-boss options for every process-prompt job and for the queue's own
+ * defaults.
  *
- * `retryLimit: 0`: by the time such a job can fail it has already submitted
- * paid provider requests, and a queue-level retry would re-submit the whole
- * fan-out including the runs that succeeded. Recovery goes through the
- * handler's own backoff reschedule, or through schedule-maintenance for a job
- * that died before reaching it.
+ * `retryLimit: 0` (with retryDelay/retryBackoff pinned to their inert values
+ * so no other default can sneak back in): by the time such a job can fail it
+ * has already submitted paid provider requests, and a queue-level retry would
+ * re-submit the whole fan-out including the runs that succeeded. Recovery
+ * goes through the handler's own backoff reschedule, or through
+ * schedule-maintenance for a job that died before reaching it.
  */
 export const PROMPT_JOB_OPTIONS = {
 	retryLimit: 0,
+	retryDelay: 0,
+	retryBackoff: false,
 	expireInSeconds: PROMPT_RUN_MAX_SECONDS,
 } as const;
 
