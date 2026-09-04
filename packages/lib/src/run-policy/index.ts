@@ -27,6 +27,7 @@ export {
 	targetKey,
 	targetOverdueStatus,
 } from "./policy";
+export { ensurePromptQueue, type PromptQueueAdmin } from "./queue";
 export {
 	ensureNextRunScheduled,
 	PROMPT_JOB_OPTIONS,

@@ -1,7 +1,7 @@
 import { getDefaultDelayHours } from "@workspace/lib/constants";
 import { db } from "@workspace/lib/db/db";
 import { brands, prompts } from "@workspace/lib/db/schema";
-import { PROMPT_RUN_MAX_SECONDS } from "@workspace/lib/run-policy";
+import { PROMPT_JOB_OPTIONS } from "@workspace/lib/run-policy";
 import { eq } from "drizzle-orm";
 import { getBoss } from "@/lib/boss-client";
 
@@ -71,10 +71,7 @@ export async function createPromptJobScheduler(promptId: string, options: Schedu
 				{
 					singletonKey: `prompt-${promptId}`,
 					singletonSeconds: 60 * 60, // 1 hour - prevent duplicate jobs
-					retryLimit: 3,
-					retryDelay: 60,
-					retryBackoff: true,
-					expireInSeconds: 60 * 15, // 15 minute timeout
+					...PROMPT_JOB_OPTIONS,
 				},
 			);
 		} else {
@@ -86,10 +83,7 @@ export async function createPromptJobScheduler(promptId: string, options: Schedu
 					singletonKey: `prompt-${promptId}`,
 					singletonSeconds: startAfterSeconds, // Prevent duplicates for the cadence period
 					startAfter: startAfterSeconds,
-					retryLimit: 3,
-					retryDelay: 60,
-					retryBackoff: true,
-					expireInSeconds: 60 * 15,
+					...PROMPT_JOB_OPTIONS,
 				},
 			);
 		}
@@ -150,13 +144,9 @@ export async function recreatePromptJobScheduler(promptId: string, options: Sche
  * Useful for manual retries from the admin UI.
  *
  * `forceDue` makes the worker run every planned target even when none is due
- * by cadence — an operator-paid run. A forced job gets retryLimit 0: by the
- * time it can fail it has already submitted paid provider calls, and a queue
- * retry would pay for the whole fan-out again (same reasoning as the
- * scheduled path's PROMPT_JOB_OPTIONS). The expiry is the shared
- * PROMPT_RUN_MAX_SECONDS ceiling — an immediate run takes exactly as long as a
- * scheduled one, and pg-boss expiring it mid-cycle cannot cancel the running
- * paid promises.
+ * by cadence — an operator-paid run. It only bypasses the cadence gate; the
+ * job itself carries the same shared PROMPT_JOB_OPTIONS as every other
+ * process-prompt job (no queue retry of a paid fan-out, 90-minute ceiling).
  */
 export async function sendImmediatePromptJob(promptId: string, options: { forceDue?: boolean } = {}): Promise<boolean> {
 	try {
@@ -167,45 +157,13 @@ export async function sendImmediatePromptJob(promptId: string, options: { forceD
 		await boss.send(
 			"process-prompt",
 			{ promptId, cadenceHours, ...(forceDue ? { forceDue } : {}) },
-			{
-				retryLimit: forceDue ? 0 : 3,
-				retryDelay: 60,
-				retryBackoff: true,
-				expireInSeconds: PROMPT_RUN_MAX_SECONDS,
-			},
+			PROMPT_JOB_OPTIONS,
 		);
 
 		console.log(`Sent immediate job for prompt ${promptId}`);
 		return true;
 	} catch (error) {
 		console.error(`Failed to send immediate job for prompt ${promptId}:`, error);
-		return false;
-	}
-}
-
-export async function scheduleNextPromptRun(promptId: string, cadenceHours: number): Promise<boolean> {
-	try {
-		const boss = await getBoss();
-		const startAfterSeconds = cadenceHours * 60 * 60;
-
-		await boss.send(
-			"process-prompt",
-			{ promptId, cadenceHours },
-			{
-				singletonKey: `prompt-${promptId}`,
-				singletonSeconds: startAfterSeconds, // Prevent duplicates for the cadence period
-				startAfter: startAfterSeconds,
-				retryLimit: 3,
-				retryDelay: 60,
-				retryBackoff: true,
-				expireInSeconds: 60 * 15,
-			},
-		);
-
-		console.log(`Scheduled next run for prompt ${promptId} in ${cadenceHours}h`);
-		return true;
-	} catch (error) {
-		console.error(`Failed to schedule next run for prompt ${promptId}:`, error);
 		return false;
 	}
 }

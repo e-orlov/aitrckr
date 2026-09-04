@@ -1,6 +1,7 @@
 import * as Sentry from "@sentry/node";
 import { getDeployment } from "@workspace/deployment";
 import { getProvider, parseScrapeTargets, validateScrapeTargets } from "@workspace/lib/providers";
+import { ensurePromptQueue } from "@workspace/lib/run-policy";
 import { startCredentialRefresh } from "@workspace/lib/secrets";
 import { ensureSourceClassificationQueue } from "@workspace/lib/source-classification";
 import boss from "./boss";
@@ -39,12 +40,7 @@ async function main() {
 	console.log("pg-boss started");
 
 	// Create queues if they don't exist (required in pg-boss v12)
-	await boss.createQueue("process-prompt", {
-		retryLimit: 3,
-		retryDelay: 60,
-		retryBackoff: true,
-		expireInSeconds: 60 * 15, // 15 minute timeout
-	});
+	await ensurePromptQueue(boss);
 	if (getDeployment().features.reportGeneration) {
 		await boss.createQueue("generate-report", {
 			retryLimit: 3,
