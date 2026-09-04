@@ -19,7 +19,12 @@ import {
 	premiumSlotsUsed,
 	selectPremiumModels,
 } from "@workspace/config/plans";
-import { describeSkipped, parseBulkPrompts } from "@workspace/lib/bulk-prompts";
+import {
+	type BulkPromptRecord,
+	describeMissingPrompt,
+	describeSkipped,
+	parseBulkPrompts,
+} from "@workspace/lib/bulk-prompts";
 import { MAX_PROMPTS } from "@workspace/lib/constants";
 import { ModelIcon } from "@workspace/ui/brand/model-icon";
 import { Button } from "@workspace/ui/components/button";
@@ -32,7 +37,7 @@ import { Textarea } from "@workspace/ui/components/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@workspace/ui/components/tooltip";
 import { cn } from "@workspace/ui/lib/utils";
 import { Inbox, ListPlus, Plus } from "lucide-react";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useId, useMemo, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { useOrganizationParams } from "@/hooks/use-route-params";
 
@@ -181,7 +186,7 @@ interface PromptsListEditorProps {
  * the rules (trim, dedupe, cap) are tested without a DOM; it runs on every
  * keystroke only to label the button and warn about what will be dropped.
  */
-function useBulkPaste(filledValues: string[], onAdd: (values: string[]) => void) {
+function useBulkPaste(filledValues: string[], onAdd: (records: BulkPromptRecord[]) => void) {
 	const [bulkOpen, setBulkOpen] = useState(false);
 	const [bulkText, setBulkText] = useState("");
 
@@ -190,9 +195,15 @@ function useBulkPaste(filledValues: string[], onAdd: (values: string[]) => void)
 		[bulkText, filledValues],
 	);
 
-	// Over capacity blocks the whole paste rather than quietly taking the lines
-	// that fit, so nobody submits a list believing all of it landed.
+	// A line with tags but no prompt, or going over capacity, blocks the whole
+	// paste rather than quietly taking the lines that work, so nobody submits a
+	// list believing all of it landed.
 	const overCapacity = bulkPreview.skipped.overCapacity.length;
+	const bulkError =
+		describeMissingPrompt(bulkPreview.skipped.missingPrompt) ??
+		(overCapacity > 0
+			? `This paste is ${overCapacity} prompt${overCapacity === 1 ? "" : "s"} over the ${MAX_PROMPTS} limit. Remove ${overCapacity === 1 ? "a line" : "some lines"} to continue.`
+			: null);
 	const closeBulk = () => {
 		setBulkOpen(false);
 		setBulkText("");
@@ -205,13 +216,10 @@ function useBulkPaste(filledValues: string[], onAdd: (values: string[]) => void)
 		setBulkText,
 		bulkPreview,
 		bulkNotice: bulkText.trim().length > 0 ? describeSkipped(bulkPreview.skipped) : null,
-		bulkError:
-			overCapacity > 0
-				? `This paste is ${overCapacity} prompt${overCapacity === 1 ? "" : "s"} over the ${MAX_PROMPTS} limit. Remove ${overCapacity === 1 ? "a line" : "some lines"} to continue.`
-				: null,
+		bulkError,
 		closeBulk,
 		addBulk: () => {
-			if (bulkPreview.added.length === 0 || overCapacity > 0) return;
+			if (bulkPreview.added.length === 0 || bulkError !== null) return;
 			onAdd(bulkPreview.added);
 			closeBulk();
 		},
@@ -437,15 +445,22 @@ function PromptRow({
 }
 
 function BulkPasteBox({ bulk }: { bulk: ReturnType<typeof useBulkPaste> }) {
+	const helpId = useId();
 	return (
 		<div className="space-y-2 rounded-md border bg-muted/40 p-3">
 			<Textarea
 				value={bulk.bulkText}
 				onChange={(e) => bulk.setBulkText(e.target.value)}
-				placeholder="One prompt per line"
+				placeholder={"One prompt per line, optional tags after a semicolon:\nPrompt text;tag1;tag2"}
 				rows={6}
-				aria-label="Prompts to add, one per line"
+				aria-label="Prompts to add, one per line, with optional tags separated by semicolons"
+				aria-describedby={helpId}
 			/>
+			<p id={helpId} className="text-xs text-muted-foreground">
+				One prompt per line. To tag a prompt, write its tags after it separated by semicolons, for example{" "}
+				<code className="rounded bg-muted px-1">Prompt text;tag1;tag2</code>. Semicolons separate fields and cannot be
+				part of a prompt or tag.
+			</p>
 			<div className="flex flex-wrap items-center gap-2">
 				<Button
 					size="sm"
@@ -498,7 +513,7 @@ export function PromptsListEditor({
 	const atCapacity = filledValues.length >= MAX_PROMPTS;
 
 	const bulk = useBulkPaste(filledValues, (added) =>
-		onChange([...prompts, ...added.map((value) => newPromptEntry({ value }))]),
+		onChange([...prompts, ...added.map(({ value, tags }) => newPromptEntry({ value, tags }))]),
 	);
 
 	const { selectedKeys, liveSelectedCount, allSelected, toggleSelect, toggleSelectAll, clearSelection } =

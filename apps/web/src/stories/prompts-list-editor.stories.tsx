@@ -45,7 +45,7 @@ const addMultiple =
 	async ({ canvasElement }: { canvasElement: HTMLElement }) => {
 		const canvas = within(canvasElement);
 		await userEvent.click(canvas.getByRole("button", { name: /add multiple/i }));
-		await userEvent.click(canvas.getByLabelText("Prompts to add, one per line"));
+		await userEvent.click(canvas.getByLabelText(/prompts to add, one per line/i));
 		await userEvent.paste(text);
 	};
 
@@ -101,6 +101,54 @@ export const AddMultipleOverCapacity: StoryObj = {
 
 /** At the cap: both toolbar buttons are hidden and the limit message shows. */
 export const AtCapacity = () => <Harness showSystemTags={false} initial={filler(MAX_PROMPTS)} />;
+
+/**
+ * Tags written after a prompt, separated by semicolons, land on that prompt's
+ * row as chips before anything is saved: lowercased, trimmed, with empty and
+ * repeated fields dropped. A line without semicolons stays untagged.
+ */
+export const AddMultipleWithTags: StoryObj = {
+	render: () => <Harness initial={entries(["best running shoes for flat feet"])} />,
+	play: async (ctx) => {
+		const canvas = within(ctx.canvasElement);
+		await expect(canvas.queryByText(/optional tags after a semicolon/i)).toBeNull();
+		await addMultiple(
+			"Which legal insurance is best?;Insurance;comparison;; INSURANCE ;family\nWhat should I compare before buying legal insurance?;insurance;buying guide\nA legacy prompt without tags",
+		)(ctx);
+		await expect(canvas.getByText(/tags after it separated by semicolons/i)).toBeVisible();
+		await userEvent.click(canvas.getByRole("button", { name: /^add 3 prompts$/i }));
+
+		// Each row renders twice (stacked mobile block + desktop grid), so a tag
+		// chip's remove button appears twice per row that carries the tag.
+		await expect(canvas.getAllByDisplayValue("Which legal insurance is best?")).toHaveLength(2);
+		await expect(canvas.getAllByRole("button", { name: "Remove insurance" })).toHaveLength(4);
+		await expect(canvas.getAllByRole("button", { name: "Remove comparison" })).toHaveLength(2);
+		await expect(canvas.getAllByRole("button", { name: "Remove family" })).toHaveLength(2);
+		await expect(canvas.getAllByRole("button", { name: "Remove buying guide" })).toHaveLength(2);
+		await expect(canvas.queryByRole("button", { name: /Remove INSURANCE/ })).toBeNull();
+		await expect(canvas.getAllByDisplayValue("A legacy prompt without tags")).toHaveLength(2);
+		await expect(canvas.getAllByText("Add tag...")).toHaveLength(4);
+	},
+};
+
+/**
+ * A line with tags but no prompt blocks the whole paste and names the line, so
+ * a stray semicolon at the start of a line cannot silently vanish or hand its
+ * tags to a neighbour.
+ */
+export const AddMultipleMissingPrompt: StoryObj = {
+	render: () => <Harness initial={[]} />,
+	play: async (ctx) => {
+		await addMultiple("valid prompt;tag\n;orphan tag\n\n  ;tag1;tag2\nanother prompt")(ctx);
+		const canvas = within(ctx.canvasElement);
+		await expect(canvas.getByRole("button", { name: /^add 2 prompts$/i })).toBeDisabled();
+		await expect(canvas.getByRole("alert")).toHaveTextContent(
+			"Lines 2 and 4 have no prompt text before their first semicolon. Fix or remove them to continue.",
+		);
+		await expect(canvas.getByText("Skipped 1 blank line.")).toBeVisible();
+		await expect(canvas.getByText("No prompts yet.")).toBeVisible();
+	},
+};
 
 // ---------------------------------------------------------------------------
 // Web-grounded Claude assignment (cloud plans)
