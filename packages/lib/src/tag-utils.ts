@@ -76,17 +76,4 @@ export function computeSystemTags(promptValue: string, brandName: string, brandW
 	return [isBranded ? SYSTEM_TAGS.BRANDED : SYSTEM_TAGS.UNBRANDED];
 }
 
-export function normalizeTag(tag: string): string {
-	return tag.toLowerCase().trim();
-}
-
-/**
- * Sanitize user tags - normalize and dedupe.
- * Note: "branded" and "unbranded" are allowed as user tags to override system-computed values.
- */
-export function sanitizeUserTags(tags: string[]): string[] {
-	return tags
-		.map(normalizeTag)
-		.filter((tag) => tag.length > 0)
-		.filter((tag, index, self) => self.indexOf(tag) === index);
-}
+export { normalizeTag, sanitizeUserTags } from "./user-tags";

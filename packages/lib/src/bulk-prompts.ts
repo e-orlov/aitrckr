@@ -1,4 +1,5 @@
 import { MAX_PROMPTS } from "./constants";
+import { sanitizeUserTags } from "./user-tags";
 
 /**
  * Why a pasted line did not become a prompt.
@@ -16,11 +17,19 @@ export interface SkippedLines {
 	duplicateInPaste: string[];
 	/** Lines dropped because the list is capped at `MAX_PROMPTS`. */
 	overCapacity: string[];
+	/** 1-based line numbers of lines that carry tags but no prompt text. */
+	missingPrompt: number[];
+}
+
+/** One pasted line: the prompt and the user tags that were written after it. */
+export interface BulkPromptRecord {
+	value: string;
+	tags: string[];
 }
 
 export interface BulkPromptParse {
 	/** Lines that became prompts, in the order they were pasted. */
-	added: string[];
+	added: BulkPromptRecord[];
 	skipped: SkippedLines;
 }
 
@@ -30,6 +39,12 @@ export interface ParseBulkPromptsOptions {
 	/** Total prompts the list may hold. Defaults to `MAX_PROMPTS`. */
 	limit?: number;
 }
+
+/**
+ * Field separator. Reserved syntax: there is no quoting or escaping, so a
+ * literal semicolon cannot appear inside a prompt or a tag.
+ */
+const FIELD_SEPARATOR = ";";
 
 /**
  * Comparison key for two prompts being "the same".
@@ -43,12 +58,17 @@ function dedupeKey(value: string): string {
 }
 
 /**
- * Split pasted text into prompts, one per line.
+ * Split pasted text into prompts, one per line, each optionally followed by
+ * semicolon-separated tags: `prompt text;tag1;tag2`.
  *
  * Everything this drops, it names. The caller gets the lines that became
  * prompts and, separately, every line that did not along with the reason, so
  * the screen can tell someone that three of their lines were already in the
  * list rather than leaving them to count.
+ *
+ * Two prompts are duplicates when their text matches, whatever their tags: a
+ * duplicate's tags are dropped with it rather than merged into the prompt that
+ * won, since a paste is a request to add prompts, not to edit existing ones.
  *
  * Capacity is measured against the whole list, not the paste: `limit` is the
  * total the list may hold, so a paste of ten lines into a list already holding
@@ -60,31 +80,38 @@ export function parseBulkPrompts(text: string, options: ParseBulkPromptsOptions 
 	const seen = new Set(existing.map(dedupeKey));
 	const room = Math.max(0, limit - existing.length);
 
-	const added: string[] = [];
+	const added: BulkPromptRecord[] = [];
 	const skipped: SkippedLines = {
 		blank: 0,
 		duplicateOfExisting: [],
 		duplicateInPaste: [],
 		overCapacity: [],
+		missingPrompt: [],
 	};
 
 	const withinPaste = new Set<string>();
 
-	for (const raw of text.split(/\r?\n/)) {
-		const value = raw.trim();
-		if (value.length === 0) {
+	text.split(/\r?\n/).forEach((raw, index) => {
+		if (raw.trim().length === 0) {
 			skipped.blank += 1;
-			continue;
+			return;
+		}
+
+		const [first, ...rest] = raw.split(FIELD_SEPARATOR);
+		const value = first.trim();
+		if (value.length === 0) {
+			skipped.missingPrompt.push(index + 1);
+			return;
 		}
 
 		const key = dedupeKey(value);
 		if (withinPaste.has(key)) {
 			skipped.duplicateInPaste.push(value);
-			continue;
+			return;
 		}
 		if (seen.has(key)) {
 			skipped.duplicateOfExisting.push(value);
-			continue;
+			return;
 		}
 
 		// Capacity is checked after the duplicate rules on purpose. A line that
@@ -93,12 +120,12 @@ export function parseBulkPrompts(text: string, options: ParseBulkPromptsOptions 
 		// not cause.
 		if (added.length >= room) {
 			skipped.overCapacity.push(value);
-			continue;
+			return;
 		}
 
 		withinPaste.add(key);
-		added.push(value);
-	}
+		added.push({ value, tags: sanitizeUserTags(rest) });
+	});
 
 	return { added, skipped };
 }
@@ -106,8 +133,9 @@ export function parseBulkPrompts(text: string, options: ParseBulkPromptsOptions 
 /**
  * One sentence naming what the parse dropped, or null when it dropped nothing.
  *
- * Over-capacity lines are deliberately absent: they block the paste outright
- * rather than being skipped, so the caller reports those as an error instead.
+ * Over-capacity and missing-prompt lines are deliberately absent: they block
+ * the paste outright rather than being skipped, so the caller reports those as
+ * an error instead.
  */
 export function describeSkipped(skipped: SkippedLines): string | null {
 	const parts: string[] = [];
@@ -120,4 +148,17 @@ export function describeSkipped(skipped: SkippedLines): string | null {
 	}
 	if (parts.length === 0) return null;
 	return `Skipped ${parts.join(" and ")}.`;
+}
+
+/**
+ * The error shown for lines that have tags but no prompt, naming each line so
+ * nobody has to count. Null when there are none.
+ */
+export function describeMissingPrompt(lines: readonly number[]): string | null {
+	if (lines.length === 0) return null;
+	if (lines.length === 1) {
+		return `Line ${lines[0]} has no prompt text before its first semicolon. Fix or remove it to continue.`;
+	}
+	const listed = `${lines.slice(0, -1).join(", ")} and ${lines[lines.length - 1]}`;
+	return `Lines ${listed} have no prompt text before their first semicolon. Fix or remove them to continue.`;
 }
