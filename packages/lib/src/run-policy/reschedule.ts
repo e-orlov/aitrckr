@@ -1,0 +1,101 @@
+import { failureBackoffHours } from "../run-backoff";
+
+/**
+ * Ceiling on one prompt fan-out cycle, and therefore the queue expiry for
+ * every process-prompt job — scheduled, immediate, and forced alike. A single
+ * source so an operator-triggered run can never get a shorter window than the
+ * cycle it pays for.
+ */
+export const PROMPT_RUN_MAX_SECONDS = 90 * 60;
+
+/**
+ * Shared pg-boss options for every process-prompt job.
+ *
+ * `retryLimit: 0`: by the time such a job can fail it has already submitted
+ * paid provider requests, and a queue-level retry would re-submit the whole
+ * fan-out including the runs that succeeded. Recovery goes through the
+ * handler's own backoff reschedule, or through schedule-maintenance for a job
+ * that died before reaching it.
+ */
+export const PROMPT_JOB_OPTIONS = {
+	retryLimit: 0,
+	expireInSeconds: PROMPT_RUN_MAX_SECONDS,
+} as const;
+
+/** The cadence chain's singleton key: one per prompt, shared by every sender. */
+export function promptChainSingletonKey(promptId: string): string {
+	return `prompt-${promptId}`;
+}
+
+export interface RescheduleDeps {
+	/**
+	 * pg-boss send. Resolves to the job id, or null when pg-boss throttled the
+	 * send (a job with the same singleton key was created within the same
+	 * singletonSeconds slot — including one that has already completed).
+	 */
+	send(
+		queue: string,
+		data: { promptId: string; consecutiveFailures: number },
+		options: Record<string, unknown>,
+	): Promise<string | null>;
+	/** True when a future `created` process-prompt job with this key exists. */
+	hasScheduledChainJob(singletonKey: string): Promise<boolean>;
+}
+
+export type RescheduleOutcome =
+	/** A future chain job already exists — nothing sent, no duplicate chain. */
+	| { status: "existing" }
+	/** One new chain job was created. */
+	| { status: "scheduled"; jobId: string }
+	/**
+	 * The throttled send was resent without the slot throttle: pg-boss's
+	 * singletonSeconds slot also counts jobs that already completed, which
+	 * otherwise silently kills the chain (send resolves null, no job exists).
+	 */
+	| { status: "revived"; jobId: string };
+
+/**
+ * Idempotently ensure a prompt has EXACTLY ONE future cadence chain job.
+ *
+ * Every completion path (scheduled run, operator-forced run, no-targets-due
+ * cycle) funnels through this, so a forced run can neither add a second chain
+ * (an existing future job short-circuits before any send) nor kill the chain
+ * (a null throttled send is verified and revived instead of trusted).
+ * Scoped entirely by the prompt's own singleton key — other prompts' jobs are
+ * never read or written.
+ */
+export async function ensureNextRunScheduled(
+	promptId: string,
+	cadenceHours: number,
+	consecutiveFailures: number,
+	deps: RescheduleDeps,
+): Promise<RescheduleOutcome> {
+	const singletonKey = promptChainSingletonKey(promptId);
+	if (await deps.hasScheduledChainJob(singletonKey)) return { status: "existing" };
+
+	const delayHours = failureBackoffHours(consecutiveFailures, cadenceHours);
+	const startAfterSeconds = Math.round(delayHours * 60 * 60);
+	const data = { promptId, consecutiveFailures };
+
+	const jobId = await deps.send("process-prompt", data, {
+		singletonKey,
+		singletonSeconds: startAfterSeconds,
+		startAfter: startAfterSeconds,
+		...PROMPT_JOB_OPTIONS,
+	});
+	if (jobId !== null) return { status: "scheduled", jobId };
+
+	// Throttled. If a live future job exists after all (racing sender won), the
+	// chain is intact; otherwise the slot was occupied by a finished job and the
+	// chain must be revived with an unthrottled send.
+	if (await deps.hasScheduledChainJob(singletonKey)) return { status: "existing" };
+	const revivedId = await deps.send("process-prompt", data, {
+		singletonKey,
+		startAfter: startAfterSeconds,
+		...PROMPT_JOB_OPTIONS,
+	});
+	if (revivedId === null) {
+		throw new Error(`pg-boss dropped the unthrottled chain send for prompt ${promptId}`);
+	}
+	return { status: "revived", jobId: revivedId };
+}
