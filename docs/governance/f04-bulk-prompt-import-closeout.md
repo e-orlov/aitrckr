@@ -66,3 +66,69 @@ Gap recorded: the pre-Save steps (paste, "Add 3 Prompts", staged chips, unsaved 
 ## Safety attestations
 
 No direct push, bypass, or history rewrite; no upstream sync or unrelated scope; no migration, schema, service, dependency, secret, or cap change; no live provider calls in automated or rehearsal phases; no Docker reset/prune/data relocation; production volume never replaced, `down -v` only on the disposable rehearsal project; no secrets or full production prompt text in evidence; previous images remain available.
+
+---
+
+## Corrective R1 addendum (2026-09-05)
+
+The record above is the original F-04 closeout and is kept as written. Corrective R1 fixed one parser edge case and replaced the three "by structure" / indirect lines of the original traceability with executed proof, plus captured the pre-Save production checkpoints the original acceptance lacked.
+
+### Identities
+
+| Item | Value |
+|---|---|
+| Starting state | `main` `5e90d298c92e41269e9bd539189e4971cf3bcb86`, production `g189e0841` (verified IDs), journal 20 |
+| Corrective PR | [#17](https://github.com/e-orlov/aitrckr/pull/17), head `bf20892e`, five required checks success |
+| Corrective application source | `bf81c52d0d380b4a462e438322b2491e725fbfce` (squash of #17); post-merge `main` workflows all success |
+| Images (built once, clean detached worktree) | `elmo-web:gbf81c52d` `sha256:f845cb8256ae085906ae4135f9f83416585e73b18fc9ac5236cf27aff288b841`; `elmo-worker:gbf81c52d` `sha256:72b6b33921e63d207239bfdde7af9cd9a8f2f4ffb8f0eea678f54758a9516cf0`; `elmo-db-migrate:gbf81c52d` `sha256:571165da970bfab39aff239b57d4a3030930bd190010545ecac3773cf535a661` |
+| Immediate rollback target | `g189e0841` (web `86f6cc58d256`, worker `507684a5a3f9`, db-migrate `d012b3efdcb2`) — rehearsed on the restored copy |
+| Migration journal | 20 before and after |
+| Cutover | 2026-09-05T08:05:33Z `docker compose up -d --no-build`, web HTTP 200 at 08:05:45Z (≈13 s), postgres container not recreated, 12 config keys hash-equal |
+| Real-life acceptance | Part A 08:09Z, Part B 08:18Z |
+| Corrective closeout commit | the commit carrying this addendum — documentation only, not an image source |
+
+### Corrected defect
+
+Before: `parseBulkPrompts` claimed a prompt's identity only after the capacity check, so repeats of a new prompt beyond available capacity were each counted as over-capacity. After: the first occurrence claims identity before the capacity branch. With 99 existing prompts and limit 100, `Prompt A;one` / `Prompt B;two` / `prompt   b;three` → added `[Prompt A]`, overCapacity `[Prompt B]`, duplicateInPaste `[prompt   b]`; the UI says "1 prompt over", "Skipped 1 duplicate.", Add disabled, nothing staged.
+
+### Gaps closed
+
+| Original line | Corrective evidence |
+|---|---|
+| `F04-IT-004` (marked PASS by structure) | `e2e/tests/local/prompt-save-rollback.spec.ts` (`F04-CORR-IT-001`): a `BEFORE INSERT` trigger installed only in the disposable test DB rejects one sentinel value; a real UI save carrying a tag update to a seeded prompt, a valid new prompt and the sentinel fails with the alert, and the DB shows the update rolled back, neither insert present, counts and the second tenant unchanged; trigger/function dropped in `finally` |
+| `F04-IT-008` (PASS by unchanged `.catch`) | `apps/web/src/server/__tests__/save-prompts.integration.test.ts` (`F04-CORR-IT-002`): `savePromptsForBrand(brand, submitted, { scheduleNewPrompts })` — a function-argument seam only — with a once-rejecting scheduler against the real test DB: save resolves, row committed with sanitized tags, error logged once, no unhandled rejection, exact id cleaned up |
+| `F04-IT-009` (indirect) | Bruno `create/update prompt with dirty tags` (`F04-CORR-IT-003/004`): `[" Alpha ","BETA","alpha",""," "]` → `["alpha","beta"]`, PATCH `[" Gamma ","GAMMA","delta",""]` → `["gamma","delta"]`, durable GETs, `systemTags` computed, exact-id delete and 404 |
+| Pre-Save production snapshots (missing) | Part B below, driver-instrumented |
+
+### Verification summary
+
+Local: lint 0; check-types 13/13; unit lib 633 / web 369 / config 93 / cloud 43 / cli 28; storybook prompts-list-editor 12/12 (incl. `AddMultipleOverCapacityWithDuplicate`); integration 1/1; Playwright `local` 84 passed / 2 worker-gated skips; Bruno 60/60 requests, 8/8 tests, 126/126 assertions; worker project 1/1 (stub); `verify-scheduling.ts local` 4/4 with the stub worker; build 16/16, tree clean. Known environmental failures unchanged from baseline: `cloud-billing` Storybook story and `check-server-bundle.test.mjs` on this Windows locale/path separator (both green in Linux CI).
+
+Rehearsal (`elmo-f04-corr-rehearsal`, own config/volume/network, web 127.0.0.1:1516, pg 127.0.0.1:5434, fresh secrets, placeholder provider key, stub worker): production dump (1,446,555 B, sha256 `828fdf3c…9fc9`) restored with identical counts; candidate boot, journal 20; capacity preview room 70 → "Add 70 Prompts" disabled, one-over alert, one-duplicate notice, DB digest unchanged incl. after Cancel; tagged paste → stage (DB unchanged) → save → reload → filters; stub worker 1 completed + 1 created per new prompt, 0 duplicate chains; rollback to `g189e0841` booted, read and wrote the tag arrays (re-save added no chain); switched back; project removed with `down -v` (that project only).
+
+Pre-deploy dump (1,446,549 B, sha256 `9cfd3f1c…1bb6`, TOC 197) restored in a disposable container with identical counts; config backed up privately with owner-only ACL.
+
+### Real-life acceptance
+
+**Part A (`F04-CORR-LIVE-001`)** — brand `arag`, N = 30, room = 70; 72 preview-only lines (70 nonce fillers + overflow + its normalized duplicate). UI: "Add 70 Prompts" disabled, alert "This paste is 1 prompt over the 100 limit. Remove a line to continue.", notice "Skipped 1 duplicate.", rows 30 → 30 (keyboard activation included). DB brand digest identical before, after paste and after Cancel; no candidate row ever existed.
+
+**Part B (`F04-CORR-LIVE-002/003/004`)** — three operator-approved real prompts, driven end-to-end in headless Chromium on `http://localhost:1515` with the operator's session (minted, then deleted):
+
+| Checkpoint | brand prompts | pending chains | candidate rows |
+|---|---|---|---|
+| before paste | 30 | 30 | 0 |
+| after paste ("Add 3 Prompts") | 30 | 30 | 0 |
+| after Add, before Save (chips exact per row, unsaved bar) | 30 | 30 | 0 |
+| after Save | 33 | 33 | 3 |
+
+| Prompt id | sha256[:16] | length | user tags | system_tags |
+|---|---|---|---|---|
+| `1aebbc8e-0229-44e8-92e0-d154f1d43ef7` | `90dd2f185e782aff` | 51 | `["rechtsschutz","preis-leistung","recommendation visibility"]` (repeat and empty field dropped) | `["unbranded"]` |
+| `d2a796e0-46b2-4836-bd2c-1f8eb40702ca` | `fb0501c2392e63dc` | 63 | `["rechtsschutz"]` | `["unbranded"]` |
+| `5b1a5e3b-1016-4d48-b244-99168cda86cc` | `fa113f5963f93740` | 84 | `[]` | `["unbranded"]` |
+
+One transaction (identical `created_at`), brand-wide normalized duplicates 0. Reload: chips identical to DB. Tag filters: `rechtsschutz` 16 (= DB), `preis-leistung` 2 (= DB), `recommendation visibility` 2 (= DB), per-prompt membership correct for all nine combinations. Second visit: 33 prompts, no duplicate insert. Queue after the natural first runs (normal cadence, not forced): each prompt 1 completed + exactly 1 created successor, global duplicate chains 0. Console errors 0; web/worker error lines 0.
+
+### Attestations
+
+No direct push, bypass, or history rewrite; no migration/schema/dependency/secret/cap change; no production fault switch (trigger and injected scheduler exist only in the test harness); no live provider calls in tests or rehearsal; no Docker reset/prune/relocation; production volume untouched; `down -v` only on the disposable rehearsal project; original tag `production/f04-bulk-prompt-tags-2026-09-05` and its Release unchanged.
