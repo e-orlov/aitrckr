@@ -1,0 +1,24 @@
+meta {
+  name: get prompt with dirty tags persisted
+  type: http
+  seq: 19
+}
+
+get {
+  url: {{baseUrl}}/api/v1/prompts/{{dirtyTagsPromptId}}
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+  res.body.id: eq {{dirtyTagsPromptId}}
+}
+
+tests {
+  // F04-CORR-IT-003 — the normalized array is what was stored, not just echoed.
+  test("stored tags match the normalized create response", function() {
+    expect(res.getBody().tags).to.eql(["alpha", "beta"]);
+    expect(res.getBody().systemTags).to.eql(["branded"]);
+  });
+}

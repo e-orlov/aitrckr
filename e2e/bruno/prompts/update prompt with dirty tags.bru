@@ -1,0 +1,34 @@
+meta {
+  name: update prompt with dirty tags
+  type: http
+  seq: 20
+}
+
+patch {
+  url: {{baseUrl}}/api/v1/prompts/{{dirtyTagsPromptId}}
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "tags": [" Gamma ", "GAMMA", "delta", ""]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.id: eq {{dirtyTagsPromptId}}
+}
+
+tests {
+  // F04-CORR-IT-004 — PATCH replaces the array with the normalized one and
+  // leaves the untouched fields alone.
+  test("tags are replaced by the normalized array", function() {
+    expect(res.getBody().tags).to.eql(["gamma", "delta"]);
+  });
+  test("system tags and value are unchanged by a tags-only patch", function() {
+    expect(res.getBody().systemTags).to.eql(["branded"]);
+    expect(res.getBody().value).to.equal("Bruno E2E multi-tag prompt — does example.com normalize tags?");
+  });
+}

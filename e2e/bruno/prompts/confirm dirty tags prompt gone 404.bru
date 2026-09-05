@@ -1,0 +1,15 @@
+meta {
+  name: confirm dirty tags prompt gone 404
+  type: http
+  seq: 23
+}
+
+get {
+  url: {{baseUrl}}/api/v1/prompts/{{dirtyTagsPromptId}}
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 404
+}

@@ -1,0 +1,39 @@
+meta {
+  name: create prompt with dirty tags
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{baseUrl}}/api/v1/prompts
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "brandId": "{{brandId}}",
+    "value": "Bruno E2E multi-tag prompt — does example.com normalize tags?",
+    "tags": [" Alpha ", "BETA", "alpha", "", "  "]
+  }
+}
+
+assert {
+  res.status: eq 201
+  res.body.id: isDefined
+}
+
+tests {
+  // F04-CORR-IT-003 — padded, mixed-case, empty and repeated tags come back
+  // normalized in first-occurrence order; system tags are computed, not taken.
+  test("tags are normalized in stable order", function() {
+    expect(res.getBody().tags).to.eql(["alpha", "beta"]);
+  });
+  test("system tags are computed from the prompt text", function() {
+    expect(res.getBody().systemTags).to.eql(["branded"]);
+  });
+}
+
+script:post-response {
+  bru.setVar("dirtyTagsPromptId", res.getBody().id);
+}
