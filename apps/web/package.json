@@ -11,6 +11,7 @@
 		"preview": "vite preview",
 		"test": "vitest run --project=unit",
 		"test:storybook": "vitest run --project=storybook",
+		"test:integration": "vitest run --project=integration",
 		"check-types": "tsc --noEmit",
 		"generate-icons": "tsx scripts/generate-brand-icons.tsx",
 		"generate-brand-kit": "tsx scripts/generate-brand-kit.tsx",

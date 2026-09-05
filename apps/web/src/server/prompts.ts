@@ -2,8 +2,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { db } from "@workspace/lib/db/db";
 import { brands, competitors, promptRuns, prompts, SYSTEM_TAGS } from "@workspace/lib/db/schema";
-import { assertAllowed, assertPromptSaveAllowed, decidePromptCap, promptSaveDelta } from "@workspace/lib/entitlements";
-import { computeSystemTags, getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
+import { getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
 import { and, count, desc, eq, gte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { requireAuthSession, requireBrandAccess } from "@/lib/auth/helpers";
@@ -12,9 +11,7 @@ import { generateDateRange } from "@/lib/chart-utils";
 import { rollUpCitationDomains, rollUpCitationUrls, tallyCitations } from "@/lib/citation-rollup";
 import { extractDomain } from "@/lib/domain-categories";
 import { classifyUrl, type SupplementalDomainLookup } from "@/lib/domain-categories.server";
-import { expeditePromptRuns } from "@/lib/expedite-prompts";
 import { buildGoogleModule } from "@/lib/google-module";
-import { createMultiplePromptJobSchedulers } from "@/lib/job-scheduler";
 import {
 	type CitationUrlStats,
 	getPromptCitationUrlStats,
@@ -25,10 +22,9 @@ import {
 	getPromptWebQueriesForMapping,
 	getPromptWebQueryCounts,
 } from "@/lib/postgres-read";
-import { promptsGainingPremium } from "@/lib/run-config-changes";
 import { loadSupplementalDomainLookup } from "@/lib/source-classification.server";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
-import { planPromptSave } from "@/server/prompt-save";
+import { savePromptsForBrand } from "@/server/save-prompts";
 // Server Functions
 // ============================================================================
 
@@ -545,62 +541,7 @@ export const updatePromptsFn = createServerFn({ method: "POST" })
 		});
 		if (!brand) throw new Error("Brand not found");
 
-		const existingRows = await db
-			.select({ id: prompts.id, enabled: prompts.enabled, premiumModels: prompts.premiumModels })
-			.from(prompts)
-			.where(eq(prompts.brandId, data.brandId));
-		const existingIds = new Set(existingRows.map((p) => p.id));
-		const existingById = new Map(existingRows.map((p) => [p.id, p]));
-
-		const { updates, inserts } = planPromptSave(data.prompts, existingRows);
-		assertAllowed(decidePromptCap(existingRows.length, inserts.length));
-		await assertPromptSaveAllowed(brand.organizationId, promptSaveDelta({ updates, inserts }));
-
-		const saved = await db.transaction(async (tx) => {
-			for (const { id, prompt, after } of updates) {
-				await tx
-					.update(prompts)
-					.set({
-						value: prompt.value,
-						enabled: prompt.enabled,
-						tags: after.tags,
-						systemTags: computeSystemTags(prompt.value, brand.name, brand.website),
-						premiumModels: after.premiumModels,
-					})
-					.where(and(eq(prompts.id, id), eq(prompts.brandId, data.brandId)));
-			}
-
-			if (inserts.length > 0) {
-				await tx.insert(prompts).values(
-					inserts.map(({ prompt, after }) => ({
-						brandId: data.brandId,
-						value: prompt.value,
-						enabled: prompt.enabled,
-						tags: after.tags,
-						systemTags: computeSystemTags(prompt.value, brand.name, brand.website),
-						premiumModels: after.premiumModels,
-					})),
-				);
-			}
-
-			return tx.query.prompts.findMany({
-				where: eq(prompts.brandId, data.brandId),
-			});
-		});
-
-		const newPromptIds = saved.filter((p) => !existingIds.has(p.id)).map((p) => p.id);
-		if (newPromptIds.length > 0) {
-			createMultiplePromptJobSchedulers(newPromptIds).catch((err) =>
-				console.error("Failed to create job schedulers for new prompts:", err),
-			);
-		}
-
-		// A grounded target added to a prompt that already runs has no history of
-		// its own, so it is due immediately — but the prompt's next job is a whole
-		// cadence away, and the customer has just paid for the slot.
-		await expeditePromptRuns(promptsGainingPremium(existingById, saved));
-
-		return saved;
+		return savePromptsForBrand(brand, data.prompts);
 	});
 
 export const getPromptChartDataFn = createServerFn({ method: "GET" })

@@ -23,6 +23,16 @@ export default defineConfig({
 				test: {
 					name: "unit",
 					include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+					exclude: ["**/node_modules/**", "src/**/*.integration.test.ts"],
+				},
+			},
+			{
+				extends: true,
+				test: {
+					// Needs DATABASE_URL pointing at the seeded, disposable test stack.
+					name: "integration",
+					include: ["src/**/*.integration.test.ts"],
+					fileParallelism: false,
 				},
 			},
 			{
