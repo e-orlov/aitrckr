@@ -215,6 +215,50 @@ describe("bulk-prompts", () => {
 		});
 	});
 
+	describe("duplicates of a prompt that did not fit", () => {
+		it("F04-CORR-UT-001: a repeat of an over-capacity prompt is a duplicate, not a second excess prompt", () => {
+			const existing = Array.from({ length: 99 }, (_, i) => `existing ${i}`);
+			const { added, skipped } = parseBulkPrompts("Prompt A;one\nPrompt B;two\nprompt   b;three", {
+				existing,
+				limit: 100,
+			});
+			expect(added).toEqual([{ value: "Prompt A", tags: ["one"] }]);
+			expect(skipped.overCapacity).toEqual(["Prompt B"]);
+			expect(skipped.duplicateInPaste).toEqual(["prompt   b"]);
+		});
+
+		it("F04-CORR-UT-002: with no room left, two equivalent new prompts are one excess and one duplicate", () => {
+			const { added, skipped } = parseBulkPrompts("New prompt;x\nNEW PROMPT;y", { existing: ["a", "b"], limit: 2 });
+			expect(added).toEqual([]);
+			expect(skipped.overCapacity).toEqual(["New prompt"]);
+			expect(skipped.duplicateInPaste).toEqual(["NEW PROMPT"]);
+		});
+
+		it("F04-CORR-UT-003: N repeats beyond capacity are one excess and N-1 duplicates, first occurrence wins", () => {
+			const { added, skipped } = parseBulkPrompts("Over;t1\nover;t2\n Over ;t3\nOVER;t4", {
+				existing: ["full"],
+				limit: 1,
+			});
+			expect(added).toEqual([]);
+			expect(skipped.overCapacity).toEqual(["Over"]);
+			expect(skipped.duplicateInPaste).toEqual(["over", "Over", "OVER"]);
+			expect(describeSkipped(skipped)).toBe("Skipped 3 duplicates.");
+		});
+
+		it("F04-CORR-UT-004: the other classifications keep their behavior around the capacity edge", () => {
+			const { added, skipped } = parseBulkPrompts("Existing One;t\n\nfits;a\nFITS;b\n;orphan\nover;c\nOVER;d", {
+				existing: ["existing one"],
+				limit: 2,
+			});
+			expect(added).toEqual([{ value: "fits", tags: ["a"] }]);
+			expect(skipped.duplicateOfExisting).toEqual(["Existing One"]);
+			expect(skipped.blank).toBe(1);
+			expect(skipped.missingPrompt).toEqual([5]);
+			expect(skipped.duplicateInPaste).toEqual(["FITS", "OVER"]);
+			expect(skipped.overCapacity).toEqual(["over"]);
+		});
+	});
+
 	describe("describeSkipped", () => {
 		it("should say nothing when nothing was dropped", () => {
 			expect(describeSkipped(nothingSkipped())).toBeNull();

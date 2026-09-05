@@ -99,6 +99,30 @@ export const AddMultipleOverCapacity: StoryObj = {
 	},
 };
 
+/**
+ * One slot left and a paste of three lines where the last two are the same
+ * prompt in different casing, spacing and tags. The repeat is a duplicate of
+ * the prompt that did not fit, so the paste is one prompt over — not two — and
+ * still nothing is staged while the error stands.
+ */
+export const AddMultipleOverCapacityWithDuplicate: StoryObj = {
+	render: () => <Harness showSystemTags={false} initial={filler(MAX_PROMPTS - 1)} />,
+	play: async (ctx) => {
+		await addMultiple("Prompt A;one\nPrompt B;two\nprompt   b;three")(ctx);
+		const canvas = within(ctx.canvasElement);
+		const add = canvas.getByRole("button", { name: /^add 1 prompt$/i });
+		await expect(add).toBeDisabled();
+		await expect(canvas.getByRole("alert")).toHaveTextContent(
+			`This paste is 1 prompt over the ${MAX_PROMPTS} limit. Remove a line to continue.`,
+		);
+		await expect(canvas.getByText("Skipped 1 duplicate.")).toBeVisible();
+		await userEvent.click(add);
+		await expect(canvas.queryAllByDisplayValue("Prompt A")).toHaveLength(0);
+		await expect(canvas.queryAllByRole("button", { name: /^Remove (one|two|three)$/ })).toHaveLength(0);
+		await expect(canvas.getByText(`${MAX_PROMPTS - 1}/${MAX_PROMPTS}`)).toBeVisible();
+	},
+};
+
 /** At the cap: both toolbar buttons are hidden and the limit message shows. */
 export const AtCapacity = () => <Harness showSystemTags={false} initial={filler(MAX_PROMPTS)} />;
 

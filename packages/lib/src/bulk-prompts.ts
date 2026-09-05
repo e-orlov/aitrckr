@@ -114,6 +114,11 @@ export function parseBulkPrompts(text: string, options: ParseBulkPromptsOptions 
 			return;
 		}
 
+		// The first occurrence claims the prompt's identity whether or not it
+		// fits, so a repeat of a prompt that did not fit is reported as the
+		// duplicate it is instead of as a second excess prompt.
+		withinPaste.add(key);
+
 		// Capacity is checked after the duplicate rules on purpose. A line that
 		// was never going to be added is not competing for a slot, so reporting
 		// it as over capacity would blame the limit for something the limit did
@@ -123,7 +128,6 @@ export function parseBulkPrompts(text: string, options: ParseBulkPromptsOptions 
 			return;
 		}
 
-		withinPaste.add(key);
 		added.push({ value, tags: sanitizeUserTags(rest) });
 	});
 
