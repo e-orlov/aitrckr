@@ -1,0 +1,16 @@
+meta {
+  name: delete prompt with dirty tags
+  type: http
+  seq: 22
+}
+
+delete {
+  url: {{baseUrl}}/api/v1/prompts/{{dirtyTagsPromptId}}
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+  res.body.id: eq {{dirtyTagsPromptId}}
+}

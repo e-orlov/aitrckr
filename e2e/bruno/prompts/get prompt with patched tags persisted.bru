@@ -1,0 +1,22 @@
+meta {
+  name: get prompt with patched tags persisted
+  type: http
+  seq: 21
+}
+
+get {
+  url: {{baseUrl}}/api/v1/prompts/{{dirtyTagsPromptId}}
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  // F04-CORR-IT-004 — durable state after the patch.
+  test("stored tags match the patched response", function() {
+    expect(res.getBody().tags).to.eql(["gamma", "delta"]);
+  });
+}
