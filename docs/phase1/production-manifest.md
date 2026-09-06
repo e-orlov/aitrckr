@@ -2,7 +2,7 @@
 
 Current deployment: **F-06 Owned Citation URL Structure** (the Citation Structure page: one Sankey of own-domain citation occurrences), cut over 2026-09-06T11:12Z (downtime ≈12 s, web/worker only; the PostgreSQL container was not recreated), read-only real-life oracle acceptance passed 2026-09-06T11:13Z. Closeout record: `docs/governance/f06-owned-citation-structure-closeout.md`. Immediate rollback target (same schema, no migration): images `g4f30f53e` (web `2ae5f5cb013f`, worker `01191f72864d`, db-migrate `244e60d21d24`); older sets `gbf81c52d`, `g189e0841` and `g33c94cd1` remain on disk.
 
-The application source commit below is the commit the images were built from. The documentation commit carrying this manifest is later and is **not** an image source.
+The application source commit below is the commit the images were built from. The documentation commit carrying this manifest, and the F-06 Corrective R1 commit `39276776fb074e241a249c0e640ac783653c7ffe` (config-generator safety and test fixes), are later and are **not** image sources.
 
 | Field | Value |
 |---|---|
@@ -15,7 +15,7 @@ The application source commit below is the commit the images were built from. Th
 | PostgreSQL | container-internal only, no host port |
 | Volume | `elmo_postgres_data` mounted at `/var/lib/postgresql` (unchanged since 2026-08-31) |
 | Docker data | Docker Desktop 4.88.1 (engine 29.7.2, Compose v5.4.0); WSL2 data root on `D:\DockerDesktopData\DockerDesktopWSL` since 2026-09-04 |
-| Config path | `%USERPROFILE%\.elmo\` (`.env` with secrets — outside Git; contains RUNS_PER_PROMPT=1, DEFAULT_DELAY_HOURS=24, SCRAPE_TARGETS=chatgpt:openrouter:openai/gpt-5.6-luna:online); regeneration preserves every existing key |
+| Config path | `%USERPROFILE%\.elmo\` (`.env` with secrets — outside Git; contains RUNS_PER_PROMPT=1, DEFAULT_DELAY_HOURS=24, SCRAPE_TARGETS=chatgpt:openrouter:openai/gpt-5.6-luna:online). `gen-prod-env.cjs` writes `.env` only on first setup; on every later run against an existing config dir it leaves `.env` byte-for-byte untouched (operator-controlled keys are never reset), validates that the required keys are present exactly once, and regenerates only `elmo.yaml` with the requested image tag — since `39276776` (F-06 Corrective R1, operational/test-only, not an image source) |
 | Migrations | journal at 20 (highest id 20); none of F-04, Corrective R1, Corrective R2 or F-06 added any — journal verified unchanged in rehearsal and before/after every cutover. History: 16 on fresh volume 2026-08-31, 0016/0017 on 2026-09-01 (rc030), 18→20 with F-05/SCHED-01 on 2026-09-03/04 |
 | Scheduled Tasks | `aitrckr-elmo-startup` (ONSTART+2min, S4U), `aitrckr-elmo-watchdog` (5 min, S4U), `aitrckr-elmo-logon-marker` (logon) — all pointing at `-ConfigDir %USERPROFILE%\.elmo -Project elmo` |
 | Ops logs | `%USERPROFILE%\.elmo\logs\elmo-ops.log` (rotating, no secrets) |
@@ -39,7 +39,7 @@ Rehearse those exact image IDs against a restored production dump in a disposabl
 cd <repo-root>
 export COMPOSE_FILE="$USERPROFILE/.elmo/elmo.yaml;docs/phase1/ops/prod-env.override.yaml"
 export COMPOSE_PATH_SEPARATOR=";" COMPOSE_PROJECT_NAME=elmo
-node docs/phase1/ops/gen-prod-env.cjs "$USERPROFILE\\.elmo" g$SHA   # preserves keys
+node docs/phase1/ops/gen-prod-env.cjs "$USERPROFILE\\.elmo" g$SHA   # .env untouched; only elmo.yaml is repinned
 docker compose up -d --no-build
 ```
 
