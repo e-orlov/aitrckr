@@ -2,7 +2,7 @@
 
 Current deployment: **F-06 Owned Citation URL Structure** (the Citation Structure page: one Sankey of own-domain citation occurrences), cut over 2026-09-06T11:12Z (downtime ≈12 s, web/worker only; the PostgreSQL container was not recreated), read-only real-life oracle acceptance passed 2026-09-06T11:13Z. Closeout record: `docs/governance/f06-owned-citation-structure-closeout.md`. Immediate rollback target (same schema, no migration): images `g4f30f53e` (web `2ae5f5cb013f`, worker `01191f72864d`, db-migrate `244e60d21d24`); older sets `gbf81c52d`, `g189e0841` and `g33c94cd1` remain on disk.
 
-The application source commit below is the commit the images were built from. The documentation commit carrying this manifest, and the F-06 Corrective R1 commit `39276776fb074e241a249c0e640ac783653c7ffe` (config-generator safety and test fixes), are later and are **not** image sources.
+The application source commit below is the commit the images were built from. Later commits are **not** image sources: F-06 closeout docs `9bc5ba89`, Corrective R1 operations/test-only `39276776fb074e241a249c0e640ac783653c7ffe` (config-generator safety and test fixes), R1 docs `ef984aa31e9e2e4484fff39ec086326b52367091`, Corrective R2 script-only `0bec0e8c34ebc38d92c7873926b2c7e539b8c2c8` (root `test:scripts` glob quoting), and the R2 docs commit carrying this manifest (target of `production/f06-owned-citation-structure-closeout-r2-2026-09-06`). The running images remain `g48e69783`.
 
 | Field | Value |
 |---|---|
