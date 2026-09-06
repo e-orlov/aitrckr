@@ -430,3 +430,55 @@ export const WhitelabelOnboarding = () => {
 		</SidebarFrame>
 	);
 };
+
+/** Dashboard rail order — Citation Structure sits between Citations and Opportunities, gated like them. */
+export const DashboardOrder: StoryObj = {
+	render: () => {
+		const brand = configureMocks(
+			localConfig,
+			onboardedBrand,
+			authedUser("Local Admin", "admin@localhost", "local-admin"),
+			{
+				isAdmin: true,
+				hasReportAccess: true,
+			},
+		);
+
+		return (
+			<SidebarFrame label="Dashboard order — Citations → Citation Structure → Opportunities">
+				<AppSidebar scope="brand" brand={brand} organization={organization} />
+			</SidebarFrame>
+		);
+	},
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		// The router mock renders Link as a button; the rail order is what matters here.
+		const item = await canvas.findByRole("button", { name: "Citation Structure" });
+		await expect(item).toHaveAttribute("data-sidebar", "menu-button");
+
+		const rail = canvasElement.querySelectorAll<HTMLElement>("[data-sidebar=menu-button]");
+		const titles = [...rail].map((link) => link.textContent?.trim());
+		const citations = titles.indexOf("Citations");
+		await expect(citations).toBeGreaterThan(-1);
+		await expect(titles.slice(citations, citations + 3)).toEqual(["Citations", "Citation Structure", "Opportunities"]);
+	},
+};
+
+/** Before onboarding the dashboard analytics — Citation Structure included — are not offered. */
+export const OnboardingHidesCitationStructure: StoryObj = {
+	render: () => {
+		const brand = configureMocks(localConfig, newBrand, authedUser("New User", "new@localhost", "newuser"));
+
+		return (
+			<SidebarFrame label="Not onboarded — no Citations, no Citation Structure">
+				<AppSidebar scope="brand" brand={brand} organization={organization} />
+			</SidebarFrame>
+		);
+	},
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		await expect(await canvas.findByRole("button", { name: "Overview" })).toBeInTheDocument();
+		await expect(canvas.queryByRole("button", { name: "Citations" })).toBeNull();
+		await expect(canvas.queryByRole("button", { name: "Citation Structure" })).toBeNull();
+	},
+};

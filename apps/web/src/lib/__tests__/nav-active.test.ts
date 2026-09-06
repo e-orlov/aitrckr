@@ -36,4 +36,11 @@ describe("activeNavHref", () => {
 		expect(activeNavHref(rail, "/admin")).toBe("/admin");
 		expect(activeNavHref(rail, "/app/org/acme/settings/brands")).toBe("/app/org/acme/settings/brands");
 	});
+
+	it("keeps Citations and Citation Structure apart despite the shared prefix", () => {
+		const rail = [...brandRail, { href: `${BRAND}/citations` }, { href: `${BRAND}/citation-structure` }];
+		expect(activeNavHref(rail, `${BRAND}/citation-structure`)).toBe(`${BRAND}/citation-structure`);
+		expect(activeNavHref(rail, `${BRAND}/citations`)).toBe(`${BRAND}/citations`);
+		expect(activeNavHref(rail, `${BRAND}/citations/anything`)).toBe(`${BRAND}/citations`);
+	});
 });

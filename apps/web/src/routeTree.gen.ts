@@ -56,6 +56,7 @@ import { Route as AuthedAppOrgOrgSettingsBrandsRouteImport } from './routes/_aut
 import { Route as AuthedAppOrgOrgSettingsMembersRouteImport } from './routes/_authed/app/org/$org/settings/members'
 import { Route as AuthedAppOrgOrgBrandBrandIndexRouteImport } from './routes/_authed/app/org/$org/brand/$brand/index'
 import { Route as AuthedAppOrgOrgBrandBrandSplatRouteImport } from './routes/_authed/app/org/$org/brand/$brand/$'
+import { Route as AuthedAppOrgOrgBrandBrandCitationStructureRouteImport } from './routes/_authed/app/org/$org/brand/$brand/citation-structure'
 import { Route as AuthedAppOrgOrgBrandBrandCitationsRouteImport } from './routes/_authed/app/org/$org/brand/$brand/citations'
 import { Route as AuthedAppOrgOrgBrandBrandOpportunitiesRouteImport } from './routes/_authed/app/org/$org/brand/$brand/opportunities'
 import { Route as AuthedAppOrgOrgBrandBrandQueryFanOutRouteImport } from './routes/_authed/app/org/$org/brand/$brand/query-fan-out'
@@ -316,6 +317,12 @@ const AuthedAppOrgOrgBrandBrandSplatRoute =
     path: '/$',
     getParentRoute: () => AuthedAppOrgOrgBrandBrandRoute,
   } as any)
+const AuthedAppOrgOrgBrandBrandCitationStructureRoute =
+  AuthedAppOrgOrgBrandBrandCitationStructureRouteImport.update({
+    id: '/citation-structure',
+    path: '/citation-structure',
+    getParentRoute: () => AuthedAppOrgOrgBrandBrandRoute,
+  } as any)
 const AuthedAppOrgOrgBrandBrandCitationsRoute =
   AuthedAppOrgOrgBrandBrandCitationsRouteImport.update({
     id: '/citations',
@@ -441,6 +448,7 @@ export interface FileRoutesByFullPath {
   '/app/org/$org/settings/members': typeof AuthedAppOrgOrgSettingsMembersRoute
   '/app/org/$org/settings/': typeof AuthedAppOrgOrgSettingsIndexRoute
   '/app/org/$org/brand/$brand/$': typeof AuthedAppOrgOrgBrandBrandSplatRoute
+  '/app/org/$org/brand/$brand/citation-structure': typeof AuthedAppOrgOrgBrandBrandCitationStructureRoute
   '/app/org/$org/brand/$brand/citations': typeof AuthedAppOrgOrgBrandBrandCitationsRoute
   '/app/org/$org/brand/$brand/opportunities': typeof AuthedAppOrgOrgBrandBrandOpportunitiesRoute
   '/app/org/$org/brand/$brand/query-fan-out': typeof AuthedAppOrgOrgBrandBrandQueryFanOutRoute
@@ -496,6 +504,7 @@ export interface FileRoutesByTo {
   '/app/org/$org/settings/members': typeof AuthedAppOrgOrgSettingsMembersRoute
   '/app/org/$org/settings': typeof AuthedAppOrgOrgSettingsIndexRoute
   '/app/org/$org/brand/$brand/$': typeof AuthedAppOrgOrgBrandBrandSplatRoute
+  '/app/org/$org/brand/$brand/citation-structure': typeof AuthedAppOrgOrgBrandBrandCitationStructureRoute
   '/app/org/$org/brand/$brand/citations': typeof AuthedAppOrgOrgBrandBrandCitationsRoute
   '/app/org/$org/brand/$brand/opportunities': typeof AuthedAppOrgOrgBrandBrandOpportunitiesRoute
   '/app/org/$org/brand/$brand/query-fan-out': typeof AuthedAppOrgOrgBrandBrandQueryFanOutRoute
@@ -559,6 +568,7 @@ export interface FileRoutesById {
   '/_authed/app/org/$org/settings/members': typeof AuthedAppOrgOrgSettingsMembersRoute
   '/_authed/app/org/$org/settings/': typeof AuthedAppOrgOrgSettingsIndexRoute
   '/_authed/app/org/$org/brand/$brand/$': typeof AuthedAppOrgOrgBrandBrandSplatRoute
+  '/_authed/app/org/$org/brand/$brand/citation-structure': typeof AuthedAppOrgOrgBrandBrandCitationStructureRoute
   '/_authed/app/org/$org/brand/$brand/citations': typeof AuthedAppOrgOrgBrandBrandCitationsRoute
   '/_authed/app/org/$org/brand/$brand/opportunities': typeof AuthedAppOrgOrgBrandBrandOpportunitiesRoute
   '/_authed/app/org/$org/brand/$brand/query-fan-out': typeof AuthedAppOrgOrgBrandBrandQueryFanOutRoute
@@ -622,6 +632,7 @@ export interface FileRouteTypes {
     | '/app/org/$org/settings/members'
     | '/app/org/$org/settings/'
     | '/app/org/$org/brand/$brand/$'
+    | '/app/org/$org/brand/$brand/citation-structure'
     | '/app/org/$org/brand/$brand/citations'
     | '/app/org/$org/brand/$brand/opportunities'
     | '/app/org/$org/brand/$brand/query-fan-out'
@@ -677,6 +688,7 @@ export interface FileRouteTypes {
     | '/app/org/$org/settings/members'
     | '/app/org/$org/settings'
     | '/app/org/$org/brand/$brand/$'
+    | '/app/org/$org/brand/$brand/citation-structure'
     | '/app/org/$org/brand/$brand/citations'
     | '/app/org/$org/brand/$brand/opportunities'
     | '/app/org/$org/brand/$brand/query-fan-out'
@@ -739,6 +751,7 @@ export interface FileRouteTypes {
     | '/_authed/app/org/$org/settings/members'
     | '/_authed/app/org/$org/settings/'
     | '/_authed/app/org/$org/brand/$brand/$'
+    | '/_authed/app/org/$org/brand/$brand/citation-structure'
     | '/_authed/app/org/$org/brand/$brand/citations'
     | '/_authed/app/org/$org/brand/$brand/opportunities'
     | '/_authed/app/org/$org/brand/$brand/query-fan-out'
@@ -1112,6 +1125,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedAppOrgOrgBrandBrandSplatRouteImport
       parentRoute: typeof AuthedAppOrgOrgBrandBrandRoute
     }
+    '/_authed/app/org/$org/brand/$brand/citation-structure': {
+      id: '/_authed/app/org/$org/brand/$brand/citation-structure'
+      path: '/citation-structure'
+      fullPath: '/app/org/$org/brand/$brand/citation-structure'
+      preLoaderRoute: typeof AuthedAppOrgOrgBrandBrandCitationStructureRouteImport
+      parentRoute: typeof AuthedAppOrgOrgBrandBrandRoute
+    }
     '/_authed/app/org/$org/brand/$brand/citations': {
       id: '/_authed/app/org/$org/brand/$brand/citations'
       path: '/citations'
@@ -1244,6 +1264,7 @@ const AuthedAppOrgOrgSettingsRouteWithChildren =
 
 interface AuthedAppOrgOrgBrandBrandRouteChildren {
   AuthedAppOrgOrgBrandBrandSplatRoute: typeof AuthedAppOrgOrgBrandBrandSplatRoute
+  AuthedAppOrgOrgBrandBrandCitationStructureRoute: typeof AuthedAppOrgOrgBrandBrandCitationStructureRoute
   AuthedAppOrgOrgBrandBrandCitationsRoute: typeof AuthedAppOrgOrgBrandBrandCitationsRoute
   AuthedAppOrgOrgBrandBrandOpportunitiesRoute: typeof AuthedAppOrgOrgBrandBrandOpportunitiesRoute
   AuthedAppOrgOrgBrandBrandQueryFanOutRoute: typeof AuthedAppOrgOrgBrandBrandQueryFanOutRoute
@@ -1263,6 +1284,8 @@ interface AuthedAppOrgOrgBrandBrandRouteChildren {
 const AuthedAppOrgOrgBrandBrandRouteChildren: AuthedAppOrgOrgBrandBrandRouteChildren =
   {
     AuthedAppOrgOrgBrandBrandSplatRoute: AuthedAppOrgOrgBrandBrandSplatRoute,
+    AuthedAppOrgOrgBrandBrandCitationStructureRoute:
+      AuthedAppOrgOrgBrandBrandCitationStructureRoute,
     AuthedAppOrgOrgBrandBrandCitationsRoute:
       AuthedAppOrgOrgBrandBrandCitationsRoute,
     AuthedAppOrgOrgBrandBrandOpportunitiesRoute:

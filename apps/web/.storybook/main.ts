@@ -61,6 +61,10 @@ const config: StorybookConfig = {
 					},
 					{ find: /^@workspace\/lib\/auth\/client$/, replacement: path.resolve(mocksDir, "auth-client.ts") },
 					{ find: /^@\/server\/citations(\.ts)?$/, replacement: path.resolve(mocksDir, "server-citations.ts") },
+					{
+						find: /^@\/server\/citation-structure(\.ts)?$/,
+						replacement: path.resolve(mocksDir, "server-citation-structure.ts"),
+					},
 					{ find: /^@\/server\/dashboard(\.ts)?$/, replacement: path.resolve(mocksDir, "server-dashboard.ts") },
 					{ find: /^@\/server\/analysis(\.ts)?$/, replacement: path.resolve(mocksDir, "server-analysis.ts") },
 					{ find: /^@\/server\/opportunities(\.ts)?$/, replacement: path.resolve(mocksDir, "server-opportunities.ts") },
