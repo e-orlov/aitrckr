@@ -132,3 +132,71 @@ One transaction (identical `created_at`), brand-wide normalized duplicates 0. Re
 ### Attestations
 
 No direct push, bypass, or history rewrite; no migration/schema/dependency/secret/cap change; no production fault switch (trigger and injected scheduler exist only in the test harness); no live provider calls in tests or rehearsal; no Docker reset/prune/relocation; production volume untouched; `down -v` only on the disposable rehearsal project; original tag `production/f04-bulk-prompt-tags-2026-09-05` and its Release unchanged.
+
+---
+
+## Corrective R2 addendum (2026-09-06) — safe save errors
+
+The original record and the R1 addendum above are kept as written. R2 removes the residual risk R1 disclosed: a failed prompt save rendered the database error text — for a Drizzle failure `Failed query: <SQL>\nparams: <values>`, i.e. the SQL plus the prompt text and tags — in the save bar. Raw SQL/params exposure to the UI is eliminated.
+
+### Root cause and trust boundary
+
+`useWriteErrorMessage` returned any non-empty `error.message`. Start's server-function transport serializes a thrown error as its message alone, so nothing distinguished a user-facing validation message from a driver error on the client.
+
+Now:
+
+- `PublicError` (`apps/web/src/lib/public-errors.ts`) is the only error kind whose message is written for the user; `start.ts` registers serialization adapters (`elmo:public-error`, `elmo:write-denied`) that carry `{code, message}` across the wire and rebuild a `PublicError` in the browser. Nothing else (stack, cause, driver fields) leaves the server.
+- The client mapper `writeErrorMessage` denies by default: it shows only the read-only refusal, a `PublicError`, or an entitlement denial; any other error — database, driver, string, object, `null`, or a readable-looking unknown message — gets the caller's fixed fallback. No blacklist or regex.
+- `updatePromptsFn` logs a non-public failure on the server and replaces it with `PublicError("prompt-save-failed", "Failed to save prompts. Your changes were not saved. Please try again.")`.
+- Intentional user-facing validation/authorization throws in server functions (slug, website/domain validation, billing, organization, team, platform picks, reports/admin access, prompt-save plan errors) are `PublicError`; internal "not found / failed to …" throws render as the caller's fallback.
+
+### Identities
+
+| Item | Value |
+|---|---|
+| Starting state | `main` `9f2d161bcd16859d4fa3116b478e8bfc13b3b097`, production `gbf81c52d` (verified IDs), journal 20 |
+| Corrective PR | [#19](https://github.com/e-orlov/aitrckr/pull/19), head `2bd86a6f`, five required checks success (a first run exposed that Start drops error properties — fixed with the serialization adapters before re-pushing) |
+| Application source | `4f30f53e7c25cace166ab704dab08365a0458888` (squash of #19); post-merge `main` workflows all success |
+| Images (built once, clean detached worktree) | `elmo-web:g4f30f53e` `sha256:2ae5f5cb013f71db44f150e0465a8a7dc9e749ff51af20285ffbbc8733fe9158`; `elmo-worker:g4f30f53e` `sha256:01191f72864d34e10c2dcdd4438f0bd7fa8d17f447f97641271a0b10600c127d`; `elmo-db-migrate:g4f30f53e` `sha256:244e60d21d24aaad7f1501692bc6e136dc21cfa51f86e0415360540a10b0122a` |
+| Immediate rollback target | `gbf81c52d` (web `f845cb8256ae`, worker `72b6b33921e6`, db-migrate `571165da970b`) — rehearsed on the restored copy |
+| Migration journal | 20 before and after |
+| Cutover | 2026-09-06T08:19:48Z `docker compose up -d --no-build`, web HTTP 200 at 08:20:00Z (≈12 s), postgres container not recreated, 12 config keys hash-equal |
+| Live test | 2026-09-06T08:24Z (below) |
+| Closeout commit | the commit carrying this addendum — documentation only, not an image source |
+
+### Traceability
+
+| Req | Evidence |
+|---|---|
+| SE-001 safe fallback | unit tests (Drizzle/pg/stack+cause/string/object/null → fallback, no leak tokens); Storybook `SaveFailureShowsSafeMessage`; E2E `prompt-save-rollback` alert exact + leak scan of page text, server-fn response bodies and console; rehearsal fault; production aborted save |
+| SE-002 deny by default | unit: readable unknown message and impostor envelope → fallback; only read-only / PublicError / entitlement pass |
+| SE-003 defense in depth | server boundary (response bodies carry no SQL/params/canary) + client mapper (raw error injected client-side in the story still yields the safe message); all `useWriteErrorMessage` callers audited |
+| SE-004 state after error | E2E, rehearsal and production: DB identical to the pre-save snapshot, dirty bar and staged chips remain, Save enabled, no scheduler job for uncommitted prompts, retry succeeds |
+| SE-005 no regressions | bulk import with tags, tag normalization, reload, tag filter, scheduling (1 chain per prompt, 0 duplicates), read-only path (`READ_ONLY_REFUSED`), Bruno 60/60, integration 1/1, worker 1/1, scheduling verification PASS |
+
+### Red → green
+
+Unit tests: module absent at baseline → 18/18. Storybook: baseline alert received `Failed query: insert into "prompts" … params: …F04_R2_SECRET_CANARY…` → passes. E2E `prompt-save-rollback` on the R1-built test stack: `toHaveText` failed on the raw Drizzle alert → passes on the R2-built stack.
+
+### Verification summary
+
+Local: lint 0; check-types 13/13; unit lib 633 / web 387 / config 93 / cloud 43 / cli 28; Storybook 109 passed (the pre-existing Windows-locale `cloud-billing` story unchanged); scripts 11/12 (pre-existing Windows path regex); build 16/16, tree clean; Playwright `local` 84 passed / 2 worker-gated skips; Bruno 60/60 requests, 8/8 tests, 126/126 assertions; integration 1/1; worker 1/1 (stub); `verify-scheduling.ts local` PASS.
+
+Rehearsal (`elmo-f04-r2-rehearsal`, own config/volume/network, 1516/5434, fresh secrets, placeholder key, stub worker): dump (1,799,453 B, sha256 `b3601802…7f4c`) restored with identical counts and prompts digest; candidate boot, journal 20; bulk import with tags; deterministic trigger fault on the copy → exact safe alert, no leak in page text / response bodies / console, DB digest unchanged, dirty state kept; trigger dropped → retry saved with normalized tags, reload chips, filter, 1 chain each, 0 duplicate chains; stub worker 5 stub runs / 0 real; rollback to `gbf81c52d` booted and read/wrote tag data; back to the candidate; project removed with `down -v` (that project only).
+
+Pre-deploy dump (1,812,450 B, sha256 `5783eed5…62a6`, TOC 197) restored in a disposable container with identical counts and digest; config backed up privately (owner-only ACL). Post-cutover: expected image IDs, HEALTHY, HTTP 200, journal 20, pre/post counts and prompts digest identical, 0 duplicate chains, 0 error lines, watchdog success, Docker data still on `D:`.
+
+### Production live test (metadata only)
+
+Operator-authorized: one session row for the operator's account was minted for the headless browser and deleted afterwards; DB reads via `docker exec psql`, no proxy, no server-side fault. Target: existing prompt `5b1a5e3b-1016-4d48-b244-99168cda86cc` (`sha256[:16] fa113f5963f93740`, brand `arag`, tags `[]`), brand prompts digest `fc19ab03fea37a6742253ed5f7b62f54`.
+
+1. Temporary tag `r2-check` added through the row's tag input → unsaved bar; DB unchanged.
+2. One Save request aborted in the test browser → alert exactly "Failed to save prompts. Your changes were not saved. Please try again."; page text leaks none; dirty bar visible, Save enabled, chip still staged; DB digest unchanged; browser console only the network-abort artifacts (`net::ERR_FAILED`, `TypeError: Failed to fetch`). Screenshot retained.
+3. Interception removed → Save: tags `[r2-check]`, brand count 33.
+4. Reload: chip present; visibility filter `r2-check` → 1 result, the prompt listed.
+5. Chip removed through the UI → Save: tags `[]`, brand digest `fc19ab03fea37a6742253ed5f7b62f54` = initial, count 33, pending chain for the prompt 1 (unchanged); only `updated_at` moved.
+6. web/worker error lines 0; global duplicate chains 0.
+
+### Attestations
+
+No direct push, bypass or history rewrite; no migration/schema/dependency/lockfile/secret change; no new endpoint or production fault switch (the trigger existed only in the disposable test/rehearsal databases); no live provider calls in tests or rehearsal; no Docker reset/prune/relocation; production volume untouched; `down -v` only on the disposable rehearsal project; tags/Releases `production/f04-bulk-prompt-tags-2026-09-05` and `…-r1-2026-09-05` unchanged.
