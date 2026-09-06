@@ -11,19 +11,28 @@ export const getPromptsSummaryFn = noop;
 export const getPromptStatsFn = noop;
 export const getPromptRunsFn = noop;
 
+/** Set to make the next `updatePromptsFn` call reject with that value once. */
+export const mockPromptSave: { rejectNextWith?: unknown } = {};
+
 // Echoes back the saved rows the way the real handler does, minting ids for
 // inserts, so the editor's post-save reset is exercisable in a story.
 export const updatePromptsFn = async ({
 	data,
 }: {
 	data: { prompts: Array<{ id?: string; value: string; enabled?: boolean; tags?: string[] }> };
-}) =>
-	data.prompts.map((p, i) => ({
+}) => {
+	if (mockPromptSave.rejectNextWith !== undefined) {
+		const error = mockPromptSave.rejectNextWith;
+		mockPromptSave.rejectNextWith = undefined;
+		throw error;
+	}
+	return data.prompts.map((p, i) => ({
 		id: p.id ?? `mock-new-${i}`,
 		value: p.value,
 		enabled: p.enabled ?? true,
 		tags: p.tags ?? [],
 		systemTags: [] as string[],
 	}));
+};
 export const getPromptChartDataFn = noop;
 export const getPromptWebQueryFn = noop;

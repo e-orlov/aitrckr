@@ -1,5 +1,6 @@
 import { selectPremiumModels } from "@workspace/config/plans";
 import { sanitizeUserTags } from "@workspace/lib/tag-utils";
+import { PublicError } from "@/lib/public-errors";
 
 export interface SubmittedPrompt {
 	id?: string;
@@ -65,10 +66,13 @@ export function planPromptSave(
 		// Guessing which row was meant would write one edit and drop another.
 		const before = existingById.get(prompt.id);
 		if (!before) {
-			throw new Error(`Prompt ${prompt.id} is not in this brand's list. Reload the page and try again.`);
+			throw new PublicError(
+				"prompt-save-stale",
+				`Prompt ${prompt.id} is not in this brand's list. Reload the page and try again.`,
+			);
 		}
 		if (claimed.has(prompt.id)) {
-			throw new Error(`Prompt ${prompt.id} appears twice in this save.`);
+			throw new PublicError("prompt-save-duplicate-id", `Prompt ${prompt.id} appears twice in this save.`);
 		}
 		claimed.add(prompt.id);
 		updates.push({ id: prompt.id, prompt, before, after });

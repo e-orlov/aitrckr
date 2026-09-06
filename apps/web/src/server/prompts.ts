@@ -22,6 +22,7 @@ import {
 	getPromptWebQueriesForMapping,
 	getPromptWebQueryCounts,
 } from "@/lib/postgres-read";
+import { isPublicError, isWriteDenied, PROMPT_SAVE_FAILED, PublicError } from "@/lib/public-errors";
 import { loadSupplementalDomainLookup } from "@/lib/source-classification.server";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
 import { savePromptsForBrand } from "@/server/save-prompts";
@@ -541,7 +542,16 @@ export const updatePromptsFn = createServerFn({ method: "POST" })
 		});
 		if (!brand) throw new Error("Brand not found");
 
-		return savePromptsForBrand(brand, data.prompts);
+		try {
+			return await savePromptsForBrand(brand, data.prompts);
+		} catch (error) {
+			if (isPublicError(error) || isWriteDenied(error)) throw error;
+			// A database or driver error names the SQL and its parameters — the
+			// prompt text and tags. Keep that on the server; the browser gets a
+			// message it can show.
+			console.error("Prompt save failed:", error);
+			throw new PublicError("prompt-save-failed", PROMPT_SAVE_FAILED);
+		}
 	});
 
 export const getPromptChartDataFn = createServerFn({ method: "GET" })

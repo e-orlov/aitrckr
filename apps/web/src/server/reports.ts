@@ -7,10 +7,12 @@ import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { hasReportAccess, requireAuthSession } from "@/lib/auth/helpers";
 import { sendReportJob } from "@/lib/job-scheduler";
+import { PublicError } from "@/lib/public-errors";
 
 async function requireReportAccess() {
 	const session = await requireAuthSession();
-	if (!hasReportAccess(session)) throw new Error("Access denied. Report generator access required.");
+	if (!hasReportAccess(session))
+		throw new PublicError("reports-access", "Access denied. Report generator access required.");
 }
 
 export const getReportsFn = createServerFn({ method: "GET" }).handler(async () => {

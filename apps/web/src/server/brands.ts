@@ -41,6 +41,7 @@ import { validateWebsiteUrl } from "@/lib/brand-website";
 import { getDeployment } from "@/lib/config/server";
 import { cleanAndValidateDomain } from "@/lib/domain-categories";
 import { type TrackedTarget, targetFilterValue } from "@/lib/model-filter";
+import { PublicError } from "@/lib/public-errors";
 import { INVALID_SLUG, TAKEN_SLUG } from "@/lib/slug-errors";
 
 /**
@@ -230,7 +231,7 @@ export const createBrandFn = createServerFn({ method: "POST" })
 
 		const urlValidation = validateWebsiteUrl(data.website);
 		if (!urlValidation.isValid) {
-			throw new Error(urlValidation.error);
+			throw new PublicError("brand-website", urlValidation.error);
 		}
 
 		const defaultDomains = getDefaultBrandDomains();
@@ -295,17 +296,17 @@ export const createBrandInOrgFn = createServerFn({ method: "POST" })
 		const deployment = getDeployment();
 
 		if (evaluateRequireCanCreateBrands(deployment.features.canCreateBrands) === "deny") {
-			throw new Error("Brand creation is not allowed in this deployment");
+			throw new PublicError("brand-creation-disabled", "Brand creation is not allowed in this deployment");
 		}
 
 		const urlValidation = validateWebsiteUrl(data.website);
 		if (!urlValidation.isValid) {
-			throw new Error(urlValidation.error);
+			throw new PublicError("brand-website", urlValidation.error);
 		}
 
 		const trimmedName = data.brandName.trim();
 		if (!trimmedName) {
-			throw new Error("Brand name must be a non-empty string");
+			throw new PublicError("brand-name", "Brand name must be a non-empty string");
 		}
 
 		const orgId = data.organizationId;
@@ -355,7 +356,7 @@ export const updateBrandFn = createServerFn({ method: "POST" })
 		const session = await requireAuthSession();
 		const org = await requireBrandOrganization(session.user.id, data.brandId);
 
-		if (data.slug !== undefined && !isValidSlug(data.slug)) throw new Error(INVALID_SLUG);
+		if (data.slug !== undefined && !isValidSlug(data.slug)) throw new PublicError("slug-invalid", INVALID_SLUG);
 
 		const normalized = normalizeBrandUpdate({
 			name: data.name,
@@ -364,7 +365,7 @@ export const updateBrandFn = createServerFn({ method: "POST" })
 			aliases: data.aliases,
 		});
 		if (!normalized.ok) {
-			throw new Error(normalized.error);
+			throw new PublicError("brand-website", normalized.error);
 		}
 		const updateData = normalized.updates;
 
@@ -375,7 +376,7 @@ export const updateBrandFn = createServerFn({ method: "POST" })
 						data.slug !== undefined &&
 						!(await isBrandSlugAvailable(org.id, data.slug, { excludeBrandId: data.brandId, conn: tx }))
 					) {
-						throw new Error(TAKEN_SLUG);
+						throw new PublicError("slug-taken", TAKEN_SLUG);
 					}
 					return tx
 						.update(brands)
@@ -434,7 +435,7 @@ export const updateCompetitors = createServerFn({ method: "POST" })
 			const cleanedDomains = c.domains.map((d) => cleanAndValidateDomain(d));
 			const invalid = c.domains.filter((_, i) => !cleanedDomains[i]);
 			if (invalid.length > 0) {
-				throw new Error(`Invalid domain(s) for "${c.name}": ${invalid.join(", ")}`);
+				throw new PublicError("competitor-domains", `Invalid domain(s) for "${c.name}": ${invalid.join(", ")}`);
 			}
 			return {
 				name: c.name,
@@ -478,7 +479,7 @@ export const addDomainToBrandFn = createServerFn({ method: "POST" })
 		await requireBrandAccess(session.user.id, data.brandId);
 
 		const domain = cleanAndValidateDomain(data.domain);
-		if (!domain) throw new Error(`Invalid domain: ${data.domain}`);
+		if (!domain) throw new PublicError("competitor-domain", `Invalid domain: ${data.domain}`);
 
 		const [result] = await db
 			.update(brands)
@@ -519,7 +520,7 @@ export const addDomainToCompetitorFn = createServerFn({ method: "POST" })
 		if (!existing) throw new Error("Competitor not found");
 
 		const domain = cleanAndValidateDomain(data.domain);
-		if (!domain) throw new Error(`Invalid domain: ${data.domain}`);
+		if (!domain) throw new PublicError("competitor-domain", `Invalid domain: ${data.domain}`);
 		if (existing.domains.includes(domain)) return existing;
 
 		const updatedDomains = [...existing.domains, domain];
@@ -548,7 +549,7 @@ export const createCompetitorFromDomainFn = createServerFn({ method: "POST" })
 		await requireBrandAccess(session.user.id, data.brandId);
 
 		const domain = cleanAndValidateDomain(data.domain);
-		if (!domain) throw new Error(`Invalid domain: ${data.domain}`);
+		if (!domain) throw new PublicError("competitor-domain", `Invalid domain: ${data.domain}`);
 
 		await assertCompetitorCap(data.brandId, 1);
 

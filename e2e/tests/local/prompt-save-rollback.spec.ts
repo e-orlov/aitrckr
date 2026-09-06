@@ -13,7 +13,10 @@ import { expect, type Page, test } from "@playwright/test";
 import pg from "pg";
 import { brandUrl, DATABASE_URL, PROMPT_IDS, TEST_BRAND_ID } from "../../fixtures";
 
-const SENTINEL = `F04-CORR-IT-001 sentinel ${Date.now()}`;
+// The canary rides inside the sentinel value: it may appear in an input's
+// value, never in rendered text, the alert, the console or a response body.
+const CANARY = `F04_R2_SECRET_CANARY_${Date.now()}`;
+const SENTINEL = `F04-CORR-IT-001 sentinel ${CANARY}`;
 const VALID_NEW = `F04-CORR-IT-001 valid ${Date.now()}`;
 const TRIGGER = "f04_corr_it001_reject_sentinel";
 const FUNCTION = "f04_corr_it001_reject_sentinel_fn";
@@ -66,7 +69,7 @@ test.describe("Prompt save rolls back as a whole", () => {
     try {
       await client.query(`DROP TRIGGER IF EXISTS ${TRIGGER} ON prompts`);
       await client.query(`DROP FUNCTION IF EXISTS ${FUNCTION}()`);
-      // Nothing should have been written; remove any leftover just in case.
+      // The retry at the end of the spec saves the batch; remove it again.
       const leftovers = await client.query("SELECT id FROM prompts WHERE value = ANY($1::text[])", [[SENTINEL, VALID_NEW]]);
       if (leftovers.rows.length > 0) {
         const ids = leftovers.rows.map((r) => r.id);
@@ -86,6 +89,13 @@ test.describe("Prompt save rolls back as a whole", () => {
 
   test("an earlier tag update is undone when a later insert in the same save fails", async ({ page }) => {
     test.setTimeout(120_000);
+    const consoleText: string[] = [];
+    page.on("console", (m) => consoleText.push(m.text()));
+    page.on("pageerror", (e) => consoleText.push(e.message));
+    const serverFnBodies: string[] = [];
+    page.on("response", async (res) => {
+      if (res.url().includes("/_serverFn/")) serverFnBodies.push(await res.text().catch(() => ""));
+    });
     await page.goto(`${brandUrl()}/settings/prompts`);
     await expect(page.getByRole("textbox").first()).toBeVisible();
 
@@ -109,8 +119,16 @@ test.describe("Prompt save rolls back as a whole", () => {
     await expect(unsavedBar).toBeVisible();
 
     await page.getByRole("button", { name: /save changes/i }).click();
-    const alert = page.getByRole("alert").filter({ hasText: /failed/i });
+    const alert = page.getByRole("alert");
     await expect(alert).toBeVisible({ timeout: 60_000 });
+    // SE-001 — the user sees the safe message and nothing of the database error.
+    await expect(alert).toHaveText("Failed to save prompts. Your changes were not saved. Please try again.");
+    const leaks = ["Failed query", "insert into", '"prompts"', "params", CANARY, "DrizzleQueryError"];
+    const bodyText = (await page.locator("body").textContent()) ?? "";
+    for (const leak of leaks) expect(bodyText, `page text leaks ${leak}`).not.toContain(leak);
+    await expect.poll(() => serverFnBodies.length).toBeGreaterThan(0);
+    for (const body of serverFnBodies) for (const leak of leaks) expect(body, `response body leaks ${leak}`).not.toContain(leak);
+    for (const line of consoleText) for (const leak of leaks) expect(line, `console leaks ${leak}`).not.toContain(leak);
     // The edits are still there for the user to fix or discard.
     await expect(unsavedBar).toBeVisible();
     await expect(page.getByRole("button", { name: /save changes/i })).toBeEnabled();
@@ -126,5 +144,30 @@ test.describe("Prompt save rolls back as a whole", () => {
     expect((await client.query("SELECT id, value, tags FROM prompts WHERE brand_id = 'nike' ORDER BY id")).rows).toEqual(
       nikeBefore,
     );
+    const scheduled = await client.query(
+      "SELECT count(*)::int AS n FROM pgboss.job WHERE name = 'process-prompt' AND data->>'promptId' NOT IN (SELECT id::text FROM prompts) AND created_on > now() - interval '2 minutes'",
+    );
+    expect(scheduled.rows[0].n).toBe(0);
+
+    // With the fault gone, the same staged edits save on retry.
+    await client.query(`DROP TRIGGER IF EXISTS ${TRIGGER} ON prompts`);
+    await page.getByRole("button", { name: /save changes/i }).click();
+    await expect(unsavedBar).toBeHidden({ timeout: 60_000 });
+    const saved = await client.query("SELECT value, tags FROM prompts WHERE value = ANY($1::text[]) ORDER BY value", [
+      [SENTINEL, VALID_NEW],
+    ]);
+    expect(saved.rows).toEqual([
+      { value: SENTINEL, tags: ["boom"] },
+      { value: VALID_NEW, tags: ["ok"] },
+    ]);
+    expect((await client.query("SELECT tags FROM prompts WHERE id = $1", [PROMPT_IDS.branded1])).rows[0].tags).toEqual([
+      ...baselineTags,
+      "rolled-back",
+    ]);
+    await page.reload();
+    await expect(page.getByRole("textbox").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Remove rolled-back", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Remove ok", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Remove boom", exact: true })).toBeVisible();
   });
 });

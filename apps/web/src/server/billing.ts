@@ -20,6 +20,7 @@ import {
 import { z } from "zod";
 import { listUserOrganizations, requireAuthSession, requireOrganization } from "@/lib/auth/helpers";
 import { getDeployment } from "@/lib/config/server";
+import { PublicError } from "@/lib/public-errors";
 
 export type BillingState = {
 	billingEnabled: boolean;
@@ -122,20 +123,21 @@ export const setPremiumAddonQuantityFn = createServerFn({ method: "POST" })
 	.validator(z.object({ organizationId: z.string(), quantity: z.number().int().min(0).max(1000) }))
 	.handler(async ({ data }) => {
 		const deployment = getDeployment();
-		if (!deployment.features.billing) throw new Error("Billing is not enabled on this deployment");
+		if (!deployment.features.billing)
+			throw new PublicError("billing-unavailable", "Billing is not enabled on this deployment");
 
 		const session = await requireAuthSession();
 		const org = await requireOrganization(session.user.id, data.organizationId);
 		if (!isOrgAdminRole(org.role)) {
-			throw new Error("Only organization admins can change billing");
+			throw new PublicError("billing-admin-only", "Only organization admins can change billing");
 		}
 
 		const state = await getOrgBillingState(org.id);
 		if (!isPremiumAddonAvailable(state.entitlements.planKey)) {
-			throw new Error("Extra premium pairings are available on the Pro and Business plans");
+			throw new PublicError("billing-plan", "Extra premium pairings are available on the Pro and Business plans");
 		}
 		if (!state.subscription?.stripeSubscriptionId) {
-			throw new Error("No active subscription to attach the add-on to");
+			throw new PublicError("billing-no-subscription", "No active subscription to attach the add-on to");
 		}
 
 		// Shrinking the add-on below what's assigned would orphan assignments;
@@ -143,7 +145,8 @@ export const setPremiumAddonQuantityFn = createServerFn({ method: "POST" })
 		const included = state.entitlements.premiumPool - (state.settings?.premiumAddonQuantity ?? 0);
 		const assigned = await countOrgAssignedPremiumSlots(org.id);
 		if (assigned > included + data.quantity) {
-			throw new Error(
+			throw new PublicError(
+				"billing-limit",
 				`${assigned} premium pairings are in use; unassign ${assigned - included - data.quantity} before reducing the add-on`,
 			);
 		}

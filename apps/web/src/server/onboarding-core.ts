@@ -19,6 +19,7 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { dedupeAliases, dedupeDomains } from "@/lib/domain-categories";
 import { createMultiplePromptJobSchedulers } from "@/lib/job-scheduler";
+import { PublicError } from "@/lib/public-errors";
 
 // ============================================================================
 // Errors
@@ -135,10 +136,10 @@ function validateAndFormatWebsite(url: string): string {
 	const formatted = trimmed.startsWith("http://") || trimmed.startsWith("https://") ? trimmed : `https://${trimmed}`;
 	const parsed = new URL(formatted);
 	if (!["http:", "https:"].includes(parsed.protocol)) {
-		throw new Error("Website URL must use http or https");
+		throw new PublicError("brand-website", "Website URL must use http or https");
 	}
 	if (!parsed.hostname) {
-		throw new Error("Website URL must have a valid hostname");
+		throw new PublicError("brand-website", "Website URL must have a valid hostname");
 	}
 	return formatted;
 }

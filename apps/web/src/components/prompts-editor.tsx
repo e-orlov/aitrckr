@@ -3,6 +3,7 @@ import { type EditablePrompt, type PremiumAllowance, PromptsListEditor } from "@
 import { UnsavedChangesBar } from "@/components/unsaved-changes-bar";
 import { useInvalidatePromptsSummary } from "@/hooks/use-prompts-summary";
 import { trackEvent } from "@/lib/posthog";
+import { PROMPT_SAVE_FAILED } from "@/lib/public-errors";
 import { useWriteErrorMessage } from "@/lib/write-errors";
 import { updatePromptsFn } from "@/server/prompts";
 
@@ -149,7 +150,7 @@ export function PromptsEditor({ initialPrompts, brandId, pageTitle, pageDescript
 			invalidatePromptsSummary(brandId);
 		} catch (err) {
 			console.error("Error saving prompts:", err);
-			setError(writeError(err, "Failed to save prompts."));
+			setError(writeError(err, PROMPT_SAVE_FAILED));
 		} finally {
 			setIsSaving(false);
 			saveInProgress.current = false;

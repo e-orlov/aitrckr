@@ -24,6 +24,7 @@ import { z } from "zod";
 import { isAdmin, requireAuthSession } from "@/lib/auth/helpers";
 import { sendImmediatePromptJob } from "@/lib/job-scheduler";
 import { getAdminActiveBrandsOverTime, getAdminBrandRunStats, getAdminRunsOverTime } from "@/lib/postgres-read";
+import { PublicError } from "@/lib/public-errors";
 
 // ============================================================================
 // Admin guard helper
@@ -31,7 +32,7 @@ import { getAdminActiveBrandsOverTime, getAdminBrandRunStats, getAdminRunsOverTi
 
 async function requireAdmin() {
 	const session = await requireAuthSession();
-	if (!isAdmin(session)) throw new Error("Unauthorized: Admin access required");
+	if (!isAdmin(session)) throw new PublicError("admin-only", "Unauthorized: Admin access required");
 	return session;
 }
 
@@ -824,7 +825,7 @@ export const retryJobFn = createServerFn({ method: "POST" })
 
 		const targetPromptId = data.promptId;
 		if (!targetPromptId) {
-			throw new Error("promptId is required");
+			throw new PublicError("admin-input", "promptId is required");
 		}
 
 		const prompt = await db.query.prompts.findFirst({
@@ -832,7 +833,7 @@ export const retryJobFn = createServerFn({ method: "POST" })
 		});
 
 		if (!prompt) throw new Error("Prompt not found");
-		if (!prompt.enabled) throw new Error("Prompt is disabled");
+		if (!prompt.enabled) throw new PublicError("prompt-disabled", "Prompt is disabled");
 
 		const forceDue = data.forceDue === true;
 		if (forceDue) {
