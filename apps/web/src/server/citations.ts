@@ -1,8 +1,7 @@
 /** Server functions for citation data. */
 import { createServerFn } from "@tanstack/react-start";
 import { db } from "@workspace/lib/db/db";
-import { brands, competitors, prompts, SYSTEM_TAGS } from "@workspace/lib/db/schema";
-import { getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
+import { brands, competitors, prompts } from "@workspace/lib/db/schema";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { requireAuthSession, requireBrandAccess } from "@/lib/auth/helpers";
@@ -41,6 +40,7 @@ import {
 	type PerPromptDailyCitationPageRow,
 } from "@/lib/postgres-read";
 import { loadSupplementalDomainLookup } from "@/lib/source-classification.server";
+import { availableTagsFor, parseTagFilter, promptIdsMatchingTags } from "@/server/citation-filters";
 
 type Classify = (domain: string, url: string, title?: string | null) => CitationCategory;
 
@@ -96,33 +96,6 @@ const MIN_COUNT_FOR_WHATS_CHANGED = 2;
 const DROP_PERCENT_THRESHOLD = 50;
 
 const WHATS_CHANGED_LIMIT = 10;
-
-/**
- * Prompt ids matching the tag filter. Branded/unbranded are derived rather than
- * stored, so they resolve through getEffectiveBrandedStatus; every other tag
- * matches against the prompt's own tags or its system tags.
- */
-function promptIdsMatchingTags(
-	allPrompts: { id: string; tags: string[] | null; systemTags: string[] | null }[],
-	tagFilter: string[],
-): string[] {
-	const wantsBranded = tagFilter.includes(SYSTEM_TAGS.BRANDED);
-	const wantsUnbranded = tagFilter.includes(SYSTEM_TAGS.UNBRANDED);
-	const userTagFilter = tagFilter.filter((tag) => tag !== SYSTEM_TAGS.BRANDED && tag !== SYSTEM_TAGS.UNBRANDED);
-
-	return allPrompts
-		.filter((prompt) => {
-			const systemTags = prompt.systemTags || [];
-			const userTags = prompt.tags || [];
-			if (wantsBranded || wantsUnbranded) {
-				const { isBranded } = getEffectiveBrandedStatus(systemTags, userTags);
-				if (isBranded ? wantsBranded : wantsUnbranded) return true;
-			}
-			const allTags = [...systemTags, ...userTags].map((tag) => tag.toLowerCase());
-			return userTagFilter.some((tag) => allTags.includes(tag));
-		})
-		.map((prompt) => prompt.id);
-}
 
 /**
  * Google search/shopping surfaces (Google AI Mode) are pulled OUT of the source
@@ -371,16 +344,9 @@ export const getCitationsFn = createServerFn({ method: "GET" })
 		const competitorDomains = new Set(competitorsList.flatMap((c) => c.domains.map(extractDomain)).filter(Boolean));
 		const competitorSummary = competitorsList.map((c) => ({ id: c.id, name: c.name, domains: c.domains }));
 
-		const userTags = new Set(allPrompts.flatMap((prompt) => prompt.tags || []));
-		const availableTags = [
-			SYSTEM_TAGS.BRANDED,
-			SYSTEM_TAGS.UNBRANDED,
-			...[...userTags]
-				.filter((tag) => tag.toLowerCase() !== SYSTEM_TAGS.BRANDED && tag.toLowerCase() !== SYSTEM_TAGS.UNBRANDED)
-				.sort(),
-		];
+		const availableTags = availableTagsFor(allPrompts);
 
-		const tagFilter = data.tags?.split(",").filter(Boolean) || [];
+		const tagFilter = parseTagFilter(data.tags);
 		const enabledPromptIds =
 			tagFilter.length > 0 ? promptIdsMatchingTags(allPrompts, tagFilter) : allPrompts.map((p) => p.id);
 		if (enabledPromptIds.length === 0) return emptyCitationsResult(availableTags, competitorSummary);
