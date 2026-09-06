@@ -125,7 +125,10 @@ export function stabilityScore(weightedVolatility: number | null): number | null
  * in the same order on every host and for every database row order (a
  * locale-aware compare would not).
  */
-export function compareMentionsDescThenName(a: { name: string; mentions: number }, b: { name: string; mentions: number }) {
+export function compareMentionsDescThenName(
+	a: { name: string; mentions: number },
+	b: { name: string; mentions: number },
+) {
 	if (a.mentions !== b.mentions) return b.mentions - a.mentions;
 	return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 }
@@ -341,6 +344,58 @@ export const SHARE_OF_VOICE_TREND_TOP_N = 6;
 
 const asCount = (value: number): number => (Number.isFinite(value) && value > 0 ? value : 0);
 
+interface CarriedDay {
+	brand: number;
+	competitors: Map<string, number>;
+}
+
+/**
+ * Sum every prompt's carried snapshot per day. Each prompt is pre-seeded with
+ * its earliest observation and, on every day, advanced to its latest
+ * observation on or before that day — the whole snapshot at once. Days are
+ * absent from the result only when no prompt has any observation.
+ */
+function carriedCountsByDay(byPrompt: Map<string, Map<string, DailyObservation>>, dateRange: string[]) {
+	const days = new Map<string, CarriedDay>();
+	for (const [, dateMap] of byPrompt) {
+		const observations = [...dateMap.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+		if (observations.length === 0) continue;
+		let next = 0;
+		let carried = observations[0][1];
+		for (const date of dateRange) {
+			while (next < observations.length && observations[next][0] <= date) carried = observations[next++][1];
+			let day = days.get(date);
+			if (!day) {
+				day = { brand: 0, competitors: new Map() };
+				days.set(date, day);
+			}
+			day.brand += carried.brand;
+			for (const [name, mentions] of carried.competitors) {
+				day.competitors.set(name, (day.competitors.get(name) ?? 0) + mentions);
+			}
+		}
+	}
+	return days;
+}
+
+/** One day's exact shares for the shown series; `others` is the summed tail count's share. */
+function comparisonValues(day: CarriedDay, shownKeyByName: Map<string, string>) {
+	const shownCounts = new Map<string, number>();
+	let othersCount = 0;
+	let total = day.brand;
+	for (const [name, mentions] of day.competitors) {
+		total += mentions;
+		const key = shownKeyByName.get(name);
+		if (key) shownCounts.set(key, (shownCounts.get(key) ?? 0) + mentions);
+		else othersCount += mentions;
+	}
+	const share = (count: number) => (total === 0 ? null : (count / total) * 100);
+	const values: Record<string, number | null> = { brand: share(day.brand) };
+	for (const key of shownKeyByName.values()) values[key] = share(shownCounts.get(key) ?? 0);
+	values.others = share(othersCount);
+	return { values, othersCount };
+}
+
 /**
  * Share of voice over time for the brand and its competitors, with the same
  * per-prompt carry-forward as shareOfVoiceTimeSeriesLVCF but carrying each
@@ -368,66 +423,33 @@ export function shareOfVoiceComparisonTimeSeriesLVCF(
 		competitorDaily.map((r) => ({ ...r, mentions: asCount(r.mentions) })),
 	);
 
-	// Per-day totals after every prompt's snapshot has been replaced or carried.
-	const brandByDate = new Map<string, number>();
-	const competitorsByDate = new Map<string, Map<string, number>>();
-	for (const [, dateMap] of byPrompt) {
-		const observations = [...dateMap.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-		if (observations.length === 0) continue;
-		let next = 0;
-		let carried = observations[0][1];
-		for (const date of dateRange) {
-			while (next < observations.length && observations[next][0] <= date) carried = observations[next++][1];
-			brandByDate.set(date, (brandByDate.get(date) ?? 0) + carried.brand);
-			let bucket = competitorsByDate.get(date);
-			if (!bucket) {
-				bucket = new Map();
-				competitorsByDate.set(date, bucket);
-			}
-			for (const [name, mentions] of carried.competitors) bucket.set(name, (bucket.get(name) ?? 0) + mentions);
-		}
-	}
+	const days = carriedCountsByDay(byPrompt, dateRange);
 
-	const lastDate = dateRange[dateRange.length - 1];
-	const ranked = [...(competitorsByDate.get(lastDate) ?? new Map<string, number>()).entries()]
+	// End-of-window standings decide which competitors get their own line; the
+	// last day's carried counts are exactly what shareOfVoiceLeaderboardLVCF sums.
+	const lastDay = days.get(dateRange[dateRange.length - 1]);
+	const ranked = [...(lastDay?.competitors ?? new Map<string, number>()).entries()]
 		.map(([name, mentions]) => ({ name, mentions }))
 		.filter((c) => c.mentions > 0)
 		.sort(compareMentionsDescThenName)
 		.slice(0, topN);
-	const shown = new Map(ranked.map((c, i) => [c.name, `competitor-${i + 1}`]));
+	const shownKeyByName = new Map(ranked.map((c, i) => [c.name, `competitor-${i + 1}`]));
 
 	const series: ShareOfVoiceTrendSeries[] = [
 		{ key: "brand", name: brandName, kind: "brand" },
-		...ranked.map((c) => ({ key: shown.get(c.name) as string, name: c.name, kind: "competitor" as const })),
+		...ranked.map((c) => ({ key: shownKeyByName.get(c.name) as string, name: c.name, kind: "competitor" as const })),
 	];
 
 	let othersEverPositive = false;
 	const points = dateRange.map((date) => {
-		const bucket = competitorsByDate.get(date);
-		const brand = brandByDate.get(date);
-		const values: Record<string, number | null> = {};
-		if (bucket === undefined || brand === undefined) {
+		const day = days.get(date);
+		if (!day) {
+			const values: Record<string, number | null> = { others: null };
 			for (const s of series) values[s.key] = null;
-			values.others = null;
 			return { date, values };
 		}
-		const shownCounts = new Map<string, number>();
-		let others = 0;
-		let total = brand;
-		for (const [name, mentions] of bucket) {
-			total += mentions;
-			const key = shown.get(name);
-			if (key) shownCounts.set(key, (shownCounts.get(key) ?? 0) + mentions);
-			else others += mentions;
-		}
-		if (others > 0) othersEverPositive = true;
-		const share = (count: number) => (total === 0 ? null : (count / total) * 100);
-		values.brand = share(brand);
-		for (const c of ranked) {
-			const key = shown.get(c.name) as string;
-			values[key] = share(shownCounts.get(key) ?? 0);
-		}
-		values.others = share(others);
+		const { values, othersCount } = comparisonValues(day, shownKeyByName);
+		if (othersCount > 0) othersEverPositive = true;
 		return { date, values };
 	});
 

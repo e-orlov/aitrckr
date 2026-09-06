@@ -186,7 +186,12 @@ describe("compareMentionsDescThenName", () => {
 		];
 		const expected = ["Beta", "Alpha", "Zed", "alpha"];
 		expect([...tied].sort(compareMentionsDescThenName).map((c) => c.name)).toEqual(expected);
-		expect([...tied].reverse().sort(compareMentionsDescThenName).map((c) => c.name)).toEqual(expected);
+		expect(
+			[...tied]
+				.reverse()
+				.sort(compareMentionsDescThenName)
+				.map((c) => c.name),
+		).toEqual(expected);
 	});
 
 	it("orders leaderboard ties deterministically without changing non-tied order", () => {
@@ -219,7 +224,12 @@ describe("shareOfVoiceComparisonTimeSeriesLVCF", () => {
 	function split(observations: Obs[]) {
 		const brandDaily = observations.map((o) => ({ promptId: o.p, date: o.d, brand: o.brand }));
 		const competitorDaily = observations.flatMap((o) =>
-			Object.entries(o.comps ?? {}).map(([competitor, mentions]) => ({ promptId: o.p, date: o.d, competitor, mentions })),
+			Object.entries(o.comps ?? {}).map(([competitor, mentions]) => ({
+				promptId: o.p,
+				date: o.d,
+				competitor,
+				mentions,
+			})),
 		);
 		return { brandDaily, competitorDaily };
 	}
