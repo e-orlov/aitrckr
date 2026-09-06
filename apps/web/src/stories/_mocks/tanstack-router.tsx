@@ -243,3 +243,8 @@ export const Link = React.forwardRef<HTMLButtonElement, any>(function LinkMock(
 		</button>
 	);
 });
+
+/** Same as the real one: the adapter is its options object. */
+export function createSerializationAdapter<T>(opts: T): T {
+	return opts;
+}
