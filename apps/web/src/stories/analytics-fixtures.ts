@@ -50,18 +50,150 @@ const shareTimeSeries = DATES.map((date, i) => ({
 // Headline + entries are kept consistent with the trend's last point (35%), the
 // way the server now derives them (LVCF current standings).
 const sovLastShare = shareTimeSeries[shareTimeSeries.length - 1].share ?? 0;
+
+// Comparison trend: the competitors split what the brand leaves in a fixed
+// 29:22:14 ratio, so the last point reads 35 / 29 / 22 / 14 like the entries.
+const threeCompetitors = [
+	{ key: "competitor-1", name: "Globex", weight: 29 },
+	{ key: "competitor-2", name: "Initech", weight: 22 },
+	{ key: "competitor-3", name: "Umbrella", weight: 14 },
+];
+const comparisonTrend = {
+	series: [
+		{ key: "brand", name: "Acme", kind: "brand" as const },
+		...threeCompetitors.map((c) => ({ key: c.key, name: c.name, kind: "competitor" as const })),
+	],
+	points: shareTimeSeries.map((p) => {
+		const rest = 100 - p.share;
+		const values: Record<string, number | null> = { brand: p.share };
+		for (const c of threeCompetitors) values[c.key] = (rest * c.weight) / 65;
+		return { date: p.date, values };
+	}),
+};
+
 export const mockShareOfVoice = {
 	brandName: "Acme",
 	brandShare: sovLastShare / 100,
 	totalRuns: 3120,
 	model: null,
 	shareTimeSeries,
+	comparisonTrend,
 	entries: [
 		{ name: "Acme", mentions: 1050, share: 0.35, isBrand: true, prompts: 31 },
 		{ name: "Globex", mentions: 870, share: 0.29, isBrand: false, prompts: 28 },
 		{ name: "Initech", mentions: 660, share: 0.22, isBrand: false, prompts: 24 },
 		{ name: "Umbrella", mentions: 420, share: 0.14, isBrand: false, prompts: 19 },
 	],
+};
+
+/**
+ * Share of voice with nine competitors: six get their own line, the other
+ * three are summed into Others. Everything derives from one integer count table
+ * per day, so the chart, tooltip, headline, donut and leaderboard reconcile by
+ * construction. Counts are chosen so lines cross, one competitor sits at an
+ * actual 0% for a stretch, and Others is 0 on the last days but positive earlier.
+ */
+const DAYS_TOP6 = buildDates(14);
+const TOP6_COMPETITORS = [
+	"Globex",
+	"Initech",
+	"Umbrella Corporation International Holdings GmbH & Co. KGaA",
+	"Hooli",
+	"Vandelay",
+	"Wonka",
+];
+const TAIL_COMPETITORS = ["Tyrell", "Cyberdyne", "Soylent"];
+
+function top6Counts(i: number): { brand: number; competitors: number[]; tail: number[] } {
+	// Globex overtakes the brand around the middle and falls back; Hooli is absent
+	// (0) on the first five days; the tail disappears on the last three days.
+	const brand = 30 + Math.round(6 * Math.sin(i / 2));
+	const competitors = [
+		20 + i, // Globex rises past the brand and the others
+		28 - i, // Initech falls
+		15,
+		i < 5 ? 0 : 6 + Math.round(i / 2), // Hooli: an actual 0% early on
+		9,
+		8,
+	];
+	const tail = i >= DAYS_TOP6.length - 3 ? [0, 0, 0] : [3, 2, 1];
+	return { brand, competitors, tail };
+}
+
+const top6Points = DAYS_TOP6.map((date, i) => {
+	const { brand, competitors, tail } = top6Counts(i);
+	const others = tail.reduce((s, c) => s + c, 0);
+	const total = brand + competitors.reduce((s, c) => s + c, 0) + others;
+	const values: Record<string, number | null> = { brand: (brand / total) * 100 };
+	competitors.forEach((c, k) => {
+		values[`competitor-${k + 1}`] = (c / total) * 100;
+	});
+	values.others = (others / total) * 100;
+	return { date, values };
+});
+
+// End-of-window standings rank the six shown competitors; the series order
+// follows that rank (Globex 33, Initech 15, ... , Wonka 8) like the server does.
+const lastCounts = top6Counts(DAYS_TOP6.length - 1);
+const rankedTop6 = TOP6_COMPETITORS.map((name, k) => ({ name, mentions: lastCounts.competitors[k], slot: k }))
+	.sort((a, b) => b.mentions - a.mentions || a.name.localeCompare(b.name))
+	.map((c, rank) => ({ ...c, key: `competitor-${rank + 1}` }));
+const top6Total = lastCounts.brand + rankedTop6.reduce((s, c) => s + c.mentions, 0);
+// Remap the per-slot values onto rank keys so competitor-1 is the top-ranked line.
+const rankedPoints = top6Points.map((p) => {
+	const values: Record<string, number | null> = { brand: p.values.brand };
+	for (const c of rankedTop6) values[c.key] = p.values[`competitor-${c.slot + 1}`];
+	values.others = p.values.others;
+	return { date: p.date, values };
+});
+
+export const mockShareOfVoiceTop6Others = {
+	brandName: "Acme",
+	brandShare: lastCounts.brand / top6Total,
+	totalRuns: 640,
+	model: null,
+	shareTimeSeries: rankedPoints.map((p) => ({ date: p.date, share: Math.round(p.values.brand as number) })),
+	comparisonTrend: {
+		series: [
+			{ key: "brand", name: "Acme", kind: "brand" as const },
+			...rankedTop6.map((c) => ({ key: c.key, name: c.name, kind: "competitor" as const })),
+			{ key: "others", name: "Others", kind: "others" as const },
+		],
+		points: rankedPoints,
+	},
+	entries: [
+		{ name: "Acme", mentions: lastCounts.brand, share: lastCounts.brand / top6Total, isBrand: true, prompts: 12 },
+		...rankedTop6.map((c) => ({
+			name: c.name,
+			mentions: c.mentions,
+			share: c.mentions / top6Total,
+			isBrand: false,
+			prompts: 5,
+		})),
+	].sort((a, b) => b.mentions - a.mentions || (a.isBrand ? -1 : 1)),
+};
+
+/** Expected once-rounded tooltip rows for the Top-6 fixture on a given day index. */
+export function top6ExpectedRows(i: number): Array<[string, string]> {
+	const p = rankedPoints[i];
+	const rows: Array<[string, string]> = [["Acme", `${Math.round(p.values.brand as number)}%`]];
+	for (const c of rankedTop6) rows.push([c.name, `${Math.round(p.values[c.key] as number)}%`]);
+	rows.push(["Others", `${Math.round(p.values.others as number)}%`]);
+	return rows;
+}
+export const TOP6_DATES = DAYS_TOP6;
+export { TAIL_COMPETITORS as TOP6_TAIL_COMPETITORS };
+
+/** A day on which nobody was mentioned: the denominator is zero and every series is null. */
+export const mockShareOfVoiceWithNullDay = {
+	...mockShareOfVoice,
+	shareTimeSeries: shareTimeSeries.map((p, i) => (i === 10 ? { date: p.date, share: null } : p)),
+	comparisonTrend: {
+		series: comparisonTrend.series,
+		points: comparisonTrend.points.map((p, i) =>
+			i === 10 ? { date: p.date, values: Object.fromEntries(Object.keys(p.values).map((k) => [k, null])) } : p,
+		),
+	},
 };
 
 /** Mock opportunities report (the getOpportunitiesFn response shape). */
