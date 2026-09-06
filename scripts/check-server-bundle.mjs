@@ -16,7 +16,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { builtinModules } from "node:module";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 
 const BUILTINS = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`)]);
 
@@ -95,7 +95,9 @@ function unresolved(bundleDir) {
         ? specifier.split("/").slice(0, 2).join("/")
         : specifier.split("/")[0];
       if (traced.has(pkg)) continue;
-      problems.push({ file: relative(bundleDir, file), specifier });
+      // Reported with forward slashes on every platform, so the output (and
+      // anything matching it) reads the same on Windows and POSIX.
+      problems.push({ file: relative(bundleDir, file).split(sep).join("/"), specifier });
     }
   }
   return problems;
