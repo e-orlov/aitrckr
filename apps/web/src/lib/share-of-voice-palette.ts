@@ -14,6 +14,17 @@ interface BrandLike {
 }
 
 /**
+ * Colour of one series of the comparison trend: the brand blue, the palette
+ * entry for a competitor's frozen rank (its position among the competitor
+ * series), or the Others grey. Ranks beyond the palette wrap like the donut.
+ */
+export function shareOfVoiceTrendSeriesColor(kind: "brand" | "competitor" | "others", competitorRank: number): string {
+	if (kind === "brand") return BRAND_COLOR;
+	if (kind === "others") return OTHERS_COLOR;
+	return COMPETITOR_PALETTE[competitorRank % COMPETITOR_PALETTE.length];
+}
+
+/**
  * Map each entry name to its colour, mirroring the donut's assignment order
  * (brand → BRAND_COLOR; the first `topN` competitors → palette; the rest →
  * OTHERS_COLOR). Entries with no mentions are skipped, matching the donut.

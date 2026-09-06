@@ -119,6 +119,20 @@ export function stabilityScore(weightedVolatility: number | null): number | null
 	return Math.round((1 - clamp01(weightedVolatility)) * 100);
 }
 
+/**
+ * Ranking order shared by the leaderboard, donut, colour map and the comparison
+ * trend: mentions descending, then the name by code unit so equal counts land
+ * in the same order on every host and for every database row order (a
+ * locale-aware compare would not).
+ */
+export function compareMentionsDescThenName(
+	a: { name: string; mentions: number },
+	b: { name: string; mentions: number },
+) {
+	if (a.mentions !== b.mentions) return b.mentions - a.mentions;
+	return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
 export interface VoiceShare {
 	name: string;
 	/** Run-days (or runs) on which this entity was mentioned. */
@@ -153,8 +167,13 @@ export function computeShareOfVoice(
 		isBrand,
 		share: total === 0 ? 0 : mentions / total,
 	});
+	// The brand keeps its place ahead of a competitor with the same count.
 	const entries = [mk(brand.name, brand.mentions, true), ...competitors.map((c) => mk(c.name, c.mentions, false))].sort(
-		(a, b) => b.mentions - a.mentions,
+		(a, b) => {
+			if (a.mentions !== b.mentions) return b.mentions - a.mentions;
+			if (a.isBrand !== b.isBrand) return a.isBrand ? -1 : 1;
+			return compareMentionsDescThenName(a, b);
+		},
 	);
 	return { entries, brandShare: total === 0 ? null : brand.mentions / total, total };
 }
@@ -294,7 +313,151 @@ export function shareOfVoiceLeaderboardLVCF(
 
 	const competitors = [...compMentions.entries()]
 		.map(([name, mentions]) => ({ name, mentions, prompts: compPrompts.get(name) ?? 0 }))
-		.sort((a, b) => b.mentions - a.mentions);
+		.sort(compareMentionsDescThenName);
 
 	return { brandMentions, brandPrompts, competitors };
+}
+
+export type ShareOfVoiceTrendSeriesKind = "brand" | "competitor" | "others";
+
+export interface ShareOfVoiceTrendSeries {
+	/** Internal, collision-safe key the points are addressed by: `brand`, `competitor-1`…, `others`. */
+	key: string;
+	/** Display label — the brand's or competitor's real name, or "Others". */
+	name: string;
+	kind: ShareOfVoiceTrendSeriesKind;
+}
+
+export interface ShareOfVoiceComparisonPoint {
+	date: string;
+	/** Exact share per series key as a 0..100 percentage; null when the day has no mention denominator. */
+	values: Record<string, number | null>;
+}
+
+export interface ShareOfVoiceComparisonTrend {
+	/** Fixed display order: brand, competitors in end-of-window rank, then Others when a tail exists. */
+	series: ShareOfVoiceTrendSeries[];
+	points: ShareOfVoiceComparisonPoint[];
+}
+
+export const SHARE_OF_VOICE_TREND_TOP_N = 6;
+
+const asCount = (value: number): number => (Number.isFinite(value) && value > 0 ? value : 0);
+
+interface CarriedDay {
+	brand: number;
+	competitors: Map<string, number>;
+}
+
+/**
+ * Sum every prompt's carried snapshot per day. Each prompt is pre-seeded with
+ * its earliest observation and, on every day, advanced to its latest
+ * observation on or before that day — the whole snapshot at once. Days are
+ * absent from the result only when no prompt has any observation.
+ */
+function carriedCountsByDay(byPrompt: Map<string, Map<string, DailyObservation>>, dateRange: string[]) {
+	const days = new Map<string, CarriedDay>();
+	for (const [, dateMap] of byPrompt) {
+		const observations = [...dateMap.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+		if (observations.length === 0) continue;
+		let next = 0;
+		let carried = observations[0][1];
+		for (const date of dateRange) {
+			while (next < observations.length && observations[next][0] <= date) carried = observations[next++][1];
+			let day = days.get(date);
+			if (!day) {
+				day = { brand: 0, competitors: new Map() };
+				days.set(date, day);
+			}
+			day.brand += carried.brand;
+			for (const [name, mentions] of carried.competitors) {
+				day.competitors.set(name, (day.competitors.get(name) ?? 0) + mentions);
+			}
+		}
+	}
+	return days;
+}
+
+/** One day's exact shares for the shown series; `others` is the summed tail count's share. */
+function comparisonValues(day: CarriedDay, shownKeyByName: Map<string, string>) {
+	const shownCounts = new Map<string, number>();
+	let othersCount = 0;
+	let total = day.brand;
+	for (const [name, mentions] of day.competitors) {
+		total += mentions;
+		const key = shownKeyByName.get(name);
+		if (key) shownCounts.set(key, (shownCounts.get(key) ?? 0) + mentions);
+		else othersCount += mentions;
+	}
+	const share = (count: number) => (total === 0 ? null : (count / total) * 100);
+	const values: Record<string, number | null> = { brand: share(day.brand) };
+	for (const key of shownKeyByName.values()) values[key] = share(shownCounts.get(key) ?? 0);
+	values.others = share(othersCount);
+	return { values, othersCount };
+}
+
+/**
+ * Share of voice over time for the brand and its competitors, with the same
+ * per-prompt carry-forward as shareOfVoiceTimeSeriesLVCF but carrying each
+ * prompt's whole {brand, competitors} snapshot: a new run replaces the previous
+ * snapshot entirely, so a competitor missing from the latest answer counts as
+ * zero rather than lingering from an older day.
+ *
+ * The competitors shown are the top `topN` of the end-of-window standings (the
+ * same ranking as the leaderboard and donut), frozen for the whole axis; every
+ * other competitor is summed into "Others" by count. Each day's denominator is
+ * the brand plus all competitors, including that tail, so the brand's exact
+ * share here rounds to the legacy series on every day.
+ */
+export function shareOfVoiceComparisonTimeSeriesLVCF(
+	brandName: string,
+	brandDaily: Array<{ promptId: string; date: string; brand: number }>,
+	competitorDaily: Array<{ promptId: string; date: string; competitor: string; mentions: number }>,
+	dateRange: string[],
+	topN = SHARE_OF_VOICE_TREND_TOP_N,
+): ShareOfVoiceComparisonTrend {
+	if (dateRange.length === 0) return { series: [], points: [] };
+
+	const byPrompt = groupObservations(
+		brandDaily.map((r) => ({ ...r, brand: asCount(r.brand) })),
+		competitorDaily.map((r) => ({ ...r, mentions: asCount(r.mentions) })),
+	);
+
+	const days = carriedCountsByDay(byPrompt, dateRange);
+
+	// End-of-window standings decide which competitors get their own line; the
+	// last day's carried counts are exactly what shareOfVoiceLeaderboardLVCF sums.
+	const lastDay = days.get(dateRange[dateRange.length - 1]);
+	const ranked = [...(lastDay?.competitors ?? new Map<string, number>()).entries()]
+		.map(([name, mentions]) => ({ name, mentions }))
+		.filter((c) => c.mentions > 0)
+		.sort(compareMentionsDescThenName)
+		.slice(0, topN);
+	const shownKeyByName = new Map(ranked.map((c, i) => [c.name, `competitor-${i + 1}`]));
+
+	const series: ShareOfVoiceTrendSeries[] = [
+		{ key: "brand", name: brandName, kind: "brand" },
+		...ranked.map((c) => ({ key: shownKeyByName.get(c.name) as string, name: c.name, kind: "competitor" as const })),
+	];
+
+	let othersEverPositive = false;
+	const points = dateRange.map((date) => {
+		const day = days.get(date);
+		if (!day) {
+			const values: Record<string, number | null> = { others: null };
+			for (const s of series) values[s.key] = null;
+			return { date, values };
+		}
+		const { values, othersCount } = comparisonValues(day, shownKeyByName);
+		if (othersCount > 0) othersEverPositive = true;
+		return { date, values };
+	});
+
+	if (othersEverPositive) {
+		series.push({ key: "others", name: "Others", kind: "others" });
+	} else {
+		for (const p of points) delete p.values.others;
+	}
+
+	return { series, points };
 }

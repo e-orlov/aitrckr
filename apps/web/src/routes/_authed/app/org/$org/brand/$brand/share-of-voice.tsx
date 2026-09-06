@@ -13,8 +13,8 @@ import { ColHead } from "@/components/col-head";
 import { ALL_MODELS_VALUE, FilterBar } from "@/components/filter-bar";
 import { FilterSection, PageHeader } from "@/components/page-header";
 import { ShareOfVoiceDonut } from "@/components/share-of-voice-donut";
+import { ShareOfVoiceTrendChart } from "@/components/share-of-voice-trend-chart";
 import { SiteIcon } from "@/components/site-icon";
-import { TrendChart } from "@/components/trend-chart";
 import { useBrand } from "@/hooks/use-brands";
 import { useListFilters } from "@/hooks/use-list-filters";
 import { usePromptsSummary } from "@/hooks/use-prompts-summary";
@@ -126,12 +126,7 @@ function ShareOfVoicePage() {
 							<CardTitle>Share of Voice Trends</CardTitle>
 						</CardHeader>
 						<CardContent>
-							<TrendChart
-								data={data.shareTimeSeries.map((p) => ({ date: p.date, value: p.share }))}
-								label="Share of Voice"
-								color="#2563eb"
-								className="aspect-auto h-[180px] w-full"
-							/>
+							<ShareOfVoiceTrendChart trend={data.comparisonTrend} />
 						</CardContent>
 					</Card>
 				</div>
