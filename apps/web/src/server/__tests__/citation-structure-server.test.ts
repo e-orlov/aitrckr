@@ -93,11 +93,8 @@ vi.mock("@/lib/postgres-read", () => ({
 }));
 
 import { citationDateWindow } from "@/lib/chart-utils";
-import {
-	type CitationStructureReads,
-	getCitationStructureFn,
-	loadCitationStructure,
-} from "@/server/citation-structure";
+import { getCitationStructureFn } from "@/server/citation-structure";
+import { type CitationStructureReads, loadCitationStructure } from "@/server/citation-structure-load";
 
 const BRAND = "arag";
 const NOW = new Date("2026-09-06T09:00:00Z");

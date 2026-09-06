@@ -212,7 +212,10 @@ test.describe("Citation Structure", () => {
 		const failedRequests: string[] = [];
 		page.on("pageerror", (error) => pageErrors.push(error.message));
 		page.on("console", (message) => {
-			if (message.type() === "error") consoleErrors.push(message.text());
+			// Third-party favicon 404s log as resource errors; same-origin failures are tracked below.
+			if (message.type() === "error" && !message.text().startsWith("Failed to load resource")) {
+				consoleErrors.push(message.text());
+			}
 		});
 		const origin = new URL(process.env.BASE_URL || "http://localhost:1515").origin;
 		page.on("response", (response) => {
