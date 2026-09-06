@@ -11,7 +11,7 @@
  */
 import { expect, type Page, test } from "@playwright/test";
 import pg from "pg";
-import { brandUrl, DATABASE_URL, TEST_ORG_SLUG } from "../../fixtures";
+import { brandUrl, DATABASE_URL, SLUGGED_BRAND_SLUG, TEST_ORG_SLUG } from "../../fixtures";
 
 const BRAND_ID = "f06-structure";
 const BRAND_NAME = "F06 Structure";
@@ -103,6 +103,12 @@ async function readNodes(page: Page): Promise<ShownNode[]> {
 			};
 		}),
 	);
+}
+
+/** Optional evidence capture: set F06_SCREENSHOT_DIR to save the states the PR shows. */
+async function screenshot(page: Page, name: string) {
+	const dir = process.env.F06_SCREENSHOT_DIR;
+	if (dir) await page.screenshot({ path: `${dir}/${name}.png`, fullPage: true });
 }
 
 const sumAt = (nodes: ShownNode[], depth: number) =>
@@ -298,6 +304,13 @@ test.describe("Citation Structure", () => {
 		const summary = page.getByTestId("citation-structure-summary");
 		await expect(summary).toContainText(`Brand ${BRAND_NAME}: 17 occurrences, 100%`);
 		await expect(summary).toContainText("Hostname www.arag.de: 7 occurrences");
+		await screenshot(page, "01-diagram-with-rest-and-tooltip");
+
+		// Dark theme: the chart's own colour variables switch with the `.dark` class.
+		await page.evaluate(() => document.documentElement.classList.add("dark"));
+		await expect(page.locator("g.recharts-sankey-node[data-depth='0'] path")).toHaveCSS("fill", "rgb(96, 165, 250)");
+		await screenshot(page, "02-dark");
+		await page.evaluate(() => document.documentElement.classList.remove("dark"));
 	});
 
 	test("model, tag and lookback filters narrow the diagram exactly like the citation query", async ({ page }) => {
@@ -333,6 +346,7 @@ test.describe("Citation Structure", () => {
 		await page.goto(`${BRAND_URL}/citation-structure?lookback=1m&tags=no-such-tag`);
 		await expect(page.getByText(/No citations of your own domains match the selected filters/)).toBeVisible({ timeout: 30_000 });
 		await expect(page.getByTestId("citation-structure-sankey")).toHaveCount(0);
+		await screenshot(page, "03-filtered-no-match");
 		await page.getByRole("button", { name: "Clear filters" }).click();
 		await expectDiagramTotal(page, 17);
 	});
@@ -345,5 +359,15 @@ test.describe("Citation Structure", () => {
 		const metrics = await scroller.evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
 		expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
 		expect(metrics.scrollWidth).toBeGreaterThanOrEqual(880);
+		await screenshot(page, "04-narrow-375");
+	});
+
+	test("a brand whose own domains were never cited shows the empty state, not an empty chart", async ({ page }) => {
+		await page.goto(`${brandUrl(SLUGGED_BRAND_SLUG, TEST_ORG_SLUG)}/citation-structure`);
+		await expect(page.getByRole("heading", { level: 1, name: /citation structure/i })).toBeVisible({ timeout: 30_000 });
+		await expect(page.getByText(/No citations of your own domains yet/)).toBeVisible({ timeout: 30_000 });
+		await expect(page.getByTestId("citation-structure-sankey")).toHaveCount(0);
+		await expect(page.locator("[data-slot=chart]")).toHaveCount(0);
+		await screenshot(page, "05-empty");
 	});
 });
