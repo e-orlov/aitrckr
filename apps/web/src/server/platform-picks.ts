@@ -30,6 +30,7 @@ import {
 } from "@/lib/auth/helpers";
 import { getDeployment } from "@/lib/config/server";
 import { expeditePromptRuns } from "@/lib/expedite-prompts";
+import { PublicError } from "@/lib/public-errors";
 import { addedPlatforms } from "@/lib/run-config-changes";
 
 export type PlatformOption = {
@@ -296,7 +297,7 @@ export const updateEnabledModelsFn = createServerFn({ method: "POST" })
 
 		if (models === null) {
 			if (!entitlements.unlimited) {
-				throw new Error("Choose which platforms to track — your plan defines how many.");
+				throw new PublicError("platform-picks", "Choose which platforms to track — your plan defines how many.");
 			}
 		} else {
 			// Loud validation against the configured targets (same rule the worker

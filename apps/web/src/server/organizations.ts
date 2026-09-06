@@ -12,6 +12,7 @@ import { getAuthSession, listUserOrganizations, requireAuthSession, requireOrgan
 import { getDeployment } from "@/lib/config/server";
 import { summarizeOrganizations } from "@/lib/organizations/summarize";
 import type { OrganizationsView } from "@/lib/organizations/types";
+import { PublicError } from "@/lib/public-errors";
 import { INVALID_SLUG, TAKEN_SLUG } from "@/lib/slug-errors";
 
 export type { OrganizationSummary, OrganizationsView } from "@/lib/organizations/types";
@@ -39,7 +40,7 @@ export const createOrganizationFn = createServerFn({ method: "POST" })
 	.handler(async ({ data }): Promise<{ slug: string }> => {
 		const session = await requireAuthSession();
 		if (!getDeployment().features.canCreateOrganizations) {
-			throw new Error("This deployment does not create organizations");
+			throw new PublicError("org-creation-disabled", "This deployment does not create organizations");
 		}
 
 		const { slug } = await provisionUmbrellaOrg({ userId: session.user.id, name: data.name });
@@ -59,18 +60,18 @@ export const updateOrganizationFn = createServerFn({ method: "POST" })
 		const org = await requireOrganization(session.user.id, data.organizationId);
 
 		if (!isOrgAdminRole(org.role)) {
-			throw new Error("Only organization admins can change the organization name or URL Slug");
+			throw new PublicError("org-admin-only", "Only organization admins can change the organization name or URL Slug");
 		}
 		if (!getDeployment().features.canEditOrganizations) {
-			throw new Error("This organization cannot be renamed in this deployment");
+			throw new PublicError("org-rename-disabled", "This organization cannot be renamed in this deployment");
 		}
-		if (data.slug !== undefined && !isValidSlug(data.slug)) throw new Error(INVALID_SLUG);
+		if (data.slug !== undefined && !isValidSlug(data.slug)) throw new PublicError("slug-invalid", INVALID_SLUG);
 
 		const slug = await claimOrgSlug(
 			() =>
 				db.transaction(async (tx) => {
 					if (data.slug !== undefined && !(await isOrgSlugAvailable(data.slug, { excludeOrgId: org.id, conn: tx }))) {
-						throw new Error(TAKEN_SLUG);
+						throw new PublicError("slug-taken", TAKEN_SLUG);
 					}
 					await tx
 						.update(organization)

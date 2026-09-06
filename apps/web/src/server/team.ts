@@ -7,10 +7,11 @@ import { z } from "zod";
 import { requireAuthSession, requireOrganization } from "@/lib/auth/helpers";
 import { auth } from "@/lib/auth/server";
 import { getDeployment } from "@/lib/config/server";
+import { PublicError } from "@/lib/public-errors";
 
 function requireTeamInvites(): void {
 	if (!getDeployment().features.teamInvites) {
-		throw new Error("Team invitations are not available in this deployment");
+		throw new PublicError("team-unavailable", "Team invitations are not available in this deployment");
 	}
 }
 
@@ -94,7 +95,7 @@ export const cancelInvitationFn = createServerFn({ method: "POST" })
 			.from(invitation)
 			.where(and(eq(invitation.id, data.invitationId), eq(invitation.organizationId, org.id)))
 			.limit(1);
-		if (!row) throw new Error("Not found: no such invitation in this organization");
+		if (!row) throw new PublicError("invitation-missing", "Not found: no such invitation in this organization");
 
 		await auth.api.cancelInvitation({
 			body: { invitationId: data.invitationId },
@@ -117,7 +118,7 @@ export const removeTeamMemberFn = createServerFn({ method: "POST" })
 			.where(and(eq(member.id, data.memberId), eq(member.organizationId, org.id)))
 			.limit(1);
 		if (row?.userId === session.user.id) {
-			throw new Error("You cannot remove yourself from the team");
+			throw new PublicError("team-self-removal", "You cannot remove yourself from the team");
 		}
 
 		await auth.api.removeMember({
@@ -156,6 +157,6 @@ export const acceptInvitationFn = createServerFn({ method: "POST" })
 			.from(organization)
 			.where(eq(organization.id, result.invitation.organizationId))
 			.limit(1);
-		if (!org) throw new Error("The organization for this invitation no longer exists");
+		if (!org) throw new PublicError("invitation-org-missing", "The organization for this invitation no longer exists");
 		return { orgSlug: org.slug };
 	});
