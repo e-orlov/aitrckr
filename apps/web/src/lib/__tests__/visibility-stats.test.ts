@@ -451,7 +451,7 @@ describe("shareOfVoiceComparisonTimeSeriesLVCF", () => {
 			{ p: "p1", d: D[2], brand: 1, comps: { C3: 1 } },
 		]);
 		for (const p of t.points) {
-			const sum = Object.values(p.values).reduce((s, v) => s + (v ?? 0), 0);
+			const sum = Object.values(p.values).reduce<number>((s, v) => s + (v ?? 0), 0);
 			expect(sum).toBeCloseTo(100, 9);
 		}
 	});

@@ -23,7 +23,13 @@ import {
 	getPerPromptDailyMentions,
 } from "@/lib/postgres-read";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
-import { computeShareOfVoice, shareOfVoiceLeaderboardLVCF, shareOfVoiceTimeSeriesLVCF } from "@/lib/visibility-stats";
+import {
+	computeShareOfVoice,
+	type ShareOfVoiceComparisonTrend,
+	shareOfVoiceComparisonTimeSeriesLVCF,
+	shareOfVoiceLeaderboardLVCF,
+	shareOfVoiceTimeSeriesLVCF,
+} from "@/lib/visibility-stats";
 import { resolveFilteredPrompts } from "@/server/prompt-resolution";
 
 export const LOOKBACK = z.enum(["1w", "1m", "3m", "6m", "1y", "all"]);
@@ -59,6 +65,8 @@ export interface ShareOfVoiceResponse {
 	model: string | null;
 	/** Brand share of voice over time (percentage 0..100, null on days with no runs). */
 	shareTimeSeries: Array<{ date: string; share: number | null }>;
+	/** Brand, top competitors and Others over time — same LVCF carry and denominator as `shareTimeSeries`. */
+	comparisonTrend: ShareOfVoiceComparisonTrend;
 }
 
 export const getShareOfVoiceFn = createServerFn({ method: "GET" })
@@ -86,7 +94,15 @@ export const getShareOfVoiceFn = createServerFn({ method: "GET" })
 		const promptIds = resolved.map((p) => p.id);
 
 		if (promptIds.length === 0) {
-			return { brandName, entries: [], brandShare: null, totalRuns: 0, model: data.model ?? null, shareTimeSeries: [] };
+			return {
+				brandName,
+				entries: [],
+				brandShare: null,
+				totalRuns: 0,
+				model: data.model ?? null,
+				shareTimeSeries: [],
+				comparisonTrend: { series: [], points: [] },
+			};
 		}
 
 		const dateRange = generateDateRange(new Date(fromDateStr), new Date(toDateStr));
@@ -96,19 +112,22 @@ export const getShareOfVoiceFn = createServerFn({ method: "GET" })
 			getPerPromptDailyCompetitorMentions(data.brandId, fromDateStr, toDateStr, timezone, promptIds, data.model),
 		]);
 
+		const brandDaily = perPromptDaily.map((r) => ({
+			promptId: r.prompt_id,
+			date: String(r.date),
+			brand: r.brand_mentions,
+		}));
+		const competitorDaily = perPromptCompetitorDaily.map((r) => ({
+			promptId: r.prompt_id,
+			date: String(r.date),
+			competitor: r.competitor,
+			mentions: r.mentions,
+		}));
+
 		// "Current standings": carry each prompt's latest brand + per-competitor counts
 		// forward to the last day, so the headline, donut, and leaderboard reflect the
 		// same state as the trend's final point rather than a whole-window aggregate.
-		const standings = shareOfVoiceLeaderboardLVCF(
-			perPromptDaily.map((r) => ({ promptId: r.prompt_id, date: String(r.date), brand: r.brand_mentions })),
-			perPromptCompetitorDaily.map((r) => ({
-				promptId: r.prompt_id,
-				date: String(r.date),
-				competitor: r.competitor,
-				mentions: r.mentions,
-			})),
-			dateRange,
-		);
+		const standings = shareOfVoiceLeaderboardLVCF(brandDaily, competitorDaily, dateRange);
 
 		const promptsByName = new Map(standings.competitors.map((c) => [c.name, c.prompts]));
 		const { entries, brandShare } = computeShareOfVoice(
@@ -128,12 +147,17 @@ export const getShareOfVoiceFn = createServerFn({ method: "GET" })
 			dateRange,
 		);
 
+		// Same rows, same carry, same denominator as the two calls above — the brand's
+		// rounded line equals shareTimeSeries and the last point equals the standings.
+		const comparisonTrend = shareOfVoiceComparisonTimeSeriesLVCF(brandName, brandDaily, competitorDaily, dateRange);
+
 		return {
 			brandName,
 			brandShare,
 			totalRuns: totals.total_runs,
 			model: data.model ?? null,
 			shareTimeSeries,
+			comparisonTrend,
 			entries: entries.map((e) => ({
 				...e,
 				prompts: e.isBrand ? standings.brandPrompts : (promptsByName.get(e.name) ?? 0),
