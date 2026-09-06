@@ -43,7 +43,12 @@ export default defineConfig({
 					browser: {
 						enabled: true,
 						headless: true,
-						provider: playwright({}),
+						// Pin the browser locale so number/date formatting in play assertions is
+						// the same on every machine (CI runs en-US; a de-DE desktop renders
+						// "$3.090"). STORYBOOK_BROWSER_LOCALE overrides it to exercise another locale.
+						provider: playwright({
+							contextOptions: { locale: process.env.STORYBOOK_BROWSER_LOCALE ?? "en-US" },
+						}),
 						instances: [{ browser: "chromium" }],
 					},
 				},

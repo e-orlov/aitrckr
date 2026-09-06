@@ -2,14 +2,18 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT = fileURLToPath(new URL("check-server-bundle.mjs", import.meta.url));
 
-/** Build a throwaway app directory and run the check over it. */
-function check(files, { traced = [], tracedIn = ".output/server" } = {}) {
+/**
+ * Build a throwaway app directory and run the check over it. `appDirStyle`
+ * hands the directory to the script with native or forward-slash separators,
+ * so both spellings an operator may type on Windows are covered.
+ */
+function check(files, { traced = [], tracedIn = ".output/server", appDirStyle = "native" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "check-server-bundle-"));
   for (const [name, source] of Object.entries(files)) {
     const path = join(dir, name);
@@ -19,7 +23,8 @@ function check(files, { traced = [], tracedIn = ".output/server" } = {}) {
   for (const pkg of traced) {
     mkdirSync(join(dir, tracedIn, "node_modules", pkg), { recursive: true });
   }
-  const { status, stderr } = spawnSync(process.execPath, [SCRIPT, dir], { encoding: "utf8" });
+  const appDir = appDirStyle === "posix" ? dir.split(sep).join(posix.sep) : dir;
+  const { status, stderr } = spawnSync(process.execPath, [SCRIPT, appDir], { encoding: "utf8" });
   return { status, stderr };
 }
 
@@ -45,6 +50,30 @@ test("fails a require of a package the bundle does not ship", () => {
   assert.equal(status, 1);
   assert.match(stderr, /_ssr\/footer\.mjs/);
   assert.match(stderr, /require\("react"\)/);
+});
+
+test("reports nested bundle files with forward slashes on every platform", () => {
+  for (const appDirStyle of ["native", "posix"]) {
+    const { status, stderr } = check(
+      { ".output/server/_ssr/deeply/nested/footer.mjs": 'var pg = __require("pg");\n' },
+      { appDirStyle },
+    );
+    assert.equal(status, 1, appDirStyle);
+    assert.match(stderr, /^ {2}_ssr\/deeply\/nested\/footer\.mjs: require\("pg"\)$/m);
+    assert.doesNotMatch(stderr, /_ssr\\/);
+  }
+});
+
+test("still fails a database driver the bundle does not ship, whichever way the app dir is spelled", () => {
+  for (const appDirStyle of ["native", "posix"]) {
+    const { status, stderr } = check(
+      { ".output/server/index.mjs": 'var pg = __require("pg");\nvar drizzle = __require("drizzle-orm/node-postgres");\n' },
+      { appDirStyle },
+    );
+    assert.equal(status, 1, appDirStyle);
+    assert.match(stderr, /require\("pg"\)/);
+    assert.match(stderr, /require\("drizzle-orm\/node-postgres"\)/);
+  }
 });
 
 test("passes a require of a traced dependency, which does ship", () => {

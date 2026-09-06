@@ -272,8 +272,11 @@ export const AnnualBillingShowsAnnualTotal: Story = {
 	render: () => renderWith({ billingInterval: "year", addonQuantity: 2 }),
 	play: async ({ canvasElement }) => {
 		const canvas = within(canvasElement);
-		// Pro annual is 10x monthly ($2,990) plus 2 add-ons at $50 a year.
-		await expect(await canvas.findByText("$3,090")).toBeVisible();
+		// Pro annual is 10x monthly ($2,990) plus 2 add-ons at $50 a year. The
+		// amount is formatted for the browser's locale, so the expectation is too.
+		const total = await canvas.findByText(`$${(3090).toLocaleString()}`);
+		await expect(total).toBeVisible();
+		await expect(total.parentElement).toHaveTextContent(/\/year$/);
 		await expect(await canvas.findByText(/annual billing/i)).toBeVisible();
 	},
 };

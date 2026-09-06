@@ -3,9 +3,13 @@
 // commit b3bea1e (the interactive wizard needs a PTY Windows lacks; see
 // gen-test-env.cjs for the same approach on the test stack).
 //
-// Preserves an existing OPENROUTER_API_KEY, ELMO_ENCRYPTION_KEY, and
-// DEPLOYMENT_ID from a prior .env in the target dir: the encryption key must
-// survive regeneration or stored provider credentials become unreadable.
+// Two modes, decided by whether <configDir>/.env already exists:
+//   - first run: write a fresh .env (new secrets, provider key placeholder)
+//     and elmo.yaml;
+//   - repin: the existing .env is operator-owned state and is never rewritten
+//     (not even byte-normalized); it is only checked for the required keys,
+//     and only elmo.yaml is regenerated with the requested image tag.
+// Nothing this script prints ever contains a value from .env.
 //
 // Usage: node gen-prod-env.cjs [configDir] [imageTag]
 // (defaults: %USERPROFILE%\.elmo, g<short HEAD sha>). Images are pinned to the
@@ -14,25 +18,73 @@
 const { execSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
-const configDir = process.argv[2] || path.join(process.env.USERPROFILE, ".elmo");
+const fail = (message) => {
+	console.error(`gen-prod-env: ${message}`);
+	process.exit(1);
+};
+
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
+const rawDir =
+	process.argv.length > 2 ? process.argv[2] : path.join(process.env.USERPROFILE || os.homedir(), ".elmo");
+if (!rawDir || !rawDir.trim()) fail("config dir must not be empty");
+const configDir = path.resolve(rawDir);
+// A config dir is a dedicated folder; refuse anything that would spray .env/elmo.yaml somewhere shared.
+for (const forbidden of [path.parse(configDir).root, os.homedir(), repoRoot]) {
+	if (path.resolve(forbidden) === configDir) fail(`refusing to use ${forbidden} as a config dir`);
+}
+
 const imageTag =
-	process.argv[3] ||
-	`g${execSync("git rev-parse --short HEAD", { cwd: repoRoot }).toString().trim()}`;
+	process.argv.length > 3
+		? process.argv[3]
+		: `g${execSync("git rev-parse --short HEAD", { cwd: repoRoot }).toString().trim()}`;
+if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(imageTag)) fail("image tag must be a plain docker tag");
+if (imageTag === "latest") fail("refusing the floating tag latest — pin the deployed commit");
 const v = "0.2.19";
 
 const envPath = path.join(configDir, ".env");
-const prior = {};
-if (fs.existsSync(envPath)) {
-	for (const l of fs.readFileSync(envPath, "utf8").split(/\r?\n/)) {
-		const m = l.match(/^([A-Z0-9_]+)=(.*)$/);
-		if (m) prior[m[1]] = m[2];
-	}
+const yamlPath = path.join(configDir, "elmo.yaml");
+const REQUIRED_KEYS = [
+	"DEPLOYMENT_MODE",
+	"VITE_DEPLOYMENT_MODE",
+	"DEPLOYMENT_ID",
+	"BETTER_AUTH_SECRET",
+	"ELMO_ENCRYPTION_KEY",
+	"APP_NAME",
+	"APP_ICON",
+	"VITE_APP_NAME",
+	"VITE_APP_ICON",
+	"DATABASE_URL",
+	"OPENROUTER_API_KEY",
+	"SCRAPE_TARGETS",
+	"RUNS_PER_PROMPT",
+	"DEFAULT_DELAY_HOURS",
+	"DISABLE_TELEMETRY",
+	"APP_URL",
+	"VITE_APP_URL",
+];
+
+/**
+ * Key inventory of an existing .env: how often each key is defined, plus the
+ * 1-based numbers of lines that are neither blank, comment nor KEY=value.
+ * Values are never retained.
+ */
+function inventory(text) {
+	const counts = new Map();
+	const malformed = [];
+	text.split(/\r?\n/).forEach((line, index) => {
+		if (!line.trim() || line.trimStart().startsWith("#")) return;
+		const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+		if (!m) {
+			malformed.push(index + 1);
+			return;
+		}
+		counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+	});
+	return { counts, malformed };
 }
-const keep = (name, fallback) =>
-	prior[name] && !prior[name].startsWith("REPLACE_WITH") ? prior[name] : fallback;
 
 const header = [
 	`# Rendered by elmo ${v} on ${new Date().toISOString()}`,
@@ -42,15 +94,15 @@ const header = [
 const env = {
 	DEPLOYMENT_MODE: "local",
 	VITE_DEPLOYMENT_MODE: "local",
-	DEPLOYMENT_ID: keep("DEPLOYMENT_ID", crypto.randomUUID()),
-	BETTER_AUTH_SECRET: keep("BETTER_AUTH_SECRET", crypto.randomBytes(32).toString("base64url")),
-	ELMO_ENCRYPTION_KEY: keep("ELMO_ENCRYPTION_KEY", crypto.randomBytes(32).toString("base64")),
+	DEPLOYMENT_ID: crypto.randomUUID(),
+	BETTER_AUTH_SECRET: crypto.randomBytes(32).toString("base64url"),
+	ELMO_ENCRYPTION_KEY: crypto.randomBytes(32).toString("base64"),
 	APP_NAME: "Elmo",
 	APP_ICON: "/icons/elmo-icon.svg",
 	VITE_APP_NAME: "Elmo",
 	VITE_APP_ICON: "/icons/elmo-icon.svg",
 	DATABASE_URL: "postgres://postgres:postgres@postgres:5432/elmo",
-	OPENROUTER_API_KEY: keep("OPENROUTER_API_KEY", "REPLACE_WITH_YOUR_OPENROUTER_KEY"),
+	OPENROUTER_API_KEY: "REPLACE_WITH_YOUR_OPENROUTER_KEY",
 	SCRAPE_TARGETS: "chatgpt:openrouter:openai/gpt-5.6-luna:online",
 	// User decisions (master prompt §3.2): one sample per prompt, 24h cadence.
 	RUNS_PER_PROMPT: "1",
@@ -141,8 +193,28 @@ volumes:
   postgres_data:
 `;
 
-fs.mkdirSync(configDir, { recursive: true });
-fs.writeFileSync(envPath, lines.join("\n") + "\n");
-fs.writeFileSync(path.join(configDir, "elmo.yaml"), yaml);
-const keyState = env.OPENROUTER_API_KEY.startsWith("REPLACE_WITH") ? "PLACEHOLDER" : "preserved";
-console.log(`written ${configDir}: .env (${lines.length} lines, key ${keyState}) + elmo.yaml`);
+/** Write through a sibling temp file so a failure never leaves a truncated target. */
+function writeAtomically(target, content) {
+	const tmp = `${target}.${process.pid}.tmp`;
+	fs.writeFileSync(tmp, content);
+	fs.renameSync(tmp, target);
+}
+
+if (fs.existsSync(envPath)) {
+	const { counts, malformed } = inventory(fs.readFileSync(envPath, "utf8"));
+	const problems = [];
+	for (const key of REQUIRED_KEYS) {
+		const n = counts.get(key) ?? 0;
+		if (n === 0) problems.push(`missing ${key}`);
+		if (n > 1) problems.push(`duplicate ${key}`);
+	}
+	if (malformed.length > 0) problems.push(`malformed line(s) ${malformed.join(", ")}`);
+	if (problems.length > 0) fail(`existing .env is not usable, nothing written: ${problems.join("; ")}`);
+	writeAtomically(yamlPath, yaml);
+	console.log(`kept ${envPath} (${counts.size} keys, unchanged); wrote elmo.yaml pinned to ${imageTag}`);
+} else {
+	fs.mkdirSync(configDir, { recursive: true });
+	writeAtomically(envPath, `${lines.join("\n")}\n`);
+	writeAtomically(yamlPath, yaml);
+	console.log(`written ${configDir}: .env (${lines.length} lines, key PLACEHOLDER) + elmo.yaml pinned to ${imageTag}`);
+}
