@@ -157,8 +157,8 @@ test.describe("Prompt save rolls back as a whole", () => {
       [SENTINEL, VALID_NEW],
     ]);
     expect(saved.rows).toEqual([
-      { value: VALID_NEW, tags: ["ok"] },
       { value: SENTINEL, tags: ["boom"] },
+      { value: VALID_NEW, tags: ["ok"] },
     ]);
     expect((await client.query("SELECT tags FROM prompts WHERE id = $1", [PROMPT_IDS.branded1])).rows[0].tags).toEqual([
       ...baselineTags,
