@@ -47,6 +47,8 @@ Read-only production acceptance after the merge (13:22Z): running trio and diges
 
 ## Residual risks
 
+> R2 resolution (2026-09-06): the first item below was fixed by `0bec0e8c` (PR #25, one root `package.json` script string) — see `f06-owned-citation-structure-closeout-r2.md`. The historical statement is kept as written.
+
 - `pnpm test:scripts` (root `package.json`: `node --test 'scripts/*.test.mjs'`) runs 0 tests on Windows because the single-quoted glob is passed literally by the Windows shell; Linux CI expands it and runs all 30. Changing the package manifest was outside this corrective's scope. Owner: operator; follow-up: switch to double quotes in a separate small PR.
 - Production still only has `www.*` owned hosts; apex/subdomain separation remains proven by fixtures (unchanged from F-06).
 - The rollback trio `g4f30f53e` predates the Citation Structure route; rolling back removes the page (by design) — unchanged.
