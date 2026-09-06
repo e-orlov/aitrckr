@@ -1,6 +1,6 @@
 # F-06 Owned Citation URL Structure (Sankey) — production closeout
 
-Status: **PASS / CLOSED** 2026-09-06. Sanitized evidence for recovery and audit; raw logs, dumps and screenshots live outside Git under the operator's private `.elmo` evidence and backup directories (`~/.elmo/f06-evidence/`, `D:\ELMO-Recovery\F06-OwnedCitationStructure-20260906\`).
+Status: **PASS / CLOSED** 2026-09-06. Corrected by `f06-owned-citation-structure-closeout-r1.md` (Corrective R1): the config-regeneration claim in the manifest, the two Windows-only test exceptions and the "no data written" wording below are superseded there; this file is kept as the historical record referenced by the original immutable tag. Sanitized evidence for recovery and audit; raw logs, dumps and screenshots live outside Git under the operator's private `.elmo` evidence and backup directories (`~/.elmo/f06-evidence/`, `D:\ELMO-Recovery\F06-OwnedCitationStructure-20260906\`).
 
 ## Identities
 
