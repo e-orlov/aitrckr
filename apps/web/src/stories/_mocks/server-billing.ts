@@ -4,6 +4,8 @@
  * render and the one write path (the extra premium pairings add-on).
  */
 
+import { PublicError } from "@/lib/public-errors";
+
 let _addonError: string | null = null;
 let _addonDelayMs = 0;
 
@@ -22,6 +24,7 @@ export const getPaywallStateFn = async (_args?: { data?: { organizationId?: stri
 
 export const setPremiumAddonQuantityFn = async (args: { data: { quantity: number } }) => {
 	if (_addonDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, _addonDelayMs));
-	if (_addonError) throw new Error(_addonError);
+	// The real server refuses with a PublicError, the only kind of message the UI shows.
+	if (_addonError) throw new PublicError("billing-limit", _addonError);
 	return { quantity: args.data.quantity };
 };
