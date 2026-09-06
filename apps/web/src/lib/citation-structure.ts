@@ -180,35 +180,228 @@ function aggregate(rows: readonly OwnedCitationRow[], ownedDomains: readonly str
 	return { domains, total, eligibleRawUrlGroups, excludedInvalidUrlOccurrences, nonOwnedOccurrences };
 }
 
-interface VisibleHost {
-	domain: DomainAgg;
+/** A node of the pruned display tree; children are already in display order. */
+interface DisplayNode extends CitationStructureNode {
+	children: DisplayNode[];
+}
+
+interface HostView {
+	domainKey: string;
 	host: HostAgg;
 	paths: Counted[];
+}
+
+const synthetic = (
+	id: string,
+	name: string,
+	depth: DisplayNode["depth"],
+	value: number,
+	fullLabel: string,
+	hiddenChildCount: number,
+): DisplayNode => ({ id, name, kind: "rest", depth, value, fullLabel, hiddenChildCount, children: [] });
+
+const sumOf = <T>(items: readonly T[], pick: (item: T) => number) => items.reduce((sum, item) => sum + pick(item), 0);
+const pathsIn = (domain: DomainAgg) => sumOf([...domain.hosts.values()], (host) => host.paths.size);
+
+/**
+ * Domains beyond the visible budget collapse into one chain — Other owned
+ * domains → Other hosts → Rest — so their occurrences still reach a terminal.
+ */
+function otherDomainsChain(brandId: string, hidden: DomainAgg[]): DisplayNode | undefined {
+	const value = sumOf(hidden, (domain) => domain.count);
+	if (value === 0) return undefined;
+	const rest = synthetic(
+		`other-domains-rest:${encode(brandId)}`,
+		REST_LABEL,
+		3,
+		value,
+		`${REST_LABEL} · ${OTHER_DOMAINS_LABEL}`,
+		sumOf(hidden, pathsIn),
+	);
+	const hosts = synthetic(
+		`other-domains-hosts:${encode(brandId)}`,
+		OTHER_HOSTS_LABEL,
+		2,
+		value,
+		`${OTHER_HOSTS_LABEL} · ${OTHER_DOMAINS_LABEL}`,
+		sumOf(hidden, (domain) => domain.hosts.size),
+	);
+	hosts.children.push(rest);
+	const other = synthetic(
+		`other-domains:${encode(brandId)}`,
+		OTHER_DOMAINS_LABEL,
+		1,
+		value,
+		OTHER_DOMAINS_LABEL,
+		hidden.length,
+	);
+	other.children.push(hosts);
+	return other;
+}
+
+/** Hosts beyond a domain's budget collapse into Other hosts → Rest. */
+function otherHostsChain(domainKey: string, hidden: HostAgg[]): DisplayNode | undefined {
+	const value = sumOf(hidden, (host) => host.count);
+	if (value === 0) return undefined;
+	const rest = synthetic(
+		`other-hosts-rest:${encode(domainKey)}`,
+		REST_LABEL,
+		3,
+		value,
+		`${REST_LABEL} · ${OTHER_HOSTS_LABEL} · ${domainKey}`,
+		sumOf(hidden, (host) => host.paths.size),
+	);
+	const other = synthetic(
+		`other-hosts:${encode(domainKey)}`,
+		OTHER_HOSTS_LABEL,
+		2,
+		value,
+		`${OTHER_HOSTS_LABEL} · ${domainKey}`,
+		hidden.length,
+	);
+	other.children.push(rest);
+	return other;
 }
 
 /**
  * Pick the concrete paths to draw: every visible host keeps its top path, then
  * the rest of the global budget is filled by count, ties by stable key.
  */
-function selectVisiblePaths(visibleHosts: VisibleHost[], budget: number): Set<string> {
-	const pathKey = (h: VisibleHost, path: string) => encode(h.domain.key, h.host.key, path);
+function selectVisiblePaths(hosts: readonly HostView[], budget: number): Set<string> {
 	const selected = new Set<string>();
 	const candidates: Counted[] = [];
-
-	for (const visible of visibleHosts) {
-		for (const [index, path] of visible.paths.entries()) {
-			const key = pathKey(visible, path.key);
+	for (const view of hosts) {
+		for (const [index, path] of view.paths.entries()) {
+			const key = encode(view.domainKey, view.host.key, path.key);
 			if (index === 0) selected.add(key);
 			else candidates.push({ key, count: path.count });
 		}
 	}
-
 	candidates.sort(byCountThenKey);
 	for (const candidate of candidates) {
 		if (selected.size >= budget) break;
 		selected.add(candidate.key);
 	}
 	return selected;
+}
+
+function pathChildren(view: HostView, selected: ReadonlySet<string>): DisplayNode[] {
+	const children: DisplayNode[] = [];
+	const hidden: Counted[] = [];
+	for (const path of view.paths) {
+		if (!selected.has(encode(view.domainKey, view.host.key, path.key))) {
+			hidden.push(path);
+			continue;
+		}
+		children.push({
+			id: `path:${encode(view.domainKey, view.host.key, path.key)}`,
+			name: path.key,
+			kind: "path",
+			depth: 3,
+			value: path.count,
+			fullLabel: `${view.host.key}${path.key}`,
+			children: [],
+		});
+	}
+	const restValue = sumOf(hidden, (path) => path.count);
+	if (restValue > 0) {
+		children.push(
+			synthetic(
+				`rest-path:${encode(view.domainKey, view.host.key)}`,
+				REST_LABEL,
+				3,
+				restValue,
+				`${REST_LABEL} · ${view.host.key}`,
+				hidden.length,
+			),
+		);
+	}
+	return children;
+}
+
+function buildDisplayTree(
+	input: { brandId: string; brandName: string },
+	domains: Map<string, DomainAgg>,
+	total: number,
+	limits: CitationStructureLimits,
+): DisplayNode {
+	const root: DisplayNode = {
+		id: `brand:${encode(input.brandId)}`,
+		name: input.brandName,
+		kind: "brand",
+		depth: 0,
+		value: total,
+		fullLabel: input.brandName,
+		children: [],
+	};
+
+	const sortedDomains = [...domains.values()].sort(byCountThenKey);
+	const hostViews: HostView[] = [];
+	const hostNodes = new Map<HostView, DisplayNode>();
+	for (const domain of sortedDomains.slice(0, limits.maxVisibleDomains)) {
+		const domainNode: DisplayNode = {
+			id: `domain:${encode(domain.key)}`,
+			name: domain.key,
+			kind: "domain",
+			depth: 1,
+			value: domain.count,
+			fullLabel: domain.key,
+			children: [],
+		};
+		const sortedHosts = [...domain.hosts.values()].sort(byCountThenKey);
+		for (const host of sortedHosts.slice(0, limits.maxVisibleHostsPerDomain)) {
+			const view: HostView = {
+				domainKey: domain.key,
+				host,
+				paths: [...host.paths.entries()].map(([key, count]) => ({ key, count })).sort(byCountThenKey),
+			};
+			const hostNode: DisplayNode = {
+				id: `host:${encode(domain.key, host.key)}`,
+				name: host.key,
+				kind: "host",
+				depth: 2,
+				value: host.count,
+				fullLabel: host.key,
+				children: [],
+			};
+			hostViews.push(view);
+			hostNodes.set(view, hostNode);
+			domainNode.children.push(hostNode);
+		}
+		const otherHosts = otherHostsChain(domain.key, sortedHosts.slice(limits.maxVisibleHostsPerDomain));
+		if (otherHosts) domainNode.children.push(otherHosts);
+		root.children.push(domainNode);
+	}
+	const otherDomains = otherDomainsChain(input.brandId, sortedDomains.slice(limits.maxVisibleDomains));
+	if (otherDomains) root.children.push(otherDomains);
+
+	const selected = selectVisiblePaths(hostViews, limits.maxVisibleConcretePaths);
+	for (const view of hostViews) {
+		(hostNodes.get(view) as DisplayNode).children = pathChildren(view, selected);
+	}
+	return root;
+}
+
+/**
+ * Flatten depth by depth in tree order, so each column reads top-down in the
+ * same order as its parents and the Sankey needs no crossing links. Recharts
+ * links reference node indices, which only exist after this step.
+ */
+function flatten(root: DisplayNode): Pick<CitationStructure, "nodes" | "links"> {
+	const nodes: CitationStructureNode[] = [];
+	const links: CitationStructureLink[] = [];
+	let level: { node: DisplayNode; parent: number | undefined }[] = [{ node: root, parent: undefined }];
+	while (level.length > 0) {
+		const next: typeof level = [];
+		for (const { node, parent } of level) {
+			const { children, ...plain } = node;
+			const index = nodes.push(plain) - 1;
+			if (parent !== undefined) links.push({ source: parent, target: index, value: node.value });
+			for (const child of children) next.push({ node: child, parent: index });
+		}
+		level = next;
+	}
+	return { nodes, links };
 }
 
 export function buildCitationStructure(input: {
@@ -228,197 +421,38 @@ export function buildCitationStructure(input: {
 	};
 	if (agg.total === 0) return { ...base, nodes: [], links: [] };
 
-	const nodes: CitationStructureNode[] = [];
-	const links: CitationStructureLink[] = [];
-	const indexOf = new Map<string, number>();
-	const addNode = (node: CitationStructureNode): number => {
-		const index = nodes.length;
-		nodes.push(node);
-		indexOf.set(node.id, index);
-		return index;
-	};
-	const addLink = (sourceId: string, targetId: string, value: number) => {
-		const source = indexOf.get(sourceId);
-		const target = indexOf.get(targetId);
-		if (source === undefined || target === undefined) throw new Error("citation structure: link to unknown node");
-		links.push({ source, target, value });
-	};
-
-	const rootId = `brand:${encode(input.brandId)}`;
-	addNode({ id: rootId, name: input.brandName, kind: "brand", value: agg.total, depth: 0, fullLabel: input.brandName });
-
-	// Depth 1: domains, in display order, synthetic last.
-	const sortedDomains = [...agg.domains.values()].sort(byCountThenKey);
-	const visibleDomains = sortedDomains.slice(0, limits.maxVisibleDomains);
-	const hiddenDomains = sortedDomains.slice(limits.maxVisibleDomains);
-	for (const domain of visibleDomains) {
-		addNode({
-			id: `domain:${encode(domain.key)}`,
-			name: domain.key,
-			kind: "domain",
-			value: domain.count,
-			depth: 1,
-			fullLabel: domain.key,
-		});
-	}
-	const otherDomainsValue = hiddenDomains.reduce((sum, d) => sum + d.count, 0);
-	const otherDomainsId = `other-domains:${encode(input.brandId)}`;
-	if (otherDomainsValue > 0) {
-		addNode({
-			id: otherDomainsId,
-			name: OTHER_DOMAINS_LABEL,
-			kind: "rest",
-			value: otherDomainsValue,
-			depth: 1,
-			fullLabel: OTHER_DOMAINS_LABEL,
-			hiddenChildCount: hiddenDomains.length,
-		});
-	}
-
-	// Depth 2: hosts grouped under their domain, synthetic last within each group.
-	const visibleHosts: VisibleHost[] = [];
-	const otherHostsByDomain = new Map<string, { value: number; hosts: number; paths: number }>();
-	for (const domain of visibleDomains) {
-		const sortedHosts = [...domain.hosts.values()].sort(byCountThenKey);
-		const keep = sortedHosts.slice(0, limits.maxVisibleHostsPerDomain);
-		const fold = sortedHosts.slice(limits.maxVisibleHostsPerDomain);
-		for (const host of keep) {
-			addNode({
-				id: `host:${encode(domain.key, host.key)}`,
-				name: host.key,
-				kind: "host",
-				value: host.count,
-				depth: 2,
-				fullLabel: host.key,
-			});
-			const paths = [...host.paths.entries()].map(([key, count]) => ({ key, count })).sort(byCountThenKey);
-			visibleHosts.push({ domain, host, paths });
-		}
-		const folded = {
-			value: fold.reduce((sum, h) => sum + h.count, 0),
-			hosts: fold.length,
-			paths: fold.reduce((sum, h) => sum + h.paths.size, 0),
-		};
-		if (folded.value > 0) {
-			otherHostsByDomain.set(domain.key, folded);
-			addNode({
-				id: `other-hosts:${encode(domain.key)}`,
-				name: OTHER_HOSTS_LABEL,
-				kind: "rest",
-				value: folded.value,
-				depth: 2,
-				fullLabel: `${OTHER_HOSTS_LABEL} · ${domain.key}`,
-				hiddenChildCount: folded.hosts,
-			});
-		}
-	}
-	const otherDomainsHostsId = `other-domains-hosts:${encode(input.brandId)}`;
-	if (otherDomainsValue > 0) {
-		addNode({
-			id: otherDomainsHostsId,
-			name: OTHER_HOSTS_LABEL,
-			kind: "rest",
-			value: otherDomainsValue,
-			depth: 2,
-			fullLabel: `${OTHER_HOSTS_LABEL} · ${OTHER_DOMAINS_LABEL}`,
-			hiddenChildCount: hiddenDomains.reduce((sum, d) => sum + d.hosts.size, 0),
-		});
-	}
-
-	// Depth 3: paths grouped under their host, Rest last within each group.
-	const selectedPaths = selectVisiblePaths(visibleHosts, limits.maxVisibleConcretePaths);
-	const restByHost = new Map<string, { value: number; paths: number }>();
-	for (const visible of visibleHosts) {
-		let restValue = 0;
-		let restPaths = 0;
-		for (const path of visible.paths) {
-			const id = `path:${encode(visible.domain.key, visible.host.key, path.key)}`;
-			if (selectedPaths.has(encode(visible.domain.key, visible.host.key, path.key))) {
-				addNode({
-					id,
-					name: path.key,
-					kind: "path",
-					value: path.count,
-					depth: 3,
-					fullLabel: `${visible.host.key}${path.key}`,
-				});
-			} else {
-				restValue += path.count;
-				restPaths += 1;
-			}
-		}
-		if (restValue > 0) {
-			restByHost.set(encode(visible.domain.key, visible.host.key), { value: restValue, paths: restPaths });
-			addNode({
-				id: `rest-path:${encode(visible.domain.key, visible.host.key)}`,
-				name: REST_LABEL,
-				kind: "rest",
-				value: restValue,
-				depth: 3,
-				fullLabel: `${REST_LABEL} · ${visible.host.key}`,
-				hiddenChildCount: restPaths,
-			});
-		}
-	}
-	for (const [domainKey, folded] of otherHostsByDomain) {
-		addNode({
-			id: `other-hosts-rest:${encode(domainKey)}`,
-			name: REST_LABEL,
-			kind: "rest",
-			value: folded.value,
-			depth: 3,
-			fullLabel: `${REST_LABEL} · ${OTHER_HOSTS_LABEL} · ${domainKey}`,
-			hiddenChildCount: folded.paths,
-		});
-	}
-	const otherDomainsRestId = `other-domains-rest:${encode(input.brandId)}`;
-	if (otherDomainsValue > 0) {
-		addNode({
-			id: otherDomainsRestId,
-			name: REST_LABEL,
-			kind: "rest",
-			value: otherDomainsValue,
-			depth: 3,
-			fullLabel: `${REST_LABEL} · ${OTHER_DOMAINS_LABEL}`,
-			hiddenChildCount: hiddenDomains.reduce(
-				(sum, d) => sum + [...d.hosts.values()].reduce((s, h) => s + h.paths.size, 0),
-				0,
-			),
-		});
-	}
-
-	// Links, in node order so link index order mirrors node order.
-	for (const domain of visibleDomains) addLink(rootId, `domain:${encode(domain.key)}`, domain.count);
-	if (otherDomainsValue > 0) addLink(rootId, otherDomainsId, otherDomainsValue);
-	for (const visible of visibleHosts) {
-		addLink(
-			`domain:${encode(visible.domain.key)}`,
-			`host:${encode(visible.domain.key, visible.host.key)}`,
-			visible.host.count,
-		);
-	}
-	for (const [domainKey, folded] of otherHostsByDomain) {
-		addLink(`domain:${encode(domainKey)}`, `other-hosts:${encode(domainKey)}`, folded.value);
-	}
-	if (otherDomainsValue > 0) addLink(otherDomainsId, otherDomainsHostsId, otherDomainsValue);
-	for (const visible of visibleHosts) {
-		const hostId = `host:${encode(visible.domain.key, visible.host.key)}`;
-		for (const path of visible.paths) {
-			if (selectedPaths.has(encode(visible.domain.key, visible.host.key, path.key))) {
-				addLink(hostId, `path:${encode(visible.domain.key, visible.host.key, path.key)}`, path.count);
-			}
-		}
-		const rest = restByHost.get(encode(visible.domain.key, visible.host.key));
-		if (rest) addLink(hostId, `rest-path:${encode(visible.domain.key, visible.host.key)}`, rest.value);
-	}
-	for (const [domainKey, folded] of otherHostsByDomain) {
-		addLink(`other-hosts:${encode(domainKey)}`, `other-hosts-rest:${encode(domainKey)}`, folded.value);
-	}
-	if (otherDomainsValue > 0) addLink(otherDomainsHostsId, otherDomainsRestId, otherDomainsValue);
-
-	const result = { ...base, nodes, links };
+	const result = { ...base, ...flatten(buildDisplayTree(input, agg.domains, agg.total, limits)) };
 	assertConservation(result);
 	return result;
+}
+
+const fail = (message: string): never => {
+	throw new Error(`citation structure conservation violated: ${message}`);
+};
+
+const isPositiveInteger = (value: number) => Number.isInteger(value) && value > 0;
+
+/** Per-node inflow/outflow from the links; also validates every link. */
+function flows(nodes: readonly CitationStructureNode[], links: readonly CitationStructureLink[]) {
+	const inflow = new Array<number>(nodes.length).fill(0);
+	const outflow = new Array<number>(nodes.length).fill(0);
+	for (const link of links) {
+		if (!isPositiveInteger(link.value)) fail(`link value ${link.value}`);
+		const source = nodes[link.source];
+		const target = nodes[link.target];
+		if (!source || !target) fail("link to unknown node");
+		if (target.depth !== source.depth + 1) fail("link skips a depth");
+		outflow[link.source] += link.value;
+		inflow[link.target] += link.value;
+	}
+	return { inflow, outflow };
+}
+
+function checkNode(node: CitationStructureNode, inflow: number, outflow: number) {
+	if (!isPositiveInteger(node.value)) fail(`node value ${node.value} (${node.id})`);
+	if (node.depth > 0 && inflow !== node.value) fail(`inflow ${inflow} ≠ value ${node.value} (${node.id})`);
+	if (node.depth < 3 && outflow !== node.value) fail(`outflow ${outflow} ≠ value ${node.value} (${node.id})`);
+	if (node.depth === 3 && outflow !== 0) fail(`terminal with outflow (${node.id})`);
 }
 
 /**
@@ -429,38 +463,21 @@ export function buildCitationStructure(input: {
  */
 export function assertConservation(structure: Pick<CitationStructure, "nodes" | "links" | "totalOwnedOccurrences">) {
 	const { nodes, links, totalOwnedOccurrences } = structure;
-	const fail = (message: string): never => {
-		throw new Error(`citation structure conservation violated: ${message}`);
-	};
 	if (nodes.length === 0) {
 		if (links.length > 0 || totalOwnedOccurrences !== 0) fail("links or total without nodes");
 		return;
 	}
+	if (nodes[0].depth !== 0 || nodes[0].value !== totalOwnedOccurrences) fail("root value ≠ total");
 
-	const inflow = new Array<number>(nodes.length).fill(0);
-	const outflow = new Array<number>(nodes.length).fill(0);
-	for (const link of links) {
-		if (!Number.isInteger(link.value) || link.value <= 0) fail(`link value ${link.value}`);
-		if (!nodes[link.source] || !nodes[link.target]) fail("link to unknown node");
-		if (nodes[link.target].depth !== nodes[link.source].depth + 1) fail("link skips a depth");
-		outflow[link.source] += link.value;
-		inflow[link.target] += link.value;
-	}
-
+	const { inflow, outflow } = flows(nodes, links);
 	const perDepth = [0, 0, 0, 0];
 	const ids = new Set<string>();
 	for (const [index, node] of nodes.entries()) {
 		if (ids.has(node.id)) fail(`duplicate node id ${node.id}`);
 		ids.add(node.id);
-		if (!Number.isInteger(node.value) || node.value <= 0) fail(`node value ${node.value} (${node.id})`);
+		checkNode(node, inflow[index], outflow[index]);
 		perDepth[node.depth] += node.value;
-		if (node.depth > 0 && inflow[index] !== node.value)
-			fail(`inflow ${inflow[index]} ≠ value ${node.value} (${node.id})`);
-		if (node.depth < 3 && outflow[index] !== node.value)
-			fail(`outflow ${outflow[index]} ≠ value ${node.value} (${node.id})`);
-		if (node.depth === 3 && outflow[index] !== 0) fail(`terminal with outflow (${node.id})`);
 	}
-	if (nodes[0].depth !== 0 || nodes[0].value !== totalOwnedOccurrences) fail("root value ≠ total");
 	for (const depth of [1, 2, 3]) {
 		if (perDepth[depth] !== totalOwnedOccurrences) fail(`depth ${depth} sum ${perDepth[depth]} ≠ total`);
 	}
