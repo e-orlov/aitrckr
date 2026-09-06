@@ -12,6 +12,7 @@
  */
 import { sentryGlobalFunctionMiddleware, sentryGlobalRequestMiddleware } from "@sentry/tanstackstart-react";
 import { createCsrfMiddleware, createStart } from "@tanstack/react-start";
+import { publicErrorSerializationAdapter, writeDeniedSerializationAdapter } from "@/lib/public-errors";
 import { authMiddleware } from "@/middleware/auth";
 import { deploymentMiddleware, readOnlyMiddleware } from "@/middleware/deployment";
 
@@ -23,4 +24,6 @@ export const startInstance = createStart(() => ({
 	// csrf first so forged cross-site requests are rejected before any other work runs
 	requestMiddleware: [csrfMiddleware, sentryGlobalRequestMiddleware, deploymentMiddleware],
 	functionMiddleware: [sentryGlobalFunctionMiddleware, authMiddleware, readOnlyMiddleware],
+	// Errors otherwise cross as their message alone; these keep the public envelope intact.
+	serializationAdapters: [publicErrorSerializationAdapter, writeDeniedSerializationAdapter],
 }));

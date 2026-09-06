@@ -545,10 +545,7 @@ export const updatePromptsFn = createServerFn({ method: "POST" })
 		try {
 			return await savePromptsForBrand(brand, data.prompts);
 		} catch (error) {
-			if (isPublicError(error)) throw error;
-			// An entitlement denial is written for the user too; re-wrap it so it
-			// crosses the wire without a server stack.
-			if (isWriteDenied(error)) throw new PublicError(error.code, error.message);
+			if (isPublicError(error) || isWriteDenied(error)) throw error;
 			// A database or driver error names the SQL and its parameters — the
 			// prompt text and tags. Keep that on the server; the browser gets a
 			// message it can show.

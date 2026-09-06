@@ -1,6 +1,12 @@
 import { WriteDeniedError } from "@workspace/lib/entitlements";
 import { describe, expect, it } from "vitest";
-import { PROMPT_SAVE_FAILED, PublicError } from "@/lib/public-errors";
+import {
+	isPublicError,
+	PROMPT_SAVE_FAILED,
+	PublicError,
+	publicErrorSerializationAdapter,
+	writeDeniedSerializationAdapter,
+} from "@/lib/public-errors";
 import { READ_ONLY_ERROR, READ_ONLY_MESSAGE, READ_ONLY_REFUSED } from "@/lib/read-only-errors";
 import { writeErrorMessage } from "@/lib/write-errors";
 
@@ -107,5 +113,29 @@ describe("PublicError", () => {
 		expect(Object.keys(error).sort()).toEqual(["code", "name", "publicError"]);
 		expect("stack" in error).toBe(false);
 		expect(error.cause).toBeUndefined();
+	});
+});
+
+describe("the wire envelope", () => {
+	it("round-trips a PublicError through the serialization adapter", () => {
+		const error = new PublicError("slug-taken", "That URL Slug is already taken.");
+		expect(publicErrorSerializationAdapter.test(error)).toBe(true);
+		expect(publicErrorSerializationAdapter.test(new Error("Failed query"))).toBe(false);
+		const wire = publicErrorSerializationAdapter.toSerializable(error);
+		expect(wire).toEqual({ code: "slug-taken", message: "That URL Slug is already taken." });
+		const back = publicErrorSerializationAdapter.fromSerializable(wire);
+		expect(isPublicError(back)).toBe(true);
+		expect(writeErrorMessage(back, FALLBACK, false)).toBe("That URL Slug is already taken.");
+	});
+
+	it("rebuilds an entitlement denial as a public error", () => {
+		const denied = new WriteDeniedError("prompt-cap", "A brand may have at most 100 prompts.");
+		expect(writeDeniedSerializationAdapter.test(denied)).toBe(true);
+		expect(writeDeniedSerializationAdapter.test(new Error("A brand may have at most 100 prompts."))).toBe(false);
+		const back = writeDeniedSerializationAdapter.fromSerializable(
+			writeDeniedSerializationAdapter.toSerializable(denied),
+		);
+		expect(isPublicError(back)).toBe(true);
+		expect(writeErrorMessage(back, FALLBACK, false)).toBe("A brand may have at most 100 prompts.");
 	});
 });
