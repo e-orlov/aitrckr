@@ -3,6 +3,7 @@ import {
 	IconBuilding,
 	IconBuildings,
 	IconChartBar,
+	IconChartSankey,
 	IconCpu,
 	IconCreditCard,
 	IconDashboard,
@@ -77,6 +78,11 @@ function brandGroups(organization: OrganizationSummary, brand: BrandWithPrompts)
 			},
 			{ title: "Query Fan-Out", link: { to: "/app/org/$org/brand/$brand/query-fan-out", params }, icon: IconSitemap },
 			{ title: "Citations", link: { to: "/app/org/$org/brand/$brand/citations", params }, icon: IconLink },
+			{
+				title: "Citation Structure",
+				link: { to: "/app/org/$org/brand/$brand/citation-structure", params },
+				icon: IconChartSankey,
+			},
 			{ title: "Opportunities", link: { to: "/app/org/$org/brand/$brand/opportunities", params }, icon: IconTarget },
 		);
 	}
