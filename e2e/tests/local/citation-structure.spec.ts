@@ -108,13 +108,17 @@ async function readNodes(page: Page): Promise<ShownNode[]> {
 const sumAt = (nodes: ShownNode[], depth: number) =>
 	nodes.filter((n) => n.depth === depth).reduce((sum, n) => sum + n.value, 0);
 
-/** Root = Σ domains = Σ hosts = Σ terminals, and the root equals the oracle. */
+/**
+ * Root = Σ domains = Σ hosts = Σ terminals, and the root equals the oracle.
+ * Polls, because a filter change keeps the previous diagram on screen until
+ * the refetch lands.
+ */
 async function expectDiagramTotal(page: Page, expected: number) {
+	await expect
+		.poll(async () => (await readNodes(page)).find((n) => n.depth === 0)?.value, { timeout: 30_000 })
+		.toBe(expected);
 	const nodes = await readNodes(page);
 	expect(nodes.every((n) => TITLE.test(`${n.kind} ${n.label}: ${n.value} occurrences, `))).toBe(true);
-	const root = nodes.find((n) => n.depth === 0);
-	expect(root, "root node").toBeDefined();
-	expect(root?.value).toBe(expected);
 	expect(sumAt(nodes, 1)).toBe(expected);
 	expect(sumAt(nodes, 2)).toBe(expected);
 	expect(sumAt(nodes, 3)).toBe(expected);
