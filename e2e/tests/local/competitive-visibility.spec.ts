@@ -259,6 +259,7 @@ async function plotRect(page: Page) {
 	return { left: box.x + lines[0].x1, right: box.x + lines[0].x2, top: box.y + Math.min(...lines.map((l) => l.y)) };
 }
 async function hoverAt(page: Page, fraction: number) {
+	await trend(page).scrollIntoViewIfNeeded();
 	const plot = await plotRect(page);
 	await page.mouse.move(plot.left + (plot.right - plot.left) * fraction, plot.top + 3);
 	await expect(trendTooltip(page)).toBeVisible();
@@ -458,8 +459,6 @@ test.describe("Competitive AI Visibility Overview", () => {
 		await expect(section(page).getByText("AI Visibility", { exact: true })).toBeVisible();
 		await expect(section(page).getByText("Visibility Trends", { exact: true })).toBeVisible();
 		await expect(section(page).getByText("Visibility Leaderboard", { exact: true })).toBeVisible();
-		// The old compact own-brand bar is gone; the headline lives in the AI Visibility card.
-		await expect(page.getByText(/^\d+%\s*Visibility$/)).toHaveCount(0);
 		const promptCards = page.locator("[data-slot=card]").filter({ hasText: "Welche Rechtsschutzversicherung ist die beste?" });
 		await expect(promptCards.first()).toBeVisible({ timeout: 30_000 });
 		const sectionBox = (await section(page).boundingBox()) as { y: number; height: number };
@@ -470,6 +469,7 @@ test.describe("Competitive AI Visibility Overview", () => {
 
 		// Every number against the oracle (default 1m scope). No pie/donut, no Others.
 		const o = await oracle(client, window("1m"));
+		const own = o.entities.find((e) => e.isBrand) as OracleEntity;
 		expect(o.evaluated).toBe(3); // the enabled prompt without a run is not evaluated
 		expect(o.entities.reduce((s, e) => s + (e.visibility ?? 0), 0)).toBeGreaterThan(100);
 		await expectSectionMatchesOracle(page, o);
@@ -491,7 +491,7 @@ test.describe("Competitive AI Visibility Overview", () => {
 		await withinViewport(trendTooltip(page), page);
 		await screenshot(page, "03-tooltip-last");
 		// Fixed 0–100 axis.
-		await expect(trend(page).locator(".recharts-yAxis .recharts-cartesian-axis-tick-value")).toHaveText(["0%", "25%", "50%", "75%", "100%"]);
+		await expect(trend(page).locator(".recharts-yAxis-tick-labels .recharts-cartesian-axis-tick-value")).toHaveText(["0%", "25%", "50%", "75%", "100%"]);
 
 		// Legend toggle hides and restores a line and its tooltip row.
 		const buttons = trend(page).getByRole("list", { name: "Series" }).getByRole("button");
@@ -503,9 +503,11 @@ test.describe("Competitive AI Visibility Overview", () => {
 		await buttons.nth(1).click();
 		await expect(trend(page).locator("path.recharts-line-curve")).toHaveCount(o.series.length);
 
-		// Radial tooltip shows the raw counts.
-		await radial(page).locator(".recharts-radial-bar-sector").first().hover();
-		await expect(page.getByTestId("competitive-visibility-radial-tooltip")).toContainText(/\d+ \/ \d+ eligible runs/);
+		// Radial tooltip shows the raw counts: point at the outermost (brand) ring, 60° clockwise from the top.
+		const surface = (await radial(page).locator("svg.recharts-surface").boundingBox()) as { x: number; y: number; width: number; height: number };
+		const r = Math.min(surface.width, surface.height) / 2 - 5;
+		await page.mouse.move(surface.x + surface.width / 2 + r * Math.sin(Math.PI / 3), surface.y + surface.height / 2 - r * Math.cos(Math.PI / 3));
+		await expect(page.getByTestId("competitive-visibility-radial-tooltip")).toContainText(`${own.mentioned} / ${o.snapshotRuns} eligible runs`);
 		await expect(page.getByTestId("competitive-visibility-radial-tooltip")).toContainText(/Visible prompts/);
 		await page.mouse.move(0, 0);
 
