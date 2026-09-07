@@ -130,6 +130,8 @@ function call(data: Record<string, unknown>) {
 		data: { brandId: BRAND, timezone: "UTC", lookback: "1w", ...data },
 	}) as Promise<CompetitiveVisibilityResponse>;
 }
+const resolvedPromptIds = () =>
+	[...((store.reads.find((x) => x.fn === "runs")?.args[4] as string[] | undefined) ?? [])].sort();
 const lastNonNull = (r: CompetitiveVisibilityResponse, key: string) =>
 	[...r.points].reverse().find((p) => p.visibility[key] !== null)?.visibility[key] ?? null;
 
@@ -269,16 +271,10 @@ describe("getCompetitiveVisibilityFn reads and filters", () => {
 		expect(store.reads.find((x) => x.fn === "runs")?.args[4]).toEqual(["p-branded"]);
 		store.reads.length = 0;
 		await call({ tags: "rechtsschutz,vergleich" });
-		expect([...(store.reads.find((x) => x.fn === "runs")?.args[4] as string[])].sort()).toEqual([
-			"p-branded",
-			"p-claude",
-		]);
+		expect(resolvedPromptIds()).toEqual(["p-branded", "p-claude"]);
 		store.reads.length = 0;
 		await call({ tags: "unbranded" });
-		expect([...(store.reads.find((x) => x.fn === "runs")?.args[4] as string[])].sort()).toEqual([
-			"p-claude",
-			"p-unbranded",
-		]);
+		expect(resolvedPromptIds()).toEqual(["p-claude", "p-unbranded"]);
 	});
 
 	it("applies the search query to the prompt text — search is part of the Visibility scope", async () => {

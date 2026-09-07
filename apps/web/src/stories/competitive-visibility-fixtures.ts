@@ -54,13 +54,27 @@ function respond(
  * competitors with distinct values, one of them never mentioned.
  */
 export const DATES_32 = dates(32);
+/** Which competitors prompt `p` names in its final run, and in how many of its `runs`. */
+const FINAL_MENTIONS: Array<
+	[name: string, appliesTo: (p: number) => boolean, runs: (runs: number, p: number) => number]
+> = [
+	["Globex", (p) => p <= 12, (runs, p) => Math.min(runs, p <= 4 ? 2 : 1)], // 4×2 + 8×1 = 16 runs, 12 prompts
+	["Initech", (p) => p % 3 === 0, () => 1], // 11 prompts → 11 runs
+	["Umbrella", (p) => p <= 8, (runs) => runs], // 16 runs, 8 prompts
+	["Hooli", (p) => p % 5 === 0, () => 1], // 6
+	["Stark Industries", (p) => p % 7 === 0, () => 1], // 4
+	["Wayne Enterprises", (p) => p % 11 === 0, () => 1], // 3
+	["Wonka", (p) => p === 33, () => 1], // 1
+	// Tyrell: never mentioned → 0%.
+];
+
 function buildDefault(): CompetitiveVisibilityResponse {
 	const promptRuns: PromptDayRuns[] = [];
 	const competitorRuns: PromptDayCompetitorRuns[] = [];
 	const first = DATES_32[0];
 	const last = DATES_32[DATES_32.length - 1];
-	// Every prompt has an early observation with no mentions at all, so the first
-	// days differ from the end and the trend has a shape.
+	// Every prompt has an early observation with few mentions, so the first days
+	// differ from the end and the trend has a shape.
 	for (let p = 1; p <= 33; p++) {
 		const id = `P${p}`;
 		promptRuns.push({ promptId: id, date: first, runs: 1, brandRuns: p % 3 === 0 ? 1 : 0 });
@@ -70,16 +84,9 @@ function buildDefault(): CompetitiveVisibilityResponse {
 		// Brand: prompts 1–5 mention it in both runs (10), prompts 9–17 in their single run (9) → 19 runs, 14 prompts.
 		const brandRuns = p <= 5 ? 2 : p >= 9 && p <= 17 ? 1 : 0;
 		promptRuns.push({ promptId: id, date: last, runs, brandRuns });
-		const mention = (competitor: string, n: number) =>
-			competitorRuns.push({ promptId: id, date: last, competitor, runs: n });
-		if (p <= 12) mention("Globex", Math.min(runs, p <= 4 ? 2 : 1)); // 4×2 + 8×1 = 16 runs, 12 prompts
-		if (p % 3 === 0) mention("Initech", 1); // 11 prompts → 11 runs
-		if (p <= 8) mention("Umbrella", runs); // 16 runs, 8 prompts
-		if (p % 5 === 0) mention("Hooli", 1); // 6
-		if (p % 7 === 0) mention("Stark Industries", 1); // 4
-		if (p % 11 === 0) mention("Wayne Enterprises", 1); // 3
-		if (p === 33) mention("Wonka", 1); // 1
-		// Tyrell: never mentioned → 0%.
+		for (const [competitor, appliesTo, count] of FINAL_MENTIONS) {
+			if (appliesTo(p)) competitorRuns.push({ promptId: id, date: last, competitor, runs: count(runs, p) });
+		}
 	}
 	// A mid-window observation on one prompt so the middle of the trend moves too.
 	promptRuns.push({ promptId: "P20", date: DATES_32[15], runs: 1, brandRuns: 1 });
