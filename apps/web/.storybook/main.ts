@@ -66,6 +66,10 @@ const config: StorybookConfig = {
 						replacement: path.resolve(mocksDir, "server-citation-structure.ts"),
 					},
 					{ find: /^@\/server\/dashboard(\.ts)?$/, replacement: path.resolve(mocksDir, "server-dashboard.ts") },
+					{
+						find: /^@\/server\/competitive-visibility(\.ts)?$/,
+						replacement: path.resolve(mocksDir, "server-competitive-visibility.ts"),
+					},
 					{ find: /^@\/server\/analysis(\.ts)?$/, replacement: path.resolve(mocksDir, "server-analysis.ts") },
 					{ find: /^@\/server\/opportunities(\.ts)?$/, replacement: path.resolve(mocksDir, "server-opportunities.ts") },
 					{ find: /^@tanstack\/react-router$/, replacement: path.resolve(mocksDir, "tanstack-router.tsx") },

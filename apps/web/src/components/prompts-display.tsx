@@ -8,12 +8,12 @@ import { Skeleton } from "@workspace/ui/components/skeleton";
 import { cn } from "@workspace/ui/lib/utils";
 import { Inbox } from "lucide-react";
 import { useMemo } from "react";
+import { CompetitiveVisibilitySection } from "@/components/competitive-visibility/section";
 import { ALL_MODELS_VALUE } from "@/components/filter-bar";
 import { FilteredListShell } from "@/components/filtered-list-shell";
 import { PageHeader } from "@/components/page-header";
 import { PromptOrderDropdown } from "@/components/prompt-order-dropdown";
 import { VirtualizedPromptList } from "@/components/virtualized-prompt-list";
-import { VisibilityBarSection } from "@/components/visibility-bar-section";
 import { ChartDataProvider } from "@/contexts/chart-data-context";
 import { useBatchChartData } from "@/hooks/use-batch-chart-data";
 import { useBrand } from "@/hooks/use-brands";
@@ -44,8 +44,8 @@ export function PromptsDisplay({ pageTitle, pageDescription, pageInfoContent }: 
 }
 
 /** Owns the single `usePromptsSummary` subscription for the page. Derives
- *  `availableTags`, the search-filtered prompt id list (used by both the
- *  visibility bar and the chart list), and passes them down. Child
+ *  `availableTags` and the search-filtered, ordered prompt list, and passes
+ *  the filter scope to the competitive overview and the chart list. Child
  *  components still hold their own subscriptions to whichever URL keys
  *  they need, so a click on "Lookback" only invalidates the data users
  *  and not `FilterBar` itself. */
@@ -104,7 +104,6 @@ function PromptsContent({ brandId }: { brandId: string | undefined }) {
 			showModelSelector
 			showResultCount
 			filterBarExtras={<PromptOrderDropdown />}
-			filterSectionExtras={<VisibilityBarSection brandId={brandId} />}
 			isLoading={isInitialLoad}
 			loadingState={<ContentLoadingSkeleton />}
 			isError={Boolean(summaryError)}
@@ -137,6 +136,15 @@ function PromptsContent({ brandId }: { brandId: string | undefined }) {
 				</div>
 			}
 		>
+			<CompetitiveVisibilitySection
+				brandId={brandId}
+				filters={{
+					lookback,
+					model: modelParam,
+					tags: tags.length > 0 ? tags : undefined,
+					search: search || undefined,
+				}}
+			/>
 			<ChartSection
 				brandId={brandId}
 				lookback={lookback}

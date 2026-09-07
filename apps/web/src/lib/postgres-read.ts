@@ -991,6 +991,47 @@ export async function getPerPromptDailyCompetitorMentions(
 	return rows;
 }
 
+export interface PerPromptDailyCompetitorRunsRow {
+	prompt_id: string;
+	date: string;
+	competitor: string;
+	/** Runs that day (for this prompt) mentioning the competitor — each run counted once, however often the name appears. */
+	runs: number;
+}
+
+/**
+ * Per-prompt, per-day, per-competitor count of runs mentioning the competitor.
+ * The Visibility companion to `getPerPromptDailyCompetitorMentions`: that one
+ * counts mention instances (Share of Voice), this one counts distinct runs so a
+ * name repeated inside one `competitors_mentioned` array still counts as one
+ * binary observation — the same unit as `brand_mentioned`.
+ */
+export async function getPerPromptDailyCompetitorRuns(
+	brandId: string,
+	fromDate: string,
+	toDate: string,
+	timezone: string,
+	enabledPromptIds?: string[],
+	model?: string,
+): Promise<PerPromptDailyCompetitorRunsRow[]> {
+	if (!enabledPromptIds?.length) return [];
+	const rows = await queryPg<PerPromptDailyCompetitorRunsRow>(sql`
+		SELECT
+			prompt_id,
+			(created_at AT TIME ZONE ${timezone})::date::text AS date,
+			competitor,
+			count(DISTINCT id)::int AS runs
+		FROM prompt_runs, unnest(competitors_mentioned) AS competitor
+		WHERE brand_id = ${brandId}
+			${dateFilter(fromDate, toDate, timezone)}
+			${promptIdFilter(enabledPromptIds)}
+			${modelFilter(model)}
+		GROUP BY prompt_id, date, competitor
+		ORDER BY prompt_id, date, competitor
+	`);
+	return rows;
+}
+
 // ============================================================================
 // Per-Prompt Cited Pages (titles for the opportunities digest)
 // ============================================================================
