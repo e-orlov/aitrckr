@@ -217,6 +217,9 @@ function ChartSection({
 			brandId: brandId || "",
 			domains: [],
 			aliases: [],
+			previousNames: [],
+			active: true,
+			removedAt: null,
 			createdAt: new Date(),
 			updatedAt: new Date(),
 		})) || [];

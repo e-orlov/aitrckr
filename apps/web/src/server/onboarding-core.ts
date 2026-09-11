@@ -9,6 +9,7 @@
  */
 
 import { slugify } from "@workspace/lib/app-urls";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { ensureOrganization } from "@workspace/lib/db/provisioning";
 import { brands, competitors, prompts } from "@workspace/lib/db/schema";
@@ -218,7 +219,7 @@ async function insertCompetitors(args: {
 	if (args.source.length === 0) return 0;
 
 	const existing = await db.query.competitors.findMany({
-		where: eq(competitors.brandId, args.brandId),
+		where: activeCompetitorsOf(args.brandId),
 	});
 	const existingDomains = new Set(existing.flatMap((c) => c.domains));
 

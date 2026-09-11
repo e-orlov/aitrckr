@@ -21,7 +21,10 @@ import { SiteIcon } from "@/components/site-icon";
 import { cleanAndValidateDomain } from "@/lib/domain-categories";
 
 export interface CompetitorEntry {
+	/** React key only; a fresh uuid per rendered entry. */
 	_key: string;
+	/** Database id for competitors that already exist; absent for entries added in this session. */
+	id?: string;
 	name: string;
 	domains: string[];
 	aliases: string[];
@@ -37,6 +40,7 @@ interface CompetitorsEditorProps {
 export function newCompetitorEntry(partial?: Partial<CompetitorEntry>): CompetitorEntry {
 	return {
 		_key: uuidv4(),
+		id: partial?.id,
 		name: partial?.name ?? "",
 		domains: partial?.domains ?? [],
 		aliases: partial?.aliases ?? [],

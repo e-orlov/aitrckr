@@ -3,6 +3,7 @@
  * from the server-fn file so the database reads stay strippable from the client
  * bundle (see `server/prompt-resolution.ts` for the why).
  */
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { brands, competitors } from "@workspace/lib/db/schema";
 import { eq } from "drizzle-orm";
@@ -53,7 +54,7 @@ export async function loadCompetitiveVisibility(
 		db
 			.select({ id: competitors.id, name: competitors.name })
 			.from(competitors)
-			.where(eq(competitors.brandId, scope.brandId)),
+			.where(activeCompetitorsOf(scope.brandId)),
 		resolveFilteredPrompts(scope.brandId, { tags: scope.tags, search: scope.search }),
 	]);
 	const brandRow = brandRows[0];

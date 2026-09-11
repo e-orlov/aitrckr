@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { isValidSlug, MAX_SLUG_LENGTH, slugify } from "@workspace/lib/app-urls";
 import { getDefaultDelayHours } from "@workspace/lib/constants";
+import { activeCompetitorsOf, competitorRosterOrder } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { type Brand, type BrandWithPrompts, brands, competitors, prompts } from "@workspace/lib/db/schema";
 import {
@@ -11,11 +12,9 @@ import {
 	isBrandSlugAvailable,
 } from "@workspace/lib/db/unique-names";
 import {
-	assertAllowed,
 	assertCanCreateBrand,
 	assertCompetitorCap,
 	assertEnabledModelsAllowed,
-	decideCompetitorCap,
 	type Entitlements,
 	getOrgEntitlements,
 } from "@workspace/lib/entitlements";
@@ -43,6 +42,7 @@ import { cleanAndValidateDomain } from "@/lib/domain-categories";
 import { type TrackedTarget, targetFilterValue } from "@/lib/model-filter";
 import { PublicError } from "@/lib/public-errors";
 import { INVALID_SLUG, TAKEN_SLUG } from "@/lib/slug-errors";
+import { saveCompetitorRoster } from "@/server/competitor-roster";
 
 /**
  * What this brand's results can be broken down by: the standard platforms it
@@ -172,7 +172,7 @@ async function getBrandWithPromptsFromDb(
 
 		const [brandPrompts, brandCompetitors, resolved] = await Promise.all([
 			db.query.prompts.findMany({ where: eq(prompts.brandId, brandId) }),
-			db.query.competitors.findMany({ where: eq(competitors.brandId, brandId) }),
+			db.query.competitors.findMany({ where: activeCompetitorsOf(brandId), orderBy: competitorRosterOrder }),
 			entitlements ?? getOrgEntitlements(brand.organizationId),
 		]);
 
@@ -395,7 +395,7 @@ export const updateBrandFn = createServerFn({ method: "POST" })
 	});
 
 /**
- * Get competitors for a brand
+ * The brand's current competitor roster
  */
 export const getCompetitors = createServerFn({ method: "GET" })
 	.validator(z.object({ brandId: z.string() }))
@@ -404,12 +404,13 @@ export const getCompetitors = createServerFn({ method: "GET" })
 		await requireBrandAccess(session.user.id, data.brandId);
 
 		return db.query.competitors.findMany({
-			where: eq(competitors.brandId, data.brandId),
+			where: activeCompetitorsOf(data.brandId),
+			orderBy: competitorRosterOrder,
 		});
 	});
 
 /**
- * Update competitors for a brand (bulk replace)
+ * Save the competitor roster; the submitted list becomes the active roster.
  */
 export const updateCompetitors = createServerFn({ method: "POST" })
 	.validator(
@@ -417,6 +418,8 @@ export const updateCompetitors = createServerFn({ method: "POST" })
 			brandId: z.string(),
 			competitors: z.array(
 				z.object({
+					// z.guid(), not z.uuid(): existing ids predate the RFC version check.
+					id: z.guid().optional(),
 					name: z.string(),
 					domains: z.array(z.string()).min(1),
 					aliases: z.array(z.string()).optional().default([]),
@@ -428,40 +431,7 @@ export const updateCompetitors = createServerFn({ method: "POST" })
 		const session = await requireAuthSession();
 		await requireBrandAccess(session.user.id, data.brandId);
 
-		// A bulk replace, so the list submitted is the list the brand ends up with.
-		assertAllowed(decideCompetitorCap(data.competitors.length));
-
-		const cleanedCompetitors = data.competitors.map((c) => {
-			const cleanedDomains = c.domains.map((d) => cleanAndValidateDomain(d));
-			const invalid = c.domains.filter((_, i) => !cleanedDomains[i]);
-			if (invalid.length > 0) {
-				throw new PublicError("competitor-domains", `Invalid domain(s) for "${c.name}": ${invalid.join(", ")}`);
-			}
-			return {
-				name: c.name,
-				domains: cleanedDomains.filter(Boolean) as string[],
-				aliases: c.aliases,
-			};
-		});
-
-		return db.transaction(async (tx) => {
-			await tx.delete(competitors).where(eq(competitors.brandId, data.brandId));
-
-			if (cleanedCompetitors.length > 0) {
-				await tx.insert(competitors).values(
-					cleanedCompetitors.map((c) => ({
-						brandId: data.brandId,
-						name: c.name,
-						domains: c.domains,
-						aliases: c.aliases,
-					})),
-				);
-			}
-
-			return tx.query.competitors.findMany({
-				where: eq(competitors.brandId, data.brandId),
-			});
-		});
+		return saveCompetitorRoster(data.brandId, data.competitors);
 	});
 
 /**
@@ -515,7 +485,7 @@ export const addDomainToCompetitorFn = createServerFn({ method: "POST" })
 		await requireBrandAccess(session.user.id, data.brandId);
 
 		const existing = await db.query.competitors.findFirst({
-			where: and(eq(competitors.id, data.competitorId), eq(competitors.brandId, data.brandId)),
+			where: and(eq(competitors.id, data.competitorId), activeCompetitorsOf(data.brandId)),
 		});
 		if (!existing) throw new Error("Competitor not found");
 

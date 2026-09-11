@@ -1,5 +1,6 @@
 /** Server functions for citation data. */
 import { createServerFn } from "@tanstack/react-start";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { brands, competitors, prompts } from "@workspace/lib/db/schema";
 import { and, eq } from "drizzle-orm";
@@ -330,7 +331,7 @@ export const getCitationsFn = createServerFn({ method: "GET" })
 
 		const [brandResult, competitorsList, allPrompts] = await Promise.all([
 			db.select().from(brands).where(eq(brands.id, data.brandId)).limit(1),
-			db.select().from(competitors).where(eq(competitors.brandId, data.brandId)),
+			db.select().from(competitors).where(activeCompetitorsOf(data.brandId)),
 			db
 				.select({ id: prompts.id, value: prompts.value, tags: prompts.tags, systemTags: prompts.systemTags })
 				.from(prompts)

@@ -1,7 +1,7 @@
 /**
  * /api/v1/competitors — competitor collection.
  *
- * GET    list competitors (paginated, filterable by brandId)
+ * GET    list current competitors (paginated, filterable by brandId; removed ones are excluded)
  * POST   create a competitor for a brand
  *
  * Protected by API key authentication.
@@ -10,7 +10,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { db } from "@workspace/lib/db/db";
 import { brands, competitors } from "@workspace/lib/db/schema";
 import { assertCompetitorCap } from "@workspace/lib/entitlements";
-import { count, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { ApiError, createApiHandler } from "@/lib/api/handler";
 import { dedupeAliases, dedupeDomains } from "@/lib/domain-categories";
@@ -33,7 +33,9 @@ export const Route = createFileRoute("/api/v1/competitors/")({
 					const limit = Math.max(1, Math.min(100, parseInt(searchParams.get("limit") || "20")));
 					const offset = (page - 1) * limit;
 
-					const where = brandId ? eq(competitors.brandId, brandId) : undefined;
+					const where = brandId
+						? and(eq(competitors.brandId, brandId), eq(competitors.active, true))
+						: eq(competitors.active, true);
 
 					const [totalCountResult] = await db.select({ count: count() }).from(competitors).where(where);
 					const totalCount = totalCountResult?.count || 0;

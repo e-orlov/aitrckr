@@ -5,6 +5,7 @@
  * Protected by API key authentication.
  */
 import { createFileRoute } from "@tanstack/react-router";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { brands, competitors, prompts } from "@workspace/lib/db/schema";
 import { eq } from "drizzle-orm";
@@ -89,7 +90,7 @@ export const Route = createFileRoute("/api/v1/prompts/$promptId/snapshot")({
 
 					const [brandInfo, competitorsList] = await Promise.all([
 						db.select().from(brands).where(eq(brands.id, prompt.brandId)).limit(1),
-						db.select().from(competitors).where(eq(competitors.brandId, prompt.brandId)),
+						db.select().from(competitors).where(activeCompetitorsOf(prompt.brandId)),
 					]);
 					if (brandInfo.length === 0) {
 						throw new ApiError(500, "Internal Server Error", "Brand not found for prompt");
