@@ -5,15 +5,20 @@
  * competitor. One query feeds all three cards so they always describe the same
  * snapshot for the same filters.
  */
-import { IconInfoCircle } from "@tabler/icons-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@workspace/ui/components/card";
+import { Card, CardContent, CardHeader } from "@workspace/ui/components/card";
 import { Skeleton } from "@workspace/ui/components/skeleton";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@workspace/ui/components/tooltip";
+import { TooltipProvider } from "@workspace/ui/components/tooltip";
 import type { ReactNode } from "react";
 import { formatPct, longDate } from "@/components/competitive-visibility/format";
 import { CompetitiveVisibilityLeaderboard } from "@/components/competitive-visibility/leaderboard";
-import { CompetitiveVisibilityRadial } from "@/components/competitive-visibility/radial";
+import {
+	buildCompetitiveVisibilityRings,
+	CompetitiveVisibilityRadialChart,
+	competitiveVisibilityLegendItems,
+} from "@/components/competitive-visibility/radial";
 import { CompetitiveVisibilityTrendChart } from "@/components/competitive-visibility/trend-chart";
+import { MetricLegend } from "@/components/metric-summary/metric-legend";
+import { MetricCardTitle, MetricSummaryCard } from "@/components/metric-summary/metric-summary-card";
 import { browserTimezone, useCompetitiveVisibility } from "@/hooks/use-competitive-visibility";
 import { useSiteIcons } from "@/hooks/use-site-icons";
 import type { LookbackPeriod } from "@/lib/chart-utils";
@@ -84,51 +89,59 @@ export function CompetitiveVisibilityCards({
 	const own = data.entities.find((e) => e.key === BRAND_SERIES_KEY);
 	const competitorCount = data.entities.length - 1;
 	const shownCompetitors = data.series.length - 1;
+	const rings = buildCompetitiveVisibilityRings(data.series, data.entities);
 
 	return (
 		<TooltipProvider delay={150}>
 			<div data-testid="competitive-visibility-section" className="space-y-6">
 				<div className="grid min-w-0 gap-6 lg:grid-cols-2">
-					<Card className="min-w-0">
-						<CardHeader>
-							<TitleWithTip title="AI Visibility" tip={TIPS.visibility} />
-						</CardHeader>
-						<CardContent className="flex flex-col gap-4">
-							<div>
-								<div
-									data-testid="competitive-visibility-headline"
-									className="text-3xl sm:text-4xl font-bold tabular-nums"
-								>
-									{formatPct(own?.visibility)}
-								</div>
-								<p className="text-sm text-muted-foreground mt-1">
-									{data.brand.name} is mentioned in {own?.mentionedRuns ?? 0} of {data.snapshotRuns.toLocaleString()}{" "}
-									eligible runs across {data.evaluatedPromptCount.toLocaleString()} evaluated prompt
-									{data.evaluatedPromptCount === 1 ? "" : "s"} as of {longDate(data.asOfDate)}.
-								</p>
-								<p className="text-xs text-muted-foreground mt-1">
-									{data.windowRuns.toLocaleString()} runs · {data.windowCitations.toLocaleString()} citations in this
-									period
-									{competitorCount === 0
-										? " · no competitors configured"
-										: shownCompetitors < competitorCount
-											? ` · top ${shownCompetitors} of ${competitorCount} competitors shown, all in the leaderboard`
-											: ""}
-								</p>
-							</div>
-							<CompetitiveVisibilityRadial
-								series={data.series}
-								entities={data.entities}
-								snapshotRuns={data.snapshotRuns}
-								evaluatedPromptCount={data.evaluatedPromptCount}
-								size={RADIAL_HEIGHT}
-							/>
-						</CardContent>
-					</Card>
+					<MetricSummaryCard
+						testId="competitive-visibility-summary"
+						title="AI Visibility"
+						infoContent={TIPS.visibility}
+						value={<span data-testid="competitive-visibility-headline">{formatPct(own?.visibility)}</span>}
+						description={
+							<>
+								{data.brand.name} is mentioned in {own?.mentionedRuns ?? 0} of {data.snapshotRuns.toLocaleString()}{" "}
+								eligible runs across {data.evaluatedPromptCount.toLocaleString()} evaluated prompt
+								{data.evaluatedPromptCount === 1 ? "" : "s"} as of {longDate(data.asOfDate)}.
+							</>
+						}
+						meta={
+							<>
+								{data.windowRuns.toLocaleString()} runs · {data.windowCitations.toLocaleString()} citations in this
+								period
+								{competitorCount === 0
+									? " · no competitors configured"
+									: shownCompetitors < competitorCount
+										? ` · top ${shownCompetitors} of ${competitorCount} competitors shown, all in the leaderboard`
+										: ""}
+							</>
+						}
+						visual={
+							rings.length > 0 ? (
+								<CompetitiveVisibilityRadialChart
+									rings={rings}
+									snapshotRuns={data.snapshotRuns}
+									evaluatedPromptCount={data.evaluatedPromptCount}
+									size={RADIAL_HEIGHT}
+								/>
+							) : null
+						}
+						legend={
+							rings.length > 0 ? (
+								<MetricLegend
+									items={competitiveVisibilityLegendItems(rings)}
+									ariaLabel="Brands"
+									testId="competitive-visibility-radial-legend"
+								/>
+							) : null
+						}
+					/>
 
 					<Card className="min-w-0">
 						<CardHeader>
-							<TitleWithTip title="Visibility Trends" tip={TIPS.trends} />
+							<MetricCardTitle title="Visibility Trends" infoContent={TIPS.trends} />
 						</CardHeader>
 						<CardContent>
 							<CompetitiveVisibilityTrendChart series={data.series} points={data.points} height={TREND_HEIGHT} />
@@ -138,7 +151,7 @@ export function CompetitiveVisibilityCards({
 
 				<Card className="min-w-0">
 					<CardHeader>
-						<TitleWithTip title="Visibility Leaderboard" tip={TIPS.leaderboard} />
+						<MetricCardTitle title="Visibility Leaderboard" infoContent={TIPS.leaderboard} />
 					</CardHeader>
 					<CardContent>
 						<CompetitiveVisibilityLeaderboard
@@ -151,22 +164,6 @@ export function CompetitiveVisibilityCards({
 				</Card>
 			</div>
 		</TooltipProvider>
-	);
-}
-
-function TitleWithTip({ title, tip }: { title: string; tip: string }) {
-	return (
-		<CardTitle className="flex items-center gap-1.5">
-			{title}
-			<Tooltip>
-				<TooltipTrigger
-					render={<button type="button" aria-label={`About ${title}`} className="text-muted-foreground cursor-help" />}
-				>
-					<IconInfoCircle className="h-3.5 w-3.5" />
-				</TooltipTrigger>
-				<TooltipContent className="max-w-xs text-sm font-normal">{tip}</TooltipContent>
-			</Tooltip>
-		</CardTitle>
 	);
 }
 

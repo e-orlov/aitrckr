@@ -39,22 +39,14 @@ export function MetricSummaryCard({
 	testId,
 	className,
 }: MetricSummaryCardProps) {
+	const hasMeta = meta !== undefined && meta !== null && meta !== false;
+	const hasVisual =
+		(visual !== undefined && visual !== null && visual !== false) ||
+		(legend !== undefined && legend !== null && legend !== false);
 	return (
 		<Card data-testid={testId} className={cn("min-w-0", className)}>
 			<CardHeader>
-				<h2 data-slot="card-title" className="flex items-center gap-1.5 leading-none font-semibold">
-					{title}
-					<Tooltip>
-						<TooltipTrigger
-							render={
-								<button type="button" aria-label={`About ${title}`} className="text-muted-foreground cursor-help" />
-							}
-						>
-							<IconInfoCircle className="h-3.5 w-3.5" />
-						</TooltipTrigger>
-						<TooltipContent className="max-w-xs text-sm font-normal">{infoContent}</TooltipContent>
-					</Tooltip>
-				</h2>
+				<MetricCardTitle title={title} infoContent={infoContent} />
 			</CardHeader>
 			<CardContent className="@container/metric-summary flex flex-col gap-4">
 				<div data-slot="metric-summary-text">
@@ -62,15 +54,32 @@ export function MetricSummaryCard({
 						{value}
 					</div>
 					<p className="text-sm text-muted-foreground mt-1">{description}</p>
-					{meta !== undefined && meta !== null && meta !== false && (
+					{hasMeta && (
 						<p data-slot="metric-summary-meta" className="text-xs text-muted-foreground mt-1">
 							{meta}
 						</p>
 					)}
 				</div>
-				<MetricVisualGroup visual={visual} legend={legend} />
+				{hasVisual && <MetricVisualGroup visual={visual} legend={legend} />}
 			</CardContent>
 		</Card>
+	);
+}
+
+/** Card heading with the information affordance, shared by every metric card. */
+export function MetricCardTitle({ title, infoContent }: { readonly title: string; readonly infoContent: ReactNode }) {
+	return (
+		<h2 data-slot="card-title" className="flex items-center gap-1.5 leading-none font-semibold">
+			{title}
+			<Tooltip>
+				<TooltipTrigger
+					render={<button type="button" aria-label={`About ${title}`} className="text-muted-foreground cursor-help" />}
+				>
+					<IconInfoCircle className="h-3.5 w-3.5" />
+				</TooltipTrigger>
+				<TooltipContent className="max-w-xs text-sm font-normal">{infoContent}</TooltipContent>
+			</Tooltip>
+		</h2>
 	);
 }
 

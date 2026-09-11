@@ -4,7 +4,6 @@
  * deliberately not a segmented donut — Visibility values are not parts of one
  * whole and may sum to more than 100%.
  */
-import { Badge } from "@workspace/ui/components/badge";
 import { ChartContainer } from "@workspace/ui/components/chart";
 import { Cell, PolarAngleAxis, RadialBar, RadialBarChart, Tooltip } from "recharts";
 import { colorFor, entityColorMap, formatPct } from "@/components/competitive-visibility/format";
@@ -84,6 +83,7 @@ export function CompetitiveVisibilityRadialChart({
 	return (
 		<div
 			role="img"
+			data-testid="competitive-visibility-radial"
 			aria-label={`AI Visibility rings, each on its own 0 to 100 percent scale: ${summary}`}
 			className="shrink-0"
 		>
@@ -141,58 +141,6 @@ export function CompetitiveVisibilityRadialChart({
 					/>
 				</RadialBarChart>
 			</ChartContainer>
-		</div>
-	);
-}
-
-export function CompetitiveVisibilityRadial({
-	series,
-	entities,
-	snapshotRuns,
-	evaluatedPromptCount,
-	size = 220,
-}: {
-	series: CompetitiveVisibilitySeries[];
-	entities: CompetitiveVisibilityEntity[];
-	snapshotRuns: number;
-	evaluatedPromptCount: number;
-	/** Chart side in px — explicit so it measures the same wherever it renders. */
-	size?: number;
-}) {
-	const rings = buildCompetitiveVisibilityRings(series, entities);
-	if (rings.length === 0) return null;
-
-	return (
-		<div
-			data-testid="competitive-visibility-radial"
-			className="flex flex-col items-center gap-3 sm:flex-row sm:items-center"
-		>
-			<CompetitiveVisibilityRadialChart
-				rings={rings}
-				snapshotRuns={snapshotRuns}
-				evaluatedPromptCount={evaluatedPromptCount}
-				size={size}
-			/>
-			<ul aria-label="Brands" data-testid="competitive-visibility-radial-legend" className="min-w-0 grid gap-1 text-xs">
-				{rings.map((r) => (
-					<li key={r.key} className="flex min-w-0 items-center gap-2" data-entity={r.key}>
-						<span
-							aria-hidden="true"
-							className={`shrink-0 rounded-full ${r.isBrand ? "h-3 w-3" : "h-2.5 w-2.5"}`}
-							style={{ background: r.fill }}
-						/>
-						<span className={`min-w-0 truncate ${r.isBrand ? "font-medium" : "text-muted-foreground"}`} title={r.name}>
-							{r.name}
-						</span>
-						{r.isBrand && (
-							<Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
-								You
-							</Badge>
-						)}
-						<span className="ml-auto font-mono tabular-nums">{formatPct(r.visibility)}</span>
-					</li>
-				))}
-			</ul>
 		</div>
 	);
 }
