@@ -44,7 +44,7 @@ async function rows(client: pg.Client): Promise<Row[]> {
 async function addTag(page: Page, field: "Add domain..." | "Add alias...", value: string, entry = 0) {
 	await page.getByRole("combobox").filter({ hasText: field }).nth(entry).click();
 	await page.getByPlaceholder("Search...").fill(value);
-	await page.getByRole("option", { name: new RegExp(`Add.*${value.replace(/\./g, "\.")}`) }).click();
+	await page.getByRole("option", { name: `Add “${value}”` }).click();
 	await page.keyboard.press("Escape");
 }
 

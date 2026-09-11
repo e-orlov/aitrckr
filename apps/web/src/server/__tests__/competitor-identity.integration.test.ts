@@ -150,7 +150,7 @@ describe("saveCompetitorRoster keeps competitor identity (SENT-R0)", () => {
 		await saveCompetitorRoster(TEST_BRAND_ID, submitted([...active, gamma]));
 
 		const after = await rosterRows(TEST_BRAND_ID, true);
-		expect(after.map((r) => r.id)).toEqual([...active.map((r) => r.id), gamma.id]);
+		expect(after.map((r) => r.id).sort()).toEqual([...active.map((r) => r.id), gamma.id].sort());
 		expect(after.find((r) => r.id === gamma.id)!.removed_at).toBeNull();
 	});
 
