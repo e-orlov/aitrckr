@@ -1,5 +1,6 @@
 /** Server functions for dashboard data. */
 import { createServerFn } from "@tanstack/react-start";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { brands, competitors, prompts } from "@workspace/lib/db/schema";
 import { getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
@@ -80,7 +81,7 @@ export const getDashboardSummaryFn = createServerFn({ method: "GET" })
 				.from(brands)
 				.where(eq(brands.id, data.brandId))
 				.limit(1),
-			db.select().from(competitors).where(eq(competitors.brandId, data.brandId)),
+			db.select().from(competitors).where(activeCompetitorsOf(data.brandId)),
 			db
 				.select({ id: prompts.id, value: prompts.value, systemTags: prompts.systemTags, tags: prompts.tags })
 				.from(prompts)

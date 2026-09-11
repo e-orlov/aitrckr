@@ -1,5 +1,6 @@
 /** Server functions for visibility and chart data. */
 import { createServerFn } from "@tanstack/react-start";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { brands, competitors } from "@workspace/lib/db/schema";
 import { getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
@@ -83,7 +84,7 @@ export const getBatchChartDataFn = createServerFn({ method: "GET" })
 			db
 				.select({ id: competitors.id, name: competitors.name })
 				.from(competitors)
-				.where(eq(competitors.brandId, data.brandId)),
+				.where(activeCompetitorsOf(data.brandId)),
 		]);
 
 		if (brandResult.length === 0) {

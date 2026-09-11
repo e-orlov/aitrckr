@@ -17,6 +17,7 @@
  * is older than REFRESH_AFTER_DAYS, so a normal page load doesn't trigger an LLM call.
  */
 import { createServerFn } from "@tanstack/react-start";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { brandOpportunities, brands, competitors } from "@workspace/lib/db/schema";
 import { runStructuredCompletionPrompt } from "@workspace/lib/onboarding";
@@ -36,7 +37,7 @@ import {
 } from "@/lib/postgres-read";
 import { isBrandedPrompt } from "@/lib/prompt-tags";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
-import { computeVolatility, type DailyDomainCount, stabilityScore } from "@/lib/visibility-stats";
+import { computeVolatility, stabilityScore } from "@/lib/visibility-stats";
 import { normalizeText, withoutRepeats } from "@/server/opportunities-dedupe";
 import { resolveFilteredPrompts } from "@/server/prompt-resolution";
 
@@ -244,7 +245,7 @@ async function loadDigestData(
 		db
 			.select({ name: competitors.name, domains: competitors.domains })
 			.from(competitors)
-			.where(eq(competitors.brandId, brandId)),
+			.where(activeCompetitorsOf(brandId)),
 		getPerPromptRunStats(brandId, r30.fromDateStr, r30.toDateStr, timezone, promptIds),
 		getPerPromptDailyCompetitorMentions(brandId, r30.fromDateStr, r30.toDateStr, timezone, promptIds),
 		getPerPromptDailyCitationStats(brandId, r30.fromDateStr, r30.toDateStr, timezone, promptIds),

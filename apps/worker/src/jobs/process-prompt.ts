@@ -1,13 +1,12 @@
 import * as Sentry from "@sentry/node";
-import { getDeployment } from "@workspace/deployment";
 import { getDefaultDelayHours } from "@workspace/lib/constants";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import {
 	type Brand,
 	brands,
 	type Competitor,
 	citations,
-	competitors,
 	promptRuns,
 	prompts,
 	usageEvents,
@@ -101,7 +100,7 @@ async function getPromptContext(promptId: string): Promise<PromptContext | null>
 	}
 
 	const brandCompetitors = await db.query.competitors.findMany({
-		where: eq(competitors.brandId, prompt.brandId),
+		where: activeCompetitorsOf(prompt.brandId),
 	});
 
 	return {

@@ -92,20 +92,36 @@ export const prompts = pgTable(
 	}),
 ).enableRLS();
 
-export const competitors = pgTable("competitors", {
-	id: uuid("id").defaultRandom().primaryKey().notNull(),
-	brandId: text("brand_id")
-		.references(() => brands.id)
-		.notNull(),
-	name: text("name").notNull(),
-	domains: text("domains").array().notNull().default([]),
-	aliases: text("aliases").array().notNull().default([]),
-	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true })
-		.defaultNow()
-		.$onUpdate(() => new Date())
-		.notNull(),
-}).enableRLS();
+/**
+ * A competitor's id is its identity for the whole life of the brand: historical
+ * mentions and analytics key on it, so removing a competitor never deletes the
+ * row. `active` is what every "currently tracked" surface filters on;
+ * `previous_names` keeps the names a competitor was known by so historical
+ * mention records written under an old name can still be attributed safely.
+ */
+export const competitors = pgTable(
+	"competitors",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		name: text("name").notNull(),
+		domains: text("domains").array().notNull().default([]),
+		aliases: text("aliases").array().notNull().default([]),
+		previousNames: text("previous_names").array().notNull().default([]),
+		active: boolean("active").default(true).notNull(),
+		removedAt: timestamp("removed_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.$onUpdate(() => new Date())
+			.notNull(),
+	},
+	(table) => ({
+		brandIdActiveIdx: index("competitors_brand_id_active_idx").on(table.brandId, table.active),
+	}),
+).enableRLS();
 
 export const promptRuns = pgTable(
 	"prompt_runs",
