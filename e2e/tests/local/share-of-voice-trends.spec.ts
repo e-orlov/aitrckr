@@ -244,6 +244,8 @@ async function plotRect(page: Page) {
 
 /** Real pointer move to a fraction of the plot width, just under the top grid line where no line runs. */
 async function hoverAt(page: Page, fraction: number) {
+	// Centre the plot: a minimal scroll can leave its top grid line under the sticky header.
+	await chart(page).evaluate((el) => el.scrollIntoView({ block: "center" }));
 	const plot = await plotRect(page);
 	const x = plot.left + (plot.right - plot.left) * fraction;
 	const y = plot.top + 3;
