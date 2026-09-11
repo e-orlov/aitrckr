@@ -88,7 +88,9 @@ const previous = (page: Page) => pager(page).getByRole("button", { name: "Previo
 const next = (page: Page) => pager(page).getByRole("button", { name: "Next" });
 const titles = (page: Page) => list(page).locator("[data-slot=card-title]");
 const headline = (page: Page) => page.getByTestId("competitive-visibility-headline");
-const resultCount = (page: Page) => page.getByText(/\d+ results?$/);
+// Rendered only while a tag or search filter narrows the list; tags narrow on the
+// server ("12 results"), the search narrows the fetched list ("11 of 23 results").
+const resultCount = (page: Page) => page.getByText(/^\d+( of \d+)? results?$/);
 
 async function open(page: Page, search = "") {
 	await page.goto(`${VISIBILITY_URL}${search}`);
@@ -213,7 +215,7 @@ test.describe("Visibility prompt pagination", () => {
 		await expect(rangeText(page)).toHaveText("1–10 of 23");
 		await expect(previous(page)).toBeDisabled();
 		await expect(next(page)).toBeEnabled();
-		await expect(resultCount(page)).toHaveText("23 results");
+		await expect(resultCount(page)).toHaveCount(0);
 		await screenshot(page, "01-page1-default");
 
 		const seen: string[] = [];
@@ -274,7 +276,7 @@ test.describe("Visibility prompt pagination", () => {
 		const quokka = names(withWord.sort(byName));
 		expect(quokka).toHaveLength(11);
 		await open(page, `?q=${SEARCH_WORD}&order=prompt-asc`);
-		await expect(resultCount(page)).toHaveText("11 results");
+		await expect(resultCount(page)).toHaveText("11 of 23 results");
 		await expectPage(page, slice(quokka, 0), 11, 0);
 		await next(page).click();
 		await expectPage(page, slice(quokka, 1), 11, 1);
@@ -390,7 +392,6 @@ test.describe("Visibility prompt pagination", () => {
 		const loadedAt = Date.now();
 		await open(page, "?order=prompt-asc");
 		await expect(headline(page)).toBeVisible({ timeout: 30_000 });
-		await expect(resultCount(page)).toHaveText("23 results");
 		const headlineBefore = await headline(page).textContent();
 		const leaderboardBefore = await page.getByTestId("competitive-visibility-leaderboard").locator("tbody tr").allTextContents();
 		expect(leaderboardBefore.length).toBeGreaterThan(0);
@@ -416,7 +417,6 @@ test.describe("Visibility prompt pagination", () => {
 		expect(serverCalls).toEqual([]);
 		expect(page.url()).toBe(url);
 
-		await expect(resultCount(page)).toHaveText("23 results");
 		expect(await headline(page).textContent()).toBe(headlineBefore);
 		expect(await page.getByTestId("competitive-visibility-leaderboard").locator("tbody tr").allTextContents()).toEqual(leaderboardBefore);
 		await expect(page.getByTestId("competitive-visibility-section")).toContainText(`across ${RUN_PROMPTS.length} evaluated prompts`);
