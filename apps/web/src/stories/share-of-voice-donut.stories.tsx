@@ -1,7 +1,15 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { Card, CardContent, CardHeader, CardTitle } from "@workspace/ui/components/card";
+import { TooltipProvider } from "@workspace/ui/components/tooltip";
 import { expect, userEvent, waitFor, within } from "storybook/test";
-import { buildShareOfVoiceSlices, ShareOfVoiceDonut } from "@/components/share-of-voice-donut";
+import { MetricLegend } from "@/components/metric-summary/metric-legend";
+import { MetricSummaryCard } from "@/components/metric-summary/metric-summary-card";
+import {
+	buildShareOfVoiceSlices,
+	SHARE_OF_VOICE_DONUT_RADII,
+	SHARE_OF_VOICE_DONUT_SIZE,
+	ShareOfVoiceDonutChart,
+	shareOfVoiceLegendItems,
+} from "@/components/share-of-voice-donut";
 import { BRAND_COLOR, OTHERS_COLOR } from "@/lib/share-of-voice-palette";
 import type { ShareOfVoiceEntry } from "@/server/analysis";
 import {
@@ -13,44 +21,46 @@ import {
 } from "./analytics-fixtures";
 
 /** The summary card exactly as the Share of Voice page composes it. */
-function SummaryCard({ entries, children }: { entries: ShareOfVoiceEntry[]; children: React.ReactNode }) {
+function ShareOfVoiceSummary({ entries }: { entries: ShareOfVoiceEntry[] }) {
 	const slices = buildShareOfVoiceSlices(entries);
 	const brand = slices.find((s) => s.kind === "brand");
 	return (
-		<Card>
-			<CardHeader>
-				<CardTitle>Share of Voice</CardTitle>
-			</CardHeader>
-			<CardContent className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
-				<div className="shrink-0 sm:max-w-[8rem]">
-					<div className="text-3xl sm:text-4xl font-bold tabular-nums">{brand ? `${brand.percent}%` : "—"}</div>
-					<p className="text-sm text-muted-foreground mt-1 max-w-[18rem]">
-						{entries[0]?.name ?? "Acme"} across 640 runs
-						{entries.length > 1 ? ` and ${entries.length - 1} competitors` : ""}.
-					</p>
-				</div>
-				{children}
-			</CardContent>
-		</Card>
+		<TooltipProvider>
+			<MetricSummaryCard
+				testId="share-of-voice-summary"
+				title="Share of Voice"
+				infoContent="Each brand’s share of all brand and competitor mentions."
+				value={brand ? `${brand.percent}%` : "—"}
+				description={`${entries[0]?.name ?? "Acme"} across 640 runs${entries.length > 1 ? ` and ${entries.length - 1} competitors` : ""}.`}
+				visual={slices.length > 0 ? <ShareOfVoiceDonutChart slices={slices} /> : null}
+				legend={
+					slices.length > 0 ? (
+						<MetricLegend
+							items={shareOfVoiceLegendItems(slices)}
+							ariaLabel="Brands"
+							testId="share-of-voice-brand-list"
+						/>
+					) : null
+				}
+			/>
+		</TooltipProvider>
 	);
 }
 
 const meta = {
 	title: "Components/Share of Voice Donut",
-	component: ShareOfVoiceDonut,
+	component: ShareOfVoiceSummary,
 	decorators: [
-		(Story, { args, parameters }) => (
+		(Story, { parameters }) => (
 			<div
 				className={`${parameters.dark ? "dark " : ""}bg-background text-foreground ${parameters.shellWidth ? "p-2" : "p-6"}`}
 				style={{ width: parameters.shellWidth ?? 640 }}
 			>
-				<SummaryCard entries={args.entries}>
-					<Story />
-				</SummaryCard>
+				<Story />
 			</div>
 		),
 	],
-} satisfies Meta<typeof ShareOfVoiceDonut>;
+} satisfies Meta<typeof ShareOfVoiceSummary>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -117,19 +127,19 @@ export const Default: Story = {
 		await expect(getComputedStyle(items.at(-1)?.querySelector("span") as Element).backgroundColor).toBe(
 			hexToRgb(OTHERS_COLOR),
 		);
-		// Donut → list as one vertically centred group from `sm` up, stacked below it; the
-		// resulting geometry is asserted with real CSS in the E2E spec (this runner has no Tailwind).
-		await expect(canvasElement.querySelector("[data-testid=share-of-voice-donut]")).toHaveClass(
-			"flex",
-			"shrink-0",
-			"flex-col",
-			"items-center",
-			"gap-3",
-			"sm:ml-auto",
-			"sm:flex-row",
-			"sm:items-center",
-		);
-		await expect(list(canvasElement)).toHaveClass("min-w-0", "max-w-[8.5rem]", "grid", "gap-1", "text-xs");
+		// Shared shell: heading + info tip, value and description before the visual group, chart at the
+		// shared 220 px stage with Variant B radii; the geometry is asserted with real CSS in the E2E spec.
+		const card = canvasElement.querySelector("[data-testid=share-of-voice-summary]") as HTMLElement;
+		await expect(within(card).getByRole("heading", { level: 2, name: /Share of Voice/ })).toBeInTheDocument();
+		await expect(within(card).getByRole("button", { name: "About Share of Voice" })).toBeInTheDocument();
+		const group = card.querySelector("[data-slot=metric-visual-group]") as HTMLElement;
+		await expect(group.querySelector("[data-slot=metric-visual] [data-testid=share-of-voice-donut]")).not.toBeNull();
+		await expect(group.querySelector("[data-slot=metric-legend] ul")).toBe(list(canvasElement));
+		await expect(card.querySelector("[data-slot=metric-summary-meta]")).toBeNull();
+		const chart = card.querySelector(".recharts-wrapper") as HTMLElement;
+		await expect(chart.style.width).toBe(`${SHARE_OF_VOICE_DONUT_SIZE}px`);
+		await expect(SHARE_OF_VOICE_DONUT_RADII).toEqual({ inner: 59, outer: 103 });
+		await expect(list(canvasElement)).toHaveClass("min-w-0", "grid", "gap-1", "text-xs");
 		await expect(items[0].querySelectorAll("span")[1]).toHaveClass("font-medium", "truncate");
 		await expect(items[0].lastElementChild).toHaveClass("ml-auto", "font-mono", "tabular-nums");
 	},
@@ -192,10 +202,12 @@ export const LongCompetitorNames: Story = {
 export const Empty: Story = {
 	args: { entries: [] },
 	play: async ({ canvasElement }) => {
-		// Nothing was mentioned: neither the donut nor the list renders (the page shows its empty card instead).
+		// Nothing was mentioned: neither the donut, the list nor an empty visual group renders
+		// (the page shows its empty card instead of this one).
 		await expect(canvasElement.querySelectorAll(".recharts-pie")).toHaveLength(0);
 		await expect(within(canvasElement).queryByRole("list", { name: "Brands" })).toBeNull();
 		await expect(canvasElement.querySelector("[data-testid=share-of-voice-donut]")).toBeNull();
+		await expect(canvasElement.querySelector("[data-slot=metric-visual-group]")).toBeNull();
 	},
 };
 
@@ -246,7 +258,7 @@ export const NarrowCard: Story = {
 		const card = canvasElement.querySelector("[data-slot=card]") as HTMLElement;
 		await expect(card.scrollWidth).toBeLessThanOrEqual(card.clientWidth + 1);
 		await expect(document.documentElement.scrollWidth).toBe(document.documentElement.clientWidth);
-		// Below the `sm` breakpoint the summary, the donut and the list stack (real-CSS check in E2E).
+		// In a narrow card the group switches to a column (container query; real-CSS check in E2E).
 		const ul = list(canvasElement).getBoundingClientRect();
 		await expect(ul.right).toBeLessThanOrEqual(document.documentElement.clientWidth);
 	},

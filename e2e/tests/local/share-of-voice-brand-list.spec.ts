@@ -307,20 +307,22 @@ test.describe("Share of Voice visible brand list", () => {
 		await page.waitForTimeout(500);
 		expect(shareOfVoiceCalls).toHaveLength(1);
 
-		// Desktop composition: summary left; donut then list to its right, vertically centred; card not taller than before.
+		// Shared summary composition (UI-R1): summary text full width above; donut then list to its
+		// right in one vertically centred group; the group starts at the content's left edge.
 		const donutBox = (await page.locator(".recharts-wrapper").first().boundingBox()) as { x: number; y: number; width: number; height: number };
 		const listBox = (await brandList(page).boundingBox()) as { x: number; y: number; width: number; height: number };
 		const summaryBox = (await headline.boundingBox()) as { x: number; y: number; width: number; height: number };
 		expect(listBox.x).toBeGreaterThanOrEqual(donutBox.x + donutBox.width);
-		expect(donutBox.x).toBeGreaterThan(summaryBox.x + summaryBox.width);
+		expect(listBox.x - (donutBox.x + donutBox.width)).toBeLessThanOrEqual(16);
+		expect(donutBox.y).toBeGreaterThanOrEqual(summaryBox.y + summaryBox.height);
+		expect(Math.abs(donutBox.x - summaryBox.x)).toBeLessThanOrEqual(1);
 		expect(Math.abs(listBox.y + listBox.height / 2 - (donutBox.y + donutBox.height / 2))).toBeLessThan(12);
 		const cardBox = (await page.locator("[data-slot=card]").filter({ has: brandList(page) }).boundingBox()) as { height: number; x: number; width: number };
 		expect(listBox.x + listBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width);
-		expect(cardBox.height).toBeLessThanOrEqual(340);
 		await expectNamesReadable(page);
 		await screenshot(page, "01-desktop");
 
-		// Narrower desktop (half-width card ≈ 430 px): the group wraps under the summary instead of squeezing names.
+		// Narrower desktop (half-width card): the group keeps its row while the card is wide enough.
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await expectListMatches(page, expected);
 		await expectNamesReadable(page);

@@ -125,7 +125,9 @@ export const Default: Story = {
 		await waitFor(() => expect(radial.querySelectorAll(".recharts-radial-bar-background-sector")).toHaveLength(7));
 		await expect(radial.querySelectorAll(".recharts-radial-bar-sector")).toHaveLength(7);
 		await expect(radial.querySelectorAll(".recharts-pie, .recharts-pie-sector")).toHaveLength(0);
-		const radialLegend = within(radial).getByRole("list", { name: "Brands" });
+		const radialLegend = within(q(canvasElement, "competitive-visibility-summary")).getByRole("list", {
+			name: "Brands",
+		});
 		const legendItems = within(radialLegend).getAllByRole("listitem");
 		await expect(legendItems).toHaveLength(7);
 		await expect(legendItems[0]).toHaveTextContent("Acme");
@@ -133,7 +135,7 @@ export const Default: Story = {
 		await expect(legendItems[0]).toHaveTextContent("46%");
 		const legendValues = legendItems.map((li) => Number((li.textContent?.match(/(\d+)%$/) ?? [])[1]));
 		await expect(legendValues.reduce((s, v) => s + v, 0)).toBeGreaterThan(100);
-		await expect(radial.querySelector("[role=img]")).toHaveAttribute("aria-label", expect.stringContaining("Acme 46%"));
+		await expect(radial).toHaveAttribute("aria-label", expect.stringContaining("Acme 46%"));
 
 		// Leaderboard: every tracked competitor, ranked, absolute bars, coverage as one group.
 		const rows = leaderboardRows(canvasElement);

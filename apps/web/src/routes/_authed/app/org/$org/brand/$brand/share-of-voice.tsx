@@ -11,8 +11,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TooltipProvider } from "@workspace/ui/components/tooltip";
 import { ColHead } from "@/components/col-head";
 import { ALL_MODELS_VALUE, FilterBar } from "@/components/filter-bar";
+import { MetricLegend } from "@/components/metric-summary/metric-legend";
+import { MetricSummaryCard } from "@/components/metric-summary/metric-summary-card";
 import { FilterSection, PageHeader } from "@/components/page-header";
-import { ShareOfVoiceDonut } from "@/components/share-of-voice-donut";
+import {
+	buildShareOfVoiceSlices,
+	ShareOfVoiceDonutChart,
+	shareOfVoiceLegendItems,
+} from "@/components/share-of-voice-donut";
 import { ShareOfVoiceTrendChart } from "@/components/share-of-voice-trend-chart";
 import { SiteIcon } from "@/components/site-icon";
 import { useBrand } from "@/hooks/use-brands";
@@ -41,6 +47,8 @@ function currentShareOf(series: Array<{ share: number | null }>): number | null 
 }
 
 const TIPS = {
+	summary:
+		"Each brand’s share of all brand and competitor mentions in the AI answers covered by the selected filters. Mentions are counted per run; displayed percentages may not total exactly 100% because each value is rounded independently.",
 	mentions: "Number of runs in which this brand was mentioned in the AI answer.",
 	share: "This brand's share of all brand + competitor mentions.",
 	prompts: "Number of distinct prompts this brand appeared in.",
@@ -100,26 +108,32 @@ function ShareOfVoicePage() {
 	} else {
 		// The big number = the trend's last plotted point, so it matches the line beside it.
 		const currentShare = currentShareOf(data.shareTimeSeries);
+		const slices = buildShareOfVoiceSlices(data.entries, 6, domainFor);
 		content = (
 			<TooltipProvider delay={150}>
 				<div className="grid gap-6 lg:grid-cols-2">
-					<Card>
-						<CardHeader>
-							<CardTitle>Share of Voice</CardTitle>
-						</CardHeader>
-						<CardContent className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
-							<div className="shrink-0 sm:max-w-[8rem]">
-								<div className="text-3xl sm:text-4xl font-bold tabular-nums">
-									{currentShare !== null ? `${currentShare}%` : "—"}
-								</div>
-								<p className="text-sm text-muted-foreground mt-1 max-w-[18rem]">
-									{data.brandName} across {data.totalRuns.toLocaleString()} runs
-									{data.entries.length > 1 ? ` and ${data.entries.length - 1} competitors` : ""}.
-								</p>
-							</div>
-							<ShareOfVoiceDonut entries={data.entries} domainFor={domainFor} />
-						</CardContent>
-					</Card>
+					<MetricSummaryCard
+						testId="share-of-voice-summary"
+						title="Share of Voice"
+						infoContent={TIPS.summary}
+						value={currentShare !== null ? `${currentShare}%` : "—"}
+						description={
+							<>
+								{data.brandName} across {data.totalRuns.toLocaleString()} runs
+								{data.entries.length > 1 ? ` and ${data.entries.length - 1} competitors` : ""}.
+							</>
+						}
+						visual={slices.length > 0 ? <ShareOfVoiceDonutChart slices={slices} /> : null}
+						legend={
+							slices.length > 0 ? (
+								<MetricLegend
+									items={shareOfVoiceLegendItems(slices)}
+									ariaLabel="Brands"
+									testId="share-of-voice-brand-list"
+								/>
+							) : null
+						}
+					/>
 
 					<Card>
 						<CardHeader>

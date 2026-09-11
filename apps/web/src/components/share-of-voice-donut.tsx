@@ -1,12 +1,12 @@
 /**
  * Donut of share of voice: the brand plus its top competitors, with the long
- * tail bucketed into "Others", and a permanently visible list of the same
- * slices beside it. Sits beside the headline share number.
+ * tail bucketed into "Others". One ordered slice array feeds the sectors, the
+ * tooltip and the legend rows shown beside the chart in the summary card.
  */
 
-import { Badge } from "@workspace/ui/components/badge";
 import { ChartContainer } from "@workspace/ui/components/chart";
 import { Cell, Pie, PieChart, Tooltip } from "recharts";
+import type { MetricLegendItem } from "@/components/metric-summary/metric-legend";
 import { SiteIcon } from "@/components/site-icon";
 import { BRAND_COLOR, OTHERS_COLOR, COMPETITOR_PALETTE as PALETTE } from "@/lib/share-of-voice-palette";
 import type { ShareOfVoiceEntry } from "@/server/analysis";
@@ -74,34 +74,49 @@ export function buildShareOfVoiceSlices(
 	return slices.map((s) => ({ ...s, percent: Math.round((s.value / total) * 100) }));
 }
 
-export function ShareOfVoiceDonut({
-	entries,
-	topN = 6,
-	domainFor,
-	size = 180,
+/** Legend rows in slice order with the same once-rounded share the tooltip shows. */
+export function shareOfVoiceLegendItems(slices: readonly ShareOfVoiceSlice[]): MetricLegendItem[] {
+	return slices.map((s) => ({
+		id: s.key,
+		label: s.name,
+		color: s.color,
+		valueLabel: `${s.percent}%`,
+		emphasis: s.kind === "brand" ? "primary" : "muted",
+		badgeLabel: s.kind === "brand" ? "You" : undefined,
+	}));
+}
+
+export interface DonutRadii {
+	inner: number;
+	outer: number;
+}
+
+/** The sectors alone (no legend), for composition inside a summary card. */
+/** Shared visual stage of the summary cards and the ring proportions scaled to it. */
+export const SHARE_OF_VOICE_DONUT_SIZE = 220;
+export const SHARE_OF_VOICE_DONUT_RADII: DonutRadii = { inner: 59, outer: 103 };
+
+export function ShareOfVoiceDonutChart({
+	slices,
+	size = SHARE_OF_VOICE_DONUT_SIZE,
+	radii = SHARE_OF_VOICE_DONUT_RADII,
 }: {
-	entries: ShareOfVoiceEntry[];
-	topN?: number;
-	domainFor?: (name: string) => string | undefined;
+	slices: readonly ShareOfVoiceSlice[];
 	/** Chart side in px — explicit so it measures the same wherever it renders. */
 	size?: number;
+	radii?: DonutRadii;
 }) {
-	const slices = buildShareOfVoiceSlices(entries, topN, domainFor);
-	if (slices.length === 0) return null;
-
+	const summary = slices.map((s) => `${s.name} ${s.percent}%`).join(", ");
 	return (
-		<div
-			data-testid="share-of-voice-donut"
-			className="flex shrink-0 flex-col items-center gap-3 sm:ml-auto sm:flex-row sm:items-center"
-		>
-			<ChartContainer config={{}} className="aspect-square shrink-0" style={{ height: size, width: size }}>
+		<div role="img" data-testid="share-of-voice-donut" aria-label={`Share of Voice: ${summary}`} className="shrink-0">
+			<ChartContainer config={{}} className="aspect-square" style={{ height: size, width: size }}>
 				<PieChart>
 					<Pie
-						data={slices}
+						data={slices as ShareOfVoiceSlice[]}
 						dataKey="value"
 						nameKey="name"
-						innerRadius={48}
-						outerRadius={84}
+						innerRadius={radii.inner}
+						outerRadius={radii.outer}
 						paddingAngle={1}
 						strokeWidth={1}
 					>
@@ -125,33 +140,6 @@ export function ShareOfVoiceDonut({
 					/>
 				</PieChart>
 			</ChartContainer>
-			<ul
-				aria-label="Brands"
-				data-testid="share-of-voice-brand-list"
-				className="min-w-0 max-w-[8.5rem] grid gap-1 text-xs"
-			>
-				{slices.map((s) => (
-					<li key={s.key} className="flex min-w-0 items-center gap-2" data-entity={s.key}>
-						<span
-							aria-hidden="true"
-							className={`shrink-0 rounded-full ${s.kind === "brand" ? "h-3 w-3" : "h-2.5 w-2.5"}`}
-							style={{ background: s.color }}
-						/>
-						<span
-							className={`min-w-0 truncate ${s.kind === "brand" ? "font-medium" : "text-muted-foreground"}`}
-							title={s.name}
-						>
-							{s.name}
-						</span>
-						{s.kind === "brand" && (
-							<Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
-								You
-							</Badge>
-						)}
-						<span className="ml-auto font-mono tabular-nums">{s.percent}%</span>
-					</li>
-				))}
-			</ul>
 		</div>
 	);
 }
