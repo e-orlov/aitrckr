@@ -11,11 +11,9 @@ import {
 	isBrandSlugAvailable,
 } from "@workspace/lib/db/unique-names";
 import {
-	assertAllowed,
 	assertCanCreateBrand,
 	assertCompetitorCap,
 	assertEnabledModelsAllowed,
-	decideCompetitorCap,
 	type Entitlements,
 	getOrgEntitlements,
 } from "@workspace/lib/entitlements";
@@ -43,6 +41,7 @@ import { cleanAndValidateDomain } from "@/lib/domain-categories";
 import { type TrackedTarget, targetFilterValue } from "@/lib/model-filter";
 import { PublicError } from "@/lib/public-errors";
 import { INVALID_SLUG, TAKEN_SLUG } from "@/lib/slug-errors";
+import { saveCompetitorRoster } from "@/server/competitor-roster";
 
 /**
  * What this brand's results can be broken down by: the standard platforms it
@@ -428,40 +427,7 @@ export const updateCompetitors = createServerFn({ method: "POST" })
 		const session = await requireAuthSession();
 		await requireBrandAccess(session.user.id, data.brandId);
 
-		// A bulk replace, so the list submitted is the list the brand ends up with.
-		assertAllowed(decideCompetitorCap(data.competitors.length));
-
-		const cleanedCompetitors = data.competitors.map((c) => {
-			const cleanedDomains = c.domains.map((d) => cleanAndValidateDomain(d));
-			const invalid = c.domains.filter((_, i) => !cleanedDomains[i]);
-			if (invalid.length > 0) {
-				throw new PublicError("competitor-domains", `Invalid domain(s) for "${c.name}": ${invalid.join(", ")}`);
-			}
-			return {
-				name: c.name,
-				domains: cleanedDomains.filter(Boolean) as string[],
-				aliases: c.aliases,
-			};
-		});
-
-		return db.transaction(async (tx) => {
-			await tx.delete(competitors).where(eq(competitors.brandId, data.brandId));
-
-			if (cleanedCompetitors.length > 0) {
-				await tx.insert(competitors).values(
-					cleanedCompetitors.map((c) => ({
-						brandId: data.brandId,
-						name: c.name,
-						domains: c.domains,
-						aliases: c.aliases,
-					})),
-				);
-			}
-
-			return tx.query.competitors.findMany({
-				where: eq(competitors.brandId, data.brandId),
-			});
-		});
+		return saveCompetitorRoster(data.brandId, data.competitors);
 	});
 
 /**
