@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { isValidSlug, MAX_SLUG_LENGTH, slugify } from "@workspace/lib/app-urls";
 import { getDefaultDelayHours } from "@workspace/lib/constants";
+import { activeCompetitorsOf, competitorRosterOrder } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { type Brand, type BrandWithPrompts, brands, competitors, prompts } from "@workspace/lib/db/schema";
 import {
@@ -171,7 +172,7 @@ async function getBrandWithPromptsFromDb(
 
 		const [brandPrompts, brandCompetitors, resolved] = await Promise.all([
 			db.query.prompts.findMany({ where: eq(prompts.brandId, brandId) }),
-			db.query.competitors.findMany({ where: eq(competitors.brandId, brandId) }),
+			db.query.competitors.findMany({ where: activeCompetitorsOf(brandId), orderBy: competitorRosterOrder }),
 			entitlements ?? getOrgEntitlements(brand.organizationId),
 		]);
 
@@ -394,7 +395,7 @@ export const updateBrandFn = createServerFn({ method: "POST" })
 	});
 
 /**
- * Get competitors for a brand
+ * The brand's current competitor roster
  */
 export const getCompetitors = createServerFn({ method: "GET" })
 	.validator(z.object({ brandId: z.string() }))
@@ -403,12 +404,13 @@ export const getCompetitors = createServerFn({ method: "GET" })
 		await requireBrandAccess(session.user.id, data.brandId);
 
 		return db.query.competitors.findMany({
-			where: eq(competitors.brandId, data.brandId),
+			where: activeCompetitorsOf(data.brandId),
+			orderBy: competitorRosterOrder,
 		});
 	});
 
 /**
- * Update competitors for a brand (bulk replace)
+ * Save the competitor roster; the submitted list becomes the active roster.
  */
 export const updateCompetitors = createServerFn({ method: "POST" })
 	.validator(
@@ -416,6 +418,8 @@ export const updateCompetitors = createServerFn({ method: "POST" })
 			brandId: z.string(),
 			competitors: z.array(
 				z.object({
+					// z.guid(), not z.uuid(): existing ids predate the RFC version check.
+					id: z.guid().optional(),
 					name: z.string(),
 					domains: z.array(z.string()).min(1),
 					aliases: z.array(z.string()).optional().default([]),
@@ -481,7 +485,7 @@ export const addDomainToCompetitorFn = createServerFn({ method: "POST" })
 		await requireBrandAccess(session.user.id, data.brandId);
 
 		const existing = await db.query.competitors.findFirst({
-			where: and(eq(competitors.id, data.competitorId), eq(competitors.brandId, data.brandId)),
+			where: and(eq(competitors.id, data.competitorId), activeCompetitorsOf(data.brandId)),
 		});
 		if (!existing) throw new Error("Competitor not found");
 
