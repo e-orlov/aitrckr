@@ -107,8 +107,8 @@ function ShareOfVoicePage() {
 						<CardHeader>
 							<CardTitle>Share of Voice</CardTitle>
 						</CardHeader>
-						<CardContent className="flex items-center justify-between gap-4">
-							<div>
+						<CardContent className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
+							<div className="shrink-0 sm:max-w-[8rem]">
 								<div className="text-3xl sm:text-4xl font-bold tabular-nums">
 									{currentShare !== null ? `${currentShare}%` : "—"}
 								</div>
