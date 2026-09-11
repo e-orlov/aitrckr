@@ -14,10 +14,57 @@ import type {
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const OPENROUTER_API_URL = `${OPENROUTER_BASE_URL}/chat/completions`;
 // Default to GPT-5 Mini via OpenRouter — supports OpenRouter's *native*
-// web-search plugin (vs the Exa fallback) and produced the best brand-info
+// web search (vs the Exa fallback) and produced the best brand-info
 // recall + cheapest cost in our compare-onboarding runs. Other families that
 // support native search per the docs: Anthropic, Perplexity, xAI.
 const DEFAULT_RESEARCH_MODEL = "openai/gpt-5-mini";
+
+// Search-result localization only: OpenRouter forwards this to the model
+// provider's own web search as the searcher's approximate location. It does
+// not change the request origin, the OpenRouter region, or where data is
+// processed. Kept country-level on purpose (no city/region bias), and only
+// native provider search honors it (Exa & co. ignore it).
+const WEB_SEARCH_USER_LOCATION = Object.freeze({
+	type: "approximate",
+	country: "DE",
+	timezone: "Europe/Berlin",
+});
+
+/**
+ * Request fields that turn on OpenRouter's `openrouter:web_search` server tool
+ * for one web-enabled call. The deprecated `:online` suffix and `web` plugin
+ * cannot carry a location, so every web-enabled call goes through this tool.
+ *
+ * The legacy plugin always ran exactly one search; the server tool lets the
+ * model search 0..N times. `tool_choice: "required"` + `max_tool_calls: 1`
+ * pins it back to one mandatory search so tracked runs keep comparable cost
+ * and behavior.
+ */
+function webSearchRequestFields(): Record<string, unknown> {
+	return {
+		tools: [
+			{
+				type: "openrouter:web_search",
+				parameters: {
+					engine: "native",
+					user_location: { ...WEB_SEARCH_USER_LOCATION },
+				},
+			},
+		],
+		tool_choice: "required",
+		max_tool_calls: 1,
+	};
+}
+
+/**
+ * `SCRAPE_TARGETS` keeps `:online` as Elmo's web-search flag; the parser strips
+ * it before the version reaches us, but a slug handed over with the legacy
+ * suffix must still not activate search twice. Only a terminal `:online` is a
+ * flag — other variants such as `:free` are part of the model id.
+ */
+function bareModelSlug(modelSlug: string): string {
+	return modelSlug.replace(/:online$/, "");
+}
 
 function openrouterHeaders(): Record<string, string> {
 	return {
@@ -86,8 +133,8 @@ export const openrouter: Provider = {
 		schema,
 		webSearch = true,
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
-		// Raw fetch (no AI SDK) so we can attach the OpenRouter `plugins` field
-		// — the AI SDK's OpenAI-compat path doesn't pass it through.
+		// Raw fetch (no AI SDK) so we can attach OpenRouter's server-tool fields
+		// — the AI SDK's OpenAI-compat path doesn't pass them through.
 		const jsonSchema = z.toJSONSchema(schema as z.ZodType);
 		const body: Record<string, unknown> = {
 			model: DEFAULT_RESEARCH_MODEL,
@@ -96,10 +143,8 @@ export const openrouter: Provider = {
 				type: "json_schema",
 				json_schema: { name: "research_output", strict: true, schema: jsonSchema },
 			},
+			...(webSearch ? webSearchRequestFields() : {}),
 		};
-		// `engine: "native"` runs the underlying provider's real web-search tool
-		// (e.g. Anthropic's web_search_20250305) instead of the Exa fallback.
-		if (webSearch) body.plugins = [{ id: "web", engine: "native" }];
 		const res = await fetch(OPENROUTER_API_URL, {
 			method: "POST",
 			headers: openrouterHeaders(),
@@ -124,25 +169,19 @@ export const openrouter: Provider = {
 	},
 
 	async run(model: string, prompt: string, options?: ProviderOptions): Promise<ScrapeResult> {
-		let modelSlug = options?.version;
-		if (!modelSlug) {
+		if (!options?.version) {
 			throw new Error(
 				`OpenRouter requires a version slug in SCRAPE_TARGETS. ` +
 					`Example: ${model}:openrouter:openai/gpt-5-mini:online`,
 			);
 		}
-
-		// ":online" is exactly equivalent to plugins: [{ id: "web" }], and with the
-		// engine unset OpenRouter routes to the model provider's native web search
-		// (Exa only as a fallback) — which is the consumer surface Elmo tracks.
-		if (options?.webSearch && !modelSlug.includes(":online")) {
-			modelSlug = `${modelSlug}:online`;
-		}
+		const modelSlug = bareModelSlug(options.version);
 
 		const body: Record<string, unknown> = {
 			model: modelSlug,
 			messages: [{ role: "user", content: prompt }],
 			max_tokens: API_PROVIDER_MAX_OUTPUT_TOKENS.openrouter,
+			...(options.webSearch ? webSearchRequestFields() : {}),
 		};
 
 		// Use raw fetch instead of SDK — the SDK's ChatAssistantMessage Zod schema
@@ -152,12 +191,7 @@ export const openrouter: Provider = {
 		// the Responses API + SDK when it's stable.
 		const res = await fetch(OPENROUTER_API_URL, {
 			method: "POST",
-			headers: {
-				Authorization: `Bearer ${getCredential("OPENROUTER_API_KEY")}`,
-				"Content-Type": "application/json",
-				"HTTP-Referer": process.env.APP_URL ?? "https://github.com/elmohq/elmo",
-				"X-Title": "Elmo AEO",
-			},
+			headers: openrouterHeaders(),
 			body: JSON.stringify(body),
 		});
 
@@ -179,7 +213,7 @@ export const openrouter: Provider = {
 			textContent: extractTextFromOpenRouterResponse(data),
 			webQueries,
 			citations,
-			modelVersion: data?.model ?? modelSlug.replace(":online", ""),
+			modelVersion: data?.model ?? modelSlug,
 		};
 	},
 };
