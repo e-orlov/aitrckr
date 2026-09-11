@@ -98,12 +98,19 @@ async function open(page: Page, search = "") {
 	await expect(titles(page).first()).toBeVisible({ timeout: 30_000 });
 }
 
-/** Every card title on the current page, in order. The list is window-virtualized,
- *  so this walks the page from the list top to the pager collecting what mounts. */
+/** Every card title on the current page, in list order. The list is
+ *  window-virtualized, so this walks the page from the list top to the pager
+ *  and keys what mounts by the virtualizer's `data-index` — the walk's timing
+ *  must not decide the order. */
 async function collectTitles(page: Page): Promise<string[]> {
-	const seen: string[] = [];
+	const byIndex = new Map<number, string>();
 	const add = async () => {
-		for (const t of await titles(page).allTextContents()) if (!seen.includes(t)) seen.push(t);
+		const mounted = await list(page)
+			.locator("[data-index]")
+			.evaluateAll((els) =>
+				els.map((el) => [Number(el.getAttribute("data-index")), el.querySelector("[data-slot=card-title]")?.textContent ?? ""] as [number, string]),
+			);
+		for (const [index, title] of mounted) if (title) byIndex.set(index, title);
 	};
 	await list(page).evaluate((el) => el.scrollIntoView({ block: "start", behavior: "instant" }));
 	await add();
@@ -117,7 +124,7 @@ async function collectTitles(page: Page): Promise<string[]> {
 		await add();
 		if (done) break;
 	}
-	return seen;
+	return [...byIndex.entries()].sort((a, b) => a[0] - b[0]).map(([, title]) => title);
 }
 
 async function expectPage(page: Page, expected: string[], total: number, pageIndex: number) {
