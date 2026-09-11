@@ -38,6 +38,14 @@ describe("formatScrapeTarget", () => {
 	});
 });
 
+describe("parseScrapeTargets", () => {
+	it("keeps :online as the web-search flag and hands OpenRouter a bare version slug", () => {
+		expect(parseScrapeTargets("chatgpt:openrouter:openai/gpt-5.6-luna:online")).toEqual([
+			{ model: "chatgpt", provider: "openrouter", version: "openai/gpt-5.6-luna", webSearch: true },
+		]);
+	});
+});
+
 describe("round-trip", () => {
 	it("parse(format(x)) returns x", () => {
 		const configs: ModelConfig[] = [
