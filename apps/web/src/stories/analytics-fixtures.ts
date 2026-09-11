@@ -196,6 +196,65 @@ export const mockShareOfVoiceWithNullDay = {
 	},
 };
 
+/**
+ * Share of voice standings for the donut and its brand list. Counts follow the
+ * server's leaderboard order (mentions desc, brand ahead on a tie). The
+ * production-like set has a three-competitor tail (Others) and rounds to a
+ * displayed total of 99% — the integers must stay as they are.
+ */
+function sovEntries(brand: [string, number], competitors: Array<[string, number]>) {
+	const total = brand[1] + competitors.reduce((s, [, m]) => s + m, 0);
+	return [
+		{ name: brand[0], mentions: brand[1], share: brand[1] / total, isBrand: true, prompts: 12 },
+		...competitors.map(([name, mentions]) => ({ name, mentions, share: mentions / total, isBrand: false, prompts: 5 })),
+	];
+}
+export const mockDonutEntriesWithOthers = sovEntries(
+	["Acme", 18],
+	[
+		["Globex", 7],
+		["Initech", 6],
+		["Umbrella", 5],
+		["Hooli", 3],
+		["Vandelay", 3],
+		["Wonka", 2],
+		["Tyrell", 1],
+		["Cyberdyne", 1],
+		["Soylent", 1],
+	],
+);
+export const mockDonutEntriesWithoutOthers = sovEntries(
+	["Acme", 18],
+	[
+		["Globex", 7],
+		["Initech", 6],
+		["Umbrella", 5],
+		["Hooli", 3],
+		["Vandelay", 3],
+		["Wonka", 2],
+	],
+);
+export const mockDonutEntriesFewer = sovEntries(
+	["Acme", 18],
+	[
+		["Globex", 7],
+		["Initech", 6],
+	],
+);
+export const mockDonutEntriesLongNames = sovEntries(
+	["Acme Corporation Worldwide Insurance Services AG", 18],
+	[
+		["Umbrella Corporation International Holdings GmbH & Co. KGaA", 7],
+		["Globex", 6],
+		["Initech Rechtsschutz und Versicherungsvermittlung eG", 5],
+		["Hooli", 3],
+		["Vandelay", 3],
+		["Wonka", 2],
+		["Tyrell", 1],
+	],
+);
+export const mockDonutEntriesBrandOnly = sovEntries(["Acme", 18], []);
+
 /** Mock opportunities report (the getOpportunitiesFn response shape). */
 export const mockOpportunities = {
 	reason: null,
