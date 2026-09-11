@@ -221,6 +221,14 @@ function ChartSection({
 			updatedAt: new Date(),
 		})) || [];
 
+	const paginationScopeKey = JSON.stringify([
+		modelParam ?? ALL_MODELS_VALUE,
+		lookback,
+		selectedTags,
+		searchQuery,
+		order,
+	]);
+
 	return (
 		<ChartDataProvider
 			batchData={batchChartData?.chartData || null}
@@ -234,7 +242,7 @@ function ChartSection({
 			    starts over at page 1 while a background refetch of the same
 			    scope (new array identity, same key) keeps the user's page. */}
 			<PagedPromptList
-				key={[modelParam ?? ALL_MODELS_VALUE, lookback, selectedTags.join(","), searchQuery, order].join(" ")}
+				key={paginationScopeKey}
 				prompts={sortedPrompts}
 				brandId={brandId || ""}
 				lookback={lookback}
