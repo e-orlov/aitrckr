@@ -754,7 +754,7 @@
 		},
 		"/competitors": {
 			"get": {
-				"summary": "List competitors",
+				"summary": "List current competitors",
 				"operationId": "listCompetitors",
 				"tags": ["Competitors"],
 				"parameters": [
@@ -884,7 +884,7 @@
 				}
 			},
 			"delete": {
-				"summary": "Delete a competitor",
+				"summary": "Remove a competitor",
 				"operationId": "deleteCompetitor",
 				"tags": ["Competitors"],
 				"parameters": [
@@ -898,7 +898,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Competitor deleted (returns the deleted competitor)",
+						"description": "Competitor removed from the brand's roster (returns the removed competitor). The record is kept for historical analytics and is no longer returned by the other competitor endpoints.",
 						"content": {
 							"application/json": {
 								"schema": { "$ref": "#/components/schemas/Competitor" }
