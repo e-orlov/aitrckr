@@ -259,7 +259,8 @@ async function plotRect(page: Page) {
 	return { left: box.x + lines[0].x1, right: box.x + lines[0].x2, top: box.y + Math.min(...lines.map((l) => l.y)) };
 }
 async function hoverAt(page: Page, fraction: number) {
-	await trend(page).scrollIntoViewIfNeeded();
+	// Centre the plot: a minimal scroll can leave its top grid line under the sticky header.
+	await trend(page).evaluate((el) => el.scrollIntoView({ block: "center" }));
 	const plot = await plotRect(page);
 	await page.mouse.move(plot.left + (plot.right - plot.left) * fraction, plot.top + 3);
 	await expect(trendTooltip(page)).toBeVisible();
