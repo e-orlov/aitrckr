@@ -1,9 +1,10 @@
 import { createFileRoute, notFound, Outlet, redirect } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { brandSegment, canonicalBrandHref, resolveSegment } from "@workspace/lib/app-urls";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import type { BrandWithPrompts } from "@workspace/lib/db/schema";
-import { brands, competitors, prompts } from "@workspace/lib/db/schema";
+import { brands, prompts } from "@workspace/lib/db/schema";
 import { getOrgBillingState } from "@workspace/lib/entitlements";
 import { Skeleton } from "@workspace/ui/components/skeleton";
 import { eq } from "drizzle-orm";
@@ -36,7 +37,7 @@ const getBrandData = createServerFn({ method: "GET" })
 
 		const [brandPrompts, brandCompetitors, { entitlements }] = await Promise.all([
 			db.query.prompts.findMany({ where: eq(prompts.brandId, brand.id) }),
-			db.query.competitors.findMany({ where: eq(competitors.brandId, brand.id) }),
+			db.query.competitors.findMany({ where: activeCompetitorsOf(brand.id) }),
 			getOrgBillingState(brand.organizationId),
 		]);
 

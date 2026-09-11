@@ -20,6 +20,7 @@ import type { Entitlements } from "@workspace/config/entitlements";
 import { MAX_SELF_SERVE_BRANDS, premiumPairings, premiumSlotsUsed } from "@workspace/config/plans";
 import { and, count, eq, inArray, sql } from "drizzle-orm";
 import { MAX_COMPETITORS, MAX_PROMPTS } from "../constants";
+import { activeCompetitorsOf } from "../db/competitors";
 import { db } from "../db/db";
 import { brands, competitors, prompts } from "../db/schema";
 import { getOrgEntitlements, getOrgEntitlementsMap } from "./service";
@@ -292,7 +293,7 @@ export async function checkBrandCreate(orgIds: string[]): Promise<Map<string, Wr
 /** Guard creating `adding` new enabled prompts (or re-enabling that many). */
 export async function assertCompetitorCap(brandId: string, adding: number): Promise<void> {
 	if (adding <= 0) return;
-	const [row] = await db.select({ value: count() }).from(competitors).where(eq(competitors.brandId, brandId));
+	const [row] = await db.select({ value: count() }).from(competitors).where(activeCompetitorsOf(brandId));
 	assertAllowed(decideCompetitorCap((row?.value ?? 0) + adding));
 }
 

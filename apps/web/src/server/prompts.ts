@@ -1,5 +1,6 @@
 /** Server functions for prompt operations. */
 import { createServerFn } from "@tanstack/react-start";
+import { activeCompetitorsOf } from "@workspace/lib/db/competitors";
 import { db } from "@workspace/lib/db/db";
 import { brands, competitors, promptRuns, prompts, SYSTEM_TAGS } from "@workspace/lib/db/schema";
 import { getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
@@ -370,7 +371,7 @@ export const getPromptStatsFn = createServerFn({ method: "GET" })
 		if (mentionData) {
 			const [brandResult, allCompetitors] = await Promise.all([
 				db.select({ name: brands.name }).from(brands).where(eq(brands.id, prompt[0].brandId)).limit(1),
-				db.select({ name: competitors.name }).from(competitors).where(eq(competitors.brandId, prompt[0].brandId)),
+				db.select({ name: competitors.name }).from(competitors).where(activeCompetitorsOf(prompt[0].brandId)),
 			]);
 
 			const brandName = brandResult[0]?.name;
@@ -426,7 +427,7 @@ export const getPromptStatsFn = createServerFn({ method: "GET" })
 			db
 				.select({ id: competitors.id, name: competitors.name, domains: competitors.domains })
 				.from(competitors)
-				.where(eq(competitors.brandId, prompt[0].brandId)),
+				.where(activeCompetitorsOf(prompt[0].brandId)),
 		]);
 
 		const primaryBrandDomain = brandInfo[0] ? extractDomain(brandInfo[0].website) : "";
@@ -585,7 +586,7 @@ export const getPromptChartDataFn = createServerFn({ method: "GET" })
 				.where(eq(prompts.id, data.promptId))
 				.limit(1),
 			db.select().from(brands).where(eq(brands.id, data.brandId)).limit(1),
-			db.select().from(competitors).where(eq(competitors.brandId, data.brandId)),
+			db.select().from(competitors).where(activeCompetitorsOf(data.brandId)),
 		]);
 
 		if (promptData.length === 0) throw new Error("Prompt not found");

@@ -52,7 +52,7 @@ import {
 	SOURCE_CLASSIFIER_VERSION,
 	sourceClassificationSingletonKey,
 } from "@workspace/lib/source-classification";
-import { inArray, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import boss from "../src/boss";
 
 function extractDomainFromUrl(urlOrDomain: string): string {
@@ -115,7 +115,10 @@ async function fetchCachedVersions(hostnames: string[]): Promise<Map<string, str
 async function loadBrandContexts(): Promise<Map<string, BackfillBrandContext>> {
 	const [brandRows, competitorRows] = await Promise.all([
 		db.select({ id: brands.id, website: brands.website, additionalDomains: brands.additionalDomains }).from(brands),
-		db.select({ brandId: competitors.brandId, domains: competitors.domains }).from(competitors),
+		db
+			.select({ brandId: competitors.brandId, domains: competitors.domains })
+			.from(competitors)
+			.where(eq(competitors.active, true)),
 	]);
 	const brandContexts = new Map<string, BackfillBrandContext>();
 	for (const brand of brandRows) {
