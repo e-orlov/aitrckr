@@ -1,10 +1,19 @@
 import { Buffer } from "node:buffer";
 import { and, asc, eq, gt, or } from "drizzle-orm";
 import { db } from "../db/db";
-import { promptRunEntityMentions, promptRuns, sentimentAnalyses } from "../db/schema";
+import { promptRunEntityMentions, promptRuns, sentimentAnalyses, sentimentDetections } from "../db/schema";
+import { sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions, entityTerms } from "./detector";
 import { type SentimentSender, sendSentimentJob } from "./enqueue";
-import { ensureAnalysis, loadDetectableEntities, persistMentions } from "./store";
+import {
+	candidatesFromMentions,
+	detectionResultFor,
+	ensureAnalysis,
+	isAnalysisCurrent,
+	loadDetectableEntities,
+	loadMentions,
+	persistDetection,
+} from "./store";
 import { extractAnswerBody, normalizeText } from "./text";
 import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_DETECTOR_VERSION } from "./types";
 
@@ -40,9 +49,9 @@ export interface MentionBackfillCounts {
 	/** Runs with at least one detected entity. */
 	withMentions: number;
 	withoutMentions: number;
-	/** Runs whose current-version mention rows already matched the detector. */
+	/** Runs whose current-version receipt and mention rows already matched the detector. */
 	alreadyCurrent: number;
-	/** Runs whose mention rows were (or would be) written or refreshed. */
+	/** Runs whose receipt and mention rows were (or would be) written or refreshed. */
 	written: number;
 	/** Mention rows detected in total. */
 	mentionRows: number;
@@ -151,7 +160,19 @@ function reconcileLegacyNames(run: ScannedRun, entities: DetectableEntity[], sta
 	}
 }
 
-async function mentionRowsAreCurrent(runId: string, detectedKeys: string[]): Promise<boolean> {
+/**
+ * A run is current when a current-version receipt exists with the detected
+ * status and the current-version mention rows are exactly the detected
+ * entity set (no rows from another detector version left behind).
+ */
+async function detectionIsCurrent(runId: string, status: string, detectedKeys: string[]): Promise<boolean> {
+	const receipt = await db.query.sentimentDetections.findFirst({
+		where: and(
+			eq(sentimentDetections.promptRunId, runId),
+			eq(sentimentDetections.detectorVersion, SENTIMENT_DETECTOR_VERSION),
+		),
+	});
+	if (!receipt || receipt.status !== status || receipt.mentionCount !== detectedKeys.length) return false;
 	const existing = await db
 		.select({ key: promptRunEntityMentions.entityKey, version: promptRunEntityMentions.detectorVersion })
 		.from(promptRunEntityMentions)
@@ -174,17 +195,16 @@ async function processMentionRun(run: ScannedRun, state: MentionScanState, apply
 	const entities = await entitiesFor(run.brandId, state.entitiesByBrand);
 	reconcileLegacyNames(run, entities, state);
 	const body = extractAnswerBody(run.rawOutput, run.provider, run.model);
-	if (body === null) {
-		counts.unextractable++;
-		return;
-	}
-	const detected = detectEntityMentions(body, entities);
-	if (detected.length === 0) counts.withoutMentions++;
+	const detected = body === null ? [] : detectEntityMentions(body, entities);
+	const result = detectionResultFor(body, detected);
+	if (result.status === "unextractable") counts.unextractable++;
+	else if (detected.length === 0) counts.withoutMentions++;
 	else counts.withMentions++;
 	counts.mentionRows += detected.length;
 	if (
-		await mentionRowsAreCurrent(
+		await detectionIsCurrent(
 			run.id,
+			result.status,
 			detected.map((m) => m.key),
 		)
 	) {
@@ -192,7 +212,7 @@ async function processMentionRun(run: ScannedRun, state: MentionScanState, apply
 		return;
 	}
 	counts.written++;
-	if (apply) await persistMentions({ promptRunId: run.id, brandId: run.brandId, mentions: detected });
+	if (apply) await persistDetection({ promptRunId: run.id, brandId: run.brandId, result });
 }
 
 /**
@@ -233,15 +253,17 @@ export async function runMentionBackfill(args: {
 
 export interface SentimentEnqueueInventory {
 	scanned: number;
-	/** Runs with current-version mentions and a completed current-version analysis. */
+	/** Runs with current-version mentions and a current completed analysis (same taxonomy and input hash). */
 	completed: number;
-	/** Runs with current-version mentions and no completed current-version analysis. */
+	/** Runs with current-version mentions and no current completed analysis. */
 	eligible: number;
 	/** Eligible runs whose analysis row is `failed` (would be retried by a re-enqueue). */
 	eligibleFailed: number;
-	/** Runs without current-version mention rows (mention backfill has not covered them). */
-	noMentionRows: number;
-	/** Runs whose current-version mention scan found nothing (no call needed). */
+	/** Eligible runs with a completed analysis whose input hash or taxonomy no longer matches (roster/name/alias change). */
+	eligibleStale: number;
+	/** Runs without a current-version detection receipt (mention backfill has not covered them). */
+	notScanned: number;
+	/** Runs whose current-version receipt says no entity was found or no text was extractable (no call needed). */
 	noMentions: number;
 	/** Runs with an analysis of another classifier version only (stale, auditable). */
 	staleVersionOnly: number;
@@ -259,41 +281,48 @@ export interface SentimentEnqueueResult {
 	limitReached: boolean;
 }
 
-type RunEligibility = "eligible" | "completed" | "no-mentions" | "no-mention-rows";
+type RunEligibility = "eligible" | "completed" | "no-mentions" | "not-scanned";
 
 /**
- * Where one run stands: classified at the current version, waiting for a
- * classification, needing no call, or not yet covered by the mention backfill.
- * A run the detector already visited (any row at any version) but found
- * nothing at the current version needs no call; one it never visited still
- * needs the mention backfill first.
+ * Where one run stands: classified at the current version for the current
+ * input, waiting for a classification, needing no call, or not yet covered
+ * by the mention backfill. Only the detection receipt decides whether a run
+ * was scanned; a completed analysis counts only while its input hash and
+ * taxonomy still match what would be sent now.
  */
-async function classifyRunEligibility(run: ScannedRun, counts: SentimentEnqueueInventory): Promise<RunEligibility> {
+async function classifyRunEligibility(
+	run: ScannedRun,
+	counts: SentimentEnqueueInventory,
+	entitiesByBrand: Map<string, DetectableEntity[]>,
+): Promise<RunEligibility> {
 	counts.scanned++;
-	const rows = await db
-		.select({ version: promptRunEntityMentions.detectorVersion })
-		.from(promptRunEntityMentions)
-		.where(eq(promptRunEntityMentions.promptRunId, run.id));
-	const currentMentions = rows.filter((row) => row.version === SENTIMENT_DETECTOR_VERSION).length;
-	const analyses = await db
-		.select({ version: sentimentAnalyses.classifierVersion, status: sentimentAnalyses.status })
-		.from(sentimentAnalyses)
-		.where(eq(sentimentAnalyses.promptRunId, run.id));
-	const current = analyses.find((row) => row.version === SENTIMENT_CLASSIFIER_VERSION);
+	const receipt = await db.query.sentimentDetections.findFirst({
+		where: and(
+			eq(sentimentDetections.promptRunId, run.id),
+			eq(sentimentDetections.detectorVersion, SENTIMENT_DETECTOR_VERSION),
+		),
+	});
+	const analyses = await db.query.sentimentAnalyses.findMany({ where: eq(sentimentAnalyses.promptRunId, run.id) });
+	const current = analyses.find((row) => row.classifierVersion === SENTIMENT_CLASSIFIER_VERSION);
 	if (!current && analyses.length > 0) counts.staleVersionOnly++;
 
-	if (currentMentions === 0) {
-		const body = extractAnswerBody(run.rawOutput, run.provider, run.model);
-		if (rows.length > 0 || body === null || current?.status === "no_mentions") {
-			counts.noMentions++;
-			return "no-mentions";
-		}
-		counts.noMentionRows++;
-		return "no-mention-rows";
+	if (!receipt) {
+		counts.notScanned++;
+		return "not-scanned";
+	}
+	const body = extractAnswerBody(run.rawOutput, run.provider, run.model);
+	if (receipt.status !== "mentions" || body === null) {
+		counts.noMentions++;
+		return "no-mentions";
 	}
 	if (current?.status === "completed") {
-		counts.completed++;
-		return "completed";
+		const entities = await entitiesFor(run.brandId, entitiesByBrand);
+		const candidates = candidatesFromMentions(await loadMentions(run.id), entities);
+		if (isAnalysisCurrent(current, sentimentInputHash(body, candidates))) {
+			counts.completed++;
+			return "completed";
+		}
+		counts.eligibleStale++;
 	}
 	counts.eligible++;
 	if (current?.status === "failed") counts.eligibleFailed++;
@@ -336,7 +365,8 @@ export async function runSentimentEnqueue(args: {
 		completed: 0,
 		eligible: 0,
 		eligibleFailed: 0,
-		noMentionRows: 0,
+		eligibleStale: 0,
+		notScanned: 0,
 		noMentions: 0,
 		staleVersionOnly: 0,
 		attempted: 0,
@@ -347,8 +377,9 @@ export async function runSentimentEnqueue(args: {
 	const sender = args.enqueue ? args.sender : undefined;
 	const limit = args.enqueue ? args.enqueue.limit : 0;
 	let limitReached = false;
+	const entitiesByBrand = new Map<string, DetectableEntity[]>();
 	const { cursor, partial } = await scanAllRuns(args, async (run) => {
-		const eligibility = await classifyRunEligibility(run, counts);
+		const eligibility = await classifyRunEligibility(run, counts, entitiesByBrand);
 		if (eligibility !== "eligible" || !sender) return true;
 		if (counts.accepted >= limit) {
 			limitReached = true;

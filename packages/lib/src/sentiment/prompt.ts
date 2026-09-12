@@ -23,7 +23,7 @@ Rules:
 - Different entities in the same answer may have different sentiment; repeated mentions of one entity are one observation.
 - Confidence is 0..1 for how unambiguous the evidence is.`;
 
-export const SENTIMENT_EVIDENCE_RULES = `Evidence must be exact, verbatim excerpts copied from the ANSWER (max ${EVIDENCE_QUOTE_MAX_LENGTH} characters each, at most ${EVIDENCE_MAX_ITEMS} per item). Do not paraphrase, translate, fix typos or merge sentences. A "mixed" item needs at least two excerpts: one positive, one negative.`;
+export const SENTIMENT_EVIDENCE_RULES = `Evidence must be exact, verbatim excerpts copied from the ANSWER (max ${EVIDENCE_QUOTE_MAX_LENGTH} characters each, at most ${EVIDENCE_MAX_ITEMS} per item). Do not paraphrase, translate, fix typos or merge sentences. Label every excerpt with its "polarity": "positive", "negative" or "neutral" for what that excerpt says about the entity. A "mixed" item needs at least two excerpts: one labelled positive, one labelled negative.`;
 
 export function aspectTaxonomyText(): string {
 	return SENTIMENT_ASPECT_KEYS.map((key) => {

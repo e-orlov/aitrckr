@@ -87,6 +87,39 @@ export const SENTIMENT_ASPECTS: Record<SentimentAspectKey, { label: string; desc
 
 export const EVIDENCE_QUOTE_MAX_LENGTH = 300;
 export const EVIDENCE_MAX_ITEMS = 3;
+/** A located excerpt may span whitespace runs the normalized quote collapsed; bound the raw span too. */
+export const EVIDENCE_RAW_SPAN_MAX_LENGTH = 2 * EVIDENCE_QUOTE_MAX_LENGTH;
+
+/**
+ * The polarity of one excerpt as the classifier reads it. Declared per
+ * excerpt so a Mixed verdict can be checked locally: it must cite at least one
+ * positive and one negative excerpt, never two of the same polarity.
+ */
+export const EVIDENCE_POLARITIES = ["positive", "negative", "neutral"] as const;
+export type EvidencePolarity = (typeof EVIDENCE_POLARITIES)[number];
+
+/** Locked production path: the shared OpenRouter structured-research call with this exact model. */
+export const SENTIMENT_PROVIDER_ID = "openrouter";
+export const SENTIMENT_MODEL = "openai/gpt-5-mini";
+
+/**
+ * Run-level detection receipt states. `mentions`/`no_mentions` are completed
+ * scans of an extractable answer; `unextractable` records that the stored
+ * output had no answer text to scan. A run without a current-version receipt
+ * has not been scanned.
+ */
+export const SENTIMENT_DETECTION_STATUSES = ["mentions", "no_mentions", "unextractable"] as const;
+export type SentimentDetectionStatus = (typeof SENTIMENT_DETECTION_STATUSES)[number];
+
+export const SENTIMENT_ANALYSIS_STATUSES = ["pending", "processing", "completed", "no_mentions", "failed"] as const;
+export type SentimentAnalysisStatus = (typeof SENTIMENT_ANALYSIS_STATUSES)[number];
+
+/**
+ * A `processing` claim older than this is treated as abandoned (worker died
+ * mid-call) and may be re-claimed. Equals the queue's job expiry, so a live
+ * job can never still be inside its provider call when its claim expires.
+ */
+export const SENTIMENT_CLAIM_TIMEOUT_SECONDS = 900;
 
 /**
  * Cross-field rule shared by the classifier validation, the database checks
@@ -108,6 +141,7 @@ export function isScoreCategoryConsistent(score: number, category: SentimentCate
 
 const evidenceSchema = z.strictObject({
 	quote: z.string().trim().min(1).max(EVIDENCE_QUOTE_MAX_LENGTH),
+	polarity: z.enum(EVIDENCE_POLARITIES),
 });
 
 const aspectResultSchema = z.strictObject({
@@ -140,11 +174,16 @@ export type SentimentClassificationResult = z.infer<typeof sentimentClassificati
 export type SentimentEntityResult = z.infer<typeof entityResultSchema>;
 export type SentimentAspectResult = z.infer<typeof aspectResultSchema>;
 
-/** An exact excerpt with its locator in the whitespace/Unicode-normalized answer body. */
+/**
+ * An exact excerpt of the stored answer body. `start`/`end` are UTF-16 offsets
+ * into the raw stored body (not its normalized copy), so `body.slice(start,
+ * end)` is the exact text the classifier cited; `quote` is that slice.
+ */
 export interface SentimentEvidence {
 	quote: string;
 	start: number;
 	end: number;
+	polarity: EvidencePolarity;
 }
 
 /** The entity the classifier must judge; `key` is `brand` or the competitor uuid. */

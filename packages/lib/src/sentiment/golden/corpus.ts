@@ -1,4 +1,4 @@
-import type { SentimentAspectKey, SentimentCandidate, SentimentCategory } from "../types";
+import type { EvidencePolarity, SentimentAspectKey, SentimentCandidate, SentimentCategory } from "../types";
 
 /**
  * Synthetic, hand-labelled corpus for the sentiment classifier contract. No
@@ -20,12 +20,17 @@ export interface GoldenEntityExpectation {
 	aspects?: Partial<Record<SentimentAspectKey, GoldenAspectExpectation>>;
 }
 
+export interface GoldenReferenceEvidence {
+	quote: string;
+	polarity: EvidencePolarity;
+}
+
 export interface GoldenReferenceAspect {
 	key: SentimentAspectKey;
 	score: number;
 	category: SentimentCategory;
 	confidence: number;
-	evidence: { quote: string }[];
+	evidence: GoldenReferenceEvidence[];
 }
 
 export interface GoldenReferenceEntity {
@@ -33,7 +38,7 @@ export interface GoldenReferenceEntity {
 	score: number;
 	category: SentimentCategory;
 	confidence: number;
-	evidence: { quote: string }[];
+	evidence: GoldenReferenceEvidence[];
 	aspects: GoldenReferenceAspect[];
 }
 
@@ -77,11 +82,26 @@ export const GOLDEN_DUNHILL: SentimentCandidate = {
 	aliases: ["Dunhill"],
 };
 
+/**
+ * Excerpt polarity in the reference labels: a plain string takes the
+ * polarity of the verdict (positive/negative/neutral); a Mixed verdict lists
+ * its positive excerpt first and its negative excerpt second unless an item
+ * is given explicitly as `{ quote, polarity }`.
+ */
+type QuoteSpec = string | GoldenReferenceEvidence;
+
+const labelled = (category: SentimentCategory, evidence: QuoteSpec[]): GoldenReferenceEvidence[] =>
+	evidence.map((item, index) => {
+		if (typeof item !== "string") return item;
+		if (category === "mixed") return { quote: item, polarity: index === 0 ? "positive" : "negative" };
+		return { quote: item, polarity: category };
+	});
+
 const e = (
 	key: string,
 	score: number,
 	category: SentimentCategory,
-	evidence: string[],
+	evidence: QuoteSpec[],
 	aspects: GoldenReferenceAspect[] = [],
 	confidence = 0.9,
 ): GoldenReferenceEntity => ({
@@ -89,7 +109,7 @@ const e = (
 	score,
 	category,
 	confidence,
-	evidence: evidence.map((quote) => ({ quote })),
+	evidence: labelled(category, evidence),
 	aspects,
 });
 
@@ -97,14 +117,14 @@ const a = (
 	key: SentimentAspectKey,
 	score: number,
 	category: SentimentCategory,
-	evidence: string[],
+	evidence: QuoteSpec[],
 	confidence = 0.85,
 ): GoldenReferenceAspect => ({
 	key,
 	score,
 	category,
 	confidence,
-	evidence: evidence.map((quote) => ({ quote })),
+	evidence: labelled(category, evidence),
 });
 
 export const GOLDEN_CASES: GoldenCase[] = [
@@ -843,7 +863,10 @@ export const GOLDEN_CASES: GoldenCase[] = [
 					"c-corvex",
 					50,
 					"mixed",
-					["Corvex is pricey", "excellent at claims"],
+					[
+						{ quote: "Corvex is pricey", polarity: "negative" },
+						{ quote: "excellent at claims", polarity: "positive" },
+					],
 					[a("price", 30, "negative", ["Corvex is pricey"]), a("service", 85, "positive", ["excellent at claims"])],
 				),
 			],

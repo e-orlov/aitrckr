@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, or, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import {
 	brands,
@@ -7,8 +7,10 @@ import {
 	promptRuns,
 	prompts,
 	type SentimentAnalysis,
+	type SentimentDetection,
 	sentimentAnalyses,
 	sentimentAspectObservations,
+	sentimentDetections,
 	sentimentObservations,
 	usageEvents,
 } from "../db/schema";
@@ -18,10 +20,15 @@ import { brandEntity, competitorEntity, type DetectableEntity, type DetectedMent
 import { extractAnswerBody } from "./text";
 import {
 	SENTIMENT_ASPECTS,
+	SENTIMENT_CLAIM_TIMEOUT_SECONDS,
 	SENTIMENT_CLASSIFIER_VERSION,
 	SENTIMENT_DETECTOR_VERSION,
+	SENTIMENT_MODEL,
+	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_TAXONOMY_VERSION,
+	type SentimentAnalysisStatus,
 	type SentimentCandidate,
+	type SentimentDetectionStatus,
 } from "./types";
 
 type Db = typeof db;
@@ -100,16 +107,27 @@ export interface StoredMention {
 	entityName: string;
 }
 
+/** What the detector concluded for one run; `mentions` is empty unless `status` is `mentions`. */
+export interface DetectionResult {
+	status: SentimentDetectionStatus;
+	mentions: DetectedMention[];
+}
+
+export function detectionResultFor(answerBody: string | null, mentions: DetectedMention[]): DetectionResult {
+	if (answerBody === null) return { status: "unextractable", mentions: [] };
+	return { status: mentions.length > 0 ? "mentions" : "no_mentions", mentions };
+}
+
 /**
- * Idempotently persist the detector's result for one run at the current
+ * Idempotently persist the detector's mention rows for one run at the current
  * detector version: rows for entities no longer detected at this version are
  * removed, existing rows are refreshed in place (ids preserved), new rows
- * inserted. Returns the stored rows in detector order.
+ * inserted. Part of `persistDetection`; exported for the DB verifier only.
  */
 export async function persistMentions(
 	args: { promptRunId: string; brandId: string; mentions: DetectedMention[] },
 	executor: Executor = db,
-): Promise<StoredMention[]> {
+): Promise<void> {
 	const keys = args.mentions.map((m) => m.key);
 	const existing = await executor.query.promptRunEntityMentions.findMany({
 		where: eq(promptRunEntityMentions.promptRunId, args.promptRunId),
@@ -159,7 +177,47 @@ export async function persistMentions(
 				},
 			});
 	}
+}
+
+/**
+ * Persist one completed detector pass atomically: the run-level receipt for
+ * the current detector version and the mention rows it found, in one
+ * transaction, so a receipt can never exist without its rows or vice versa.
+ * Returns the stored mention rows in detector order.
+ */
+export async function persistDetection(
+	args: { promptRunId: string; brandId: string; result: DetectionResult },
+	executor: Executor = db,
+): Promise<StoredMention[]> {
+	const write = async (tx: Executor) => {
+		await tx
+			.insert(sentimentDetections)
+			.values({
+				promptRunId: args.promptRunId,
+				brandId: args.brandId,
+				detectorVersion: SENTIMENT_DETECTOR_VERSION,
+				status: args.result.status,
+				mentionCount: args.result.mentions.length,
+			})
+			.onConflictDoUpdate({
+				target: [sentimentDetections.promptRunId, sentimentDetections.detectorVersion],
+				set: { status: args.result.status, mentionCount: args.result.mentions.length, detectedAt: new Date() },
+			});
+		await persistMentions({ promptRunId: args.promptRunId, brandId: args.brandId, mentions: args.result.mentions }, tx);
+	};
+	await executor.transaction((tx) => write(tx));
 	return loadMentions(args.promptRunId, executor);
+}
+
+/** The current-version detection receipt for a run, or null when the run has not been scanned. */
+export async function loadDetection(promptRunId: string, executor: Executor = db): Promise<SentimentDetection | null> {
+	const row = await executor.query.sentimentDetections.findFirst({
+		where: and(
+			eq(sentimentDetections.promptRunId, promptRunId),
+			eq(sentimentDetections.detectorVersion, SENTIMENT_DETECTOR_VERSION),
+		),
+	});
+	return row ?? null;
 }
 
 export async function loadMentions(promptRunId: string, executor: Executor = db): Promise<StoredMention[]> {
@@ -219,10 +277,67 @@ export async function ensureAnalysis(
 	return row;
 }
 
+/**
+ * A completed analysis is current only when it was produced under the
+ * current taxonomy for exactly the classifier input that would be sent now.
+ * Anything else — older taxonomy, missing hash, changed entity set or names —
+ * makes the run eligible for reclassification instead of counting as done.
+ */
+export function isAnalysisCurrent(analysis: SentimentAnalysis, expectedInputHash: string): boolean {
+	return (
+		analysis.status === "completed" &&
+		analysis.classifierVersion === SENTIMENT_CLASSIFIER_VERSION &&
+		analysis.taxonomyVersion === SENTIMENT_TAXONOMY_VERSION &&
+		analysis.inputHash === expectedInputHash
+	);
+}
+
+export type ClaimOutcome = { claimed: true; attempts: number } | { claimed: false; status: SentimentAnalysisStatus };
+
+/**
+ * Atomically claim the analysis for one provider call. Exactly one of any
+ * number of racing workers wins: the conditional UPDATE only matches a row
+ * that is `pending`, `failed`, a finished row that is no longer current
+ * (`allowFinished`: `completed`/`no_mentions`), or a `processing` claim older than the claim timeout
+ * (an abandoned worker). Losers see the row's current status and make no
+ * call. Runs in its own statement (autocommit) so the claim is visible to
+ * other sessions before the provider boundary.
+ */
+export async function claimAnalysis(
+	analysisId: string,
+	options: { allowFinished: boolean },
+	executor: Executor = db,
+): Promise<ClaimOutcome> {
+	const staleBefore = new Date(Date.now() - SENTIMENT_CLAIM_TIMEOUT_SECONDS * 1000);
+	const claimable = or(
+		inArray(
+			sentimentAnalyses.status,
+			options.allowFinished ? ["pending", "failed", "completed", "no_mentions"] : ["pending", "failed"],
+		),
+		and(eq(sentimentAnalyses.status, "processing"), lt(sentimentAnalyses.startedAt, staleBefore)),
+	);
+	const [row] = await executor
+		.update(sentimentAnalyses)
+		.set({
+			status: "processing",
+			startedAt: new Date(),
+			attempts: sql`${sentimentAnalyses.attempts} + 1`,
+			provider: SENTIMENT_PROVIDER_ID,
+			model: SENTIMENT_MODEL,
+			webSearch: true,
+			updatedAt: new Date(),
+		})
+		.where(and(eq(sentimentAnalyses.id, analysisId), claimable))
+		.returning({ attempts: sentimentAnalyses.attempts });
+	if (row) return { claimed: true, attempts: row.attempts };
+	const current = await executor.query.sentimentAnalyses.findFirst({ where: eq(sentimentAnalyses.id, analysisId) });
+	return { claimed: false, status: (current?.status ?? "pending") as SentimentAnalysisStatus };
+}
+
 export async function markAnalysis(
 	analysisId: string,
 	patch: Partial<{
-		status: "pending" | "processing" | "completed" | "no_mentions" | "failed";
+		status: SentimentAnalysisStatus;
 		errorCode: string | null;
 		errorMessage: string | null;
 		startedAt: Date | null;
@@ -261,15 +376,7 @@ export async function persistClassification(args: {
 }): Promise<void> {
 	const mentionByKey = new Map(args.mentions.map((m) => [m.key, m]));
 	await db.transaction(async (tx) => {
-		const previous = await tx
-			.select({ id: sentimentObservations.id })
-			.from(sentimentObservations)
-			.where(eq(sentimentObservations.analysisId, args.analysisId));
-		if (previous.length > 0) {
-			const ids = previous.map((row) => row.id);
-			await tx.delete(sentimentAspectObservations).where(inArray(sentimentAspectObservations.observationId, ids));
-			await tx.delete(sentimentObservations).where(inArray(sentimentObservations.id, ids));
-		}
+		await tx.delete(sentimentObservations).where(eq(sentimentObservations.analysisId, args.analysisId));
 		for (const entity of args.classification.entities) {
 			const mention = mentionByKey.get(entity.key);
 			if (!mention) throw new Error(`classified entity "${entity.key}" has no mention row`);
@@ -323,14 +430,16 @@ export async function persistClassification(args: {
 }
 
 /**
- * Billing-grade attribution for one classifier call, success or failure.
- * Never throws — attribution must not break the job.
+ * Billing-grade attribution for one classifier attempt, success or failure.
+ * A failed attempt is still attributed to the locked provider/model — the
+ * request went out — without any credential or response detail. Never
+ * throws: attribution must not break the job.
  */
 export async function recordSentimentUsageEvent(args: {
 	organizationId: string;
 	brandId: string;
 	promptId: string;
-	provider: string | null;
+	provider: string;
 	model: string | null;
 	succeeded: boolean;
 }): Promise<void> {

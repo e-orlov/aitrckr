@@ -1,5 +1,5 @@
 import { type DetectableEntity, detectEntityMentions } from "./detector";
-import { ensureAnalysis, persistMentions } from "./store";
+import { detectionResultFor, ensureAnalysis, persistDetection } from "./store";
 import {
 	SENTIMENT_CLASSIFIER_VERSION,
 	SENTIMENT_QUEUE,
@@ -25,8 +25,8 @@ export type SentimentEnqueueOutcome =
 	| { status: "failed"; error: string };
 
 /**
- * Supplemental sentiment work for a freshly persisted run: deterministic
- * mention rows first (no provider call), then at most one queued
+ * Supplemental sentiment work for a freshly persisted run: the detection
+ * receipt and mention rows first (no provider call), then at most one queued
  * classification job when at least one entity was found. Runs only after the
  * prompt run is durable and NEVER throws — a failure here is logged and left
  * for the repair/backfill scan; it must not turn a successful monitoring
@@ -38,11 +38,17 @@ export async function enqueueSentimentBestEffort(args: {
 	answerBody: string | null;
 	entities: DetectableEntity[];
 	sender: SentimentSender;
+	/** Injected in tests; production writes through the store. */
+	persist?: typeof persistDetection;
 }): Promise<SentimentEnqueueOutcome> {
 	try {
+		const detected = args.answerBody === null ? [] : detectEntityMentions(args.answerBody, args.entities);
+		await (args.persist ?? persistDetection)({
+			promptRunId: args.promptRunId,
+			brandId: args.brandId,
+			result: detectionResultFor(args.answerBody, detected),
+		});
 		if (args.answerBody === null) return { status: "no-answer" };
-		const detected = detectEntityMentions(args.answerBody, args.entities);
-		await persistMentions({ promptRunId: args.promptRunId, brandId: args.brandId, mentions: detected });
 		if (detected.length === 0) return { status: "no-mentions" };
 		await ensureAnalysis({ promptRunId: args.promptRunId, brandId: args.brandId });
 		const jobId = await sendSentimentJob(args.sender, args.promptRunId);
