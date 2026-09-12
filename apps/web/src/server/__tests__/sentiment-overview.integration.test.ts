@@ -132,7 +132,7 @@ beforeAll(async () => {
 					key,
 					score,
 					category,
-					JSON.stringify([{ quote: "Alpha is mentioned here", start: 0, end: 10 }]),
+					JSON.stringify([{ quote: "Alpha is mentioned here", start: 10, end: 33, polarity: "positive" }]),
 				],
 			)
 		).rows[0].id;
@@ -144,7 +144,14 @@ beforeAll(async () => {
 		[40, "negative"],
 		[30, "negative"],
 	];
-	for (let i = 1; i <= 10; i++) await mention(runId(i), "brand", "brand");
+	for (let i = 1; i <= 10; i++) {
+		await mention(runId(i), "brand", "brand");
+		await client.query(
+			`INSERT INTO sentiment_detections (prompt_run_id, brand_id, detector_version, status, mention_count)
+			 VALUES ($1, $2, $3, 'mentions', 1)`,
+			[runId(i), BRAND, SENTIMENT_DETECTOR_VERSION],
+		);
+	}
 	for (let i = 1; i <= 5; i++) {
 		const m = await mention(runId(i), A, "competitor");
 		const an = await analysis(runId(i));
@@ -153,8 +160,12 @@ beforeAll(async () => {
 		if (i === 1) {
 			await client.query(
 				`INSERT INTO sentiment_aspect_observations (observation_id, taxonomy_version, aspect_key, aspect_label, score, category, confidence, evidence)
-				 VALUES ($1, $2, 'price', 'Price', 20, 'negative', 0.8, '[]'::jsonb)`,
-				[obs, SENTIMENT_TAXONOMY_VERSION],
+				 VALUES ($1, $2, 'price', 'Price', 20, 'negative', 0.8, $3::jsonb)`,
+				[
+					obs,
+					SENTIMENT_TAXONOMY_VERSION,
+					JSON.stringify([{ quote: "Sent IT too", start: 35, end: 46, polarity: "negative" }]),
+				],
 			);
 		}
 	}
@@ -178,6 +189,7 @@ async function cleanup() {
 	await client.query("DELETE FROM sentiment_observations WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM sentiment_analyses WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM prompt_run_entity_mentions WHERE brand_id = $1", [BRAND]);
+	await client.query("DELETE FROM sentiment_detections WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM citations WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM prompt_runs WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM prompts WHERE brand_id = $1", [BRAND]);
@@ -201,7 +213,12 @@ describe("IT-SNT-006 sentiment overview loader", () => {
 		expect(overview.eligibleResponses).toBe(10);
 		expect(overview.entities.map((e) => e.key)).toEqual(["brand", A, B]);
 		const a = overview.entities.find((e) => e.key === A)!;
-		expect(a).toMatchObject({ mentions: 5, classified: 5, counts: { positive: 2, neutral: 0, mixed: 1, negative: 2 } });
+		expect(a).toMatchObject({
+			mentions: 5,
+			classified: 5,
+			sample: 5,
+			counts: { positive: 2, neutral: 0, mixed: 1, negative: 2 },
+		});
 		expect(a.metrics.sentiment).toBe(60);
 		expect(a.metrics.mentionVisibility).toBe(50);
 		expect(a.metrics.positiveVisibility).toBe(20);
@@ -223,15 +240,17 @@ describe("IT-SNT-006 sentiment overview loader", () => {
 		expect(overview.coverage).toEqual({
 			responsesDetected: 10,
 			responsesWithMentions: 10,
+			responsesUnextractable: 0,
 			analyses: { completed: 7, pending: 0, failed: 1, noMentions: 0 },
 		});
+		expect(overview.aspectLabel).toBeNull();
 		expect(overview.bucket).toBe("day");
-		const point = overview.series.find((p) => Object.values(p.values).some((v) => v.classified > 0))!;
-		expect(point.values[A]).toEqual({ sentiment: 60, classified: 5 });
-		expect(point.values.brand).toEqual({ sentiment: null, classified: 0 });
-		expect(
-			overview.series.filter((p) => p.values[A].classified === 0).every((p) => p.values[A].sentiment === null),
-		).toBe(true);
+		const point = overview.series.find((p) => Object.values(p.values).some((v) => v.sample > 0))!;
+		expect(point.values[A]).toEqual({ sentiment: 60, sample: 5 });
+		expect(point.values.brand).toEqual({ sentiment: null, sample: 0 });
+		expect(overview.series.filter((p) => p.values[A].sample === 0).every((p) => p.values[A].sentiment === null)).toBe(
+			true,
+		);
 		expect(JSON.stringify(overview)).not.toContain("Answer 1:");
 		expect(JSON.stringify(overview)).not.toMatch(/openrouter|gpt-5/);
 	});
@@ -247,13 +266,36 @@ describe("IT-SNT-006 sentiment overview loader", () => {
 		expect(none.entities.every((e) => e.metrics.mentionVisibility === null && e.metrics.sentiment === null)).toBe(true);
 	});
 
-	it("uses aspect observations consistently when an aspect is selected", async () => {
+	it("B4: an aspect view scores the aspect sample while classifier coverage stays 5/5", async () => {
+		// T = 10, A mentioned in 5, all 5 classified, exactly 1 Price observation.
 		const overview = await loadSentimentOverview({ ...scope, aspect: "price" });
+		expect(overview.aspectLabel).toBe("Price");
 		const a = overview.entities.find((e) => e.key === A)!;
-		expect(a).toMatchObject({ mentions: 5, classified: 1, counts: { positive: 0, neutral: 0, mixed: 0, negative: 1 } });
+		expect(a).toMatchObject({
+			mentions: 5,
+			classified: 5,
+			sample: 1,
+			counts: { positive: 0, neutral: 0, mixed: 0, negative: 1 },
+		});
 		expect(a.metrics.sentiment).toBe(20);
+		expect(a.metrics.sampleVisibility).toBe(10);
+		expect(a.metrics.mentionVisibility).toBe(50);
 		expect(a.metrics.negativeVisibility).toBe(10);
-		expect(a.metrics.analysisCoverage).toBe(20);
+		expect(a.metrics.positiveVisibility).toBe(0);
+		expect(a.metrics.analysisCoverage).toBe(100);
+		expect(a.metrics.partial).toBe(false);
+		expect(a.lowSample).toBe(true);
+		// B is classified but never evaluated on Price: an empty sample, not a partial classification.
+		const b = overview.entities.find((e) => e.key === B)!;
+		expect(b).toMatchObject({ mentions: 1, classified: 1, sample: 0 });
+		expect(b.metrics.sentiment).toBeNull();
+		expect(b.metrics.partial).toBe(false);
+		// Roster, series and evidence all rest on the same Price sample.
+		expect(overview.chartRoster).toEqual(["brand", A, B]);
+		const point = overview.series.find((p) => p.values[A].sample > 0)!;
+		expect(point.values[A]).toEqual({ sentiment: 20, sample: 1 });
+		const evidence = await loadSentimentEvidence({ ...scope, entityKey: A, aspect: "price", limit: 10 });
+		expect(evidence.totalObservations).toBe(1);
 		expect(overview.availableAspects.find((x) => x.key === "price")?.count).toBe(1);
 		expect(overview.availableAspects.map((x) => x.key)).toEqual(["price", "coverage", "service", "other"]);
 	});
@@ -284,6 +326,12 @@ describe("IT-SNT-007 sentiment evidence loader", () => {
 		expect(top.tags).toEqual(["insurance"]);
 		expect(top.aspects).toEqual([{ key: "price", label: "Price", score: 20, category: "negative" }]);
 		expect(top.excerpt).toContain("Alpha is mentioned here");
+		// B7: the stored raw offsets resolve to the cited characters inside the excerpt window.
+		const span = top.evidence[0];
+		expect(top.excerpt.slice(span.start - top.excerptStart, span.end - top.excerptStart)).toBe(
+			"Alpha is mentioned here",
+		);
+		expect(span.polarity).toBe("positive");
 		expect(evidence.lowest[0].sources).toEqual([]);
 		expect(JSON.stringify(evidence)).not.toMatch(/openrouter|gpt-5|classifier/);
 	});
@@ -293,6 +341,13 @@ describe("IT-SNT-007 sentiment evidence loader", () => {
 		expect(evidence.totalObservations).toBe(1);
 		expect(evidence.highest.map((i) => `${i.score}:${i.category}`)).toEqual(["20:negative"]);
 		expect(evidence.lowest).toEqual([]);
+		const span = evidence.highest[0].evidence[0];
+		expect(
+			evidence.highest[0].excerpt.slice(
+				span.start - evidence.highest[0].excerptStart,
+				span.end - evidence.highest[0].excerptStart,
+			),
+		).toBe("Sent IT too");
 	});
 
 	it("rejects an entity that does not belong to the brand", async () => {

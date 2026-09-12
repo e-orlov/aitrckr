@@ -13,7 +13,7 @@
  */
 import { expect, type Page, test } from "@playwright/test";
 import pg from "pg";
-import { brandUrl, DATABASE_URL, TEST_ORG_SLUG } from "../../fixtures";
+import { brandUrl, DATABASE_URL, TEST_API_KEY, TEST_ORG_SLUG } from "../../fixtures";
 
 const BRAND_ID = "sent-e2e";
 const BRAND_NAME = "Sentiment E2E";
@@ -36,6 +36,14 @@ const runId = (i: number) => uuid("3", i);
 // Alpha: 24 classified observations with distinct scores 10..100 plus repeats — enough for 10 highest + 10 lowest with 4 unused.
 const ALPHA_SCORES = [100, 96, 92, 88, 84, 80, 76, 72, 68, 64, 60, 56, 52, 50, 50, 48, 44, 40, 36, 32, 28, 24, 20, 10];
 const categoryFor = (score: number, mixed = false) => (score > 50 ? "positive" : score < 50 ? "negative" : mixed ? "mixed" : "neutral");
+const answerFor = (i: number) => `Synthetic answer ${i}. Alpha delivers a solid tariff while ${BRAND_NAME} keeps growing. Bravo is also named.`;
+const runIndex = (run: string) => Number.parseInt(run.slice(-12), 10);
+/** An exact evidence span with raw offsets into the seeded answer body. */
+const evidenceSpan = (run: string, quote: string, polarity: "positive" | "negative" | "neutral") => {
+	const start = answerFor(runIndex(run)).indexOf(quote);
+	if (start < 0) throw new Error(`quote "${quote}" is not in the seeded answer`);
+	return { quote, start, end: start + quote.length, polarity };
+};
 
 test.describe("Sentiment page", () => {
 	test.describe.configure({ mode: "serial" });
@@ -80,11 +88,17 @@ test.describe("Sentiment page", () => {
 					i % 2 === 0 ? PROMPTS.tagged : PROMPTS.plain,
 					BRAND_ID,
 					JSON.stringify({
-						choices: [{ message: { content: `Synthetic answer ${i}. Alpha delivers a solid tariff while ${BRAND_NAME} keeps growing. Bravo is also named.` } }],
+						choices: [{ message: { content: answerFor(i) } }],
 					}),
 					String(1 + (i % 12)),
 					String(i),
 				],
+			);
+		}
+		for (let i = 1; i <= RUN_COUNT; i++) {
+			await client.query(
+				`INSERT INTO sentiment_detections (prompt_run_id, brand_id, detector_version, status, mention_count) VALUES ($1, $2, $3, 'mentions', 1)`,
+				[runId(i), BRAND_ID, DETECTOR],
 			);
 		}
 		const mention = async (run: string, key: string, type: "brand" | "competitor", name: string) =>
@@ -118,7 +132,7 @@ test.describe("Sentiment page", () => {
 						key,
 						score,
 						categoryFor(score, mixed),
-						JSON.stringify(mixed ? [{ quote: "solid tariff", start: 0, end: 1 }, { quote: "keeps growing", start: 2, end: 3 }] : [{ quote: "Alpha delivers a solid tariff", start: 0, end: 1 }]),
+						JSON.stringify(mixed ? [evidenceSpan(run, "solid tariff", "positive"), evidenceSpan(run, "keeps growing", "negative")] : [evidenceSpan(run, "Alpha delivers a solid tariff", "positive")]),
 					],
 				)
 			).rows[0].id;
@@ -134,8 +148,8 @@ test.describe("Sentiment page", () => {
 				if (i <= 6) {
 					await client.query(
 						`INSERT INTO sentiment_aspect_observations (observation_id, taxonomy_version, aspect_key, aspect_label, score, category, confidence, evidence)
-						 VALUES ($1, $2, 'price', 'Price', $3, $4, 0.8, '[{"quote":"solid tariff","start":0,"end":1}]'::jsonb)`,
-						[obs, TAXONOMY, i <= 3 ? 80 : 30, i <= 3 ? "positive" : "negative"],
+						 VALUES ($1, $2, 'price', 'Price', $3, $4, 0.8, $5::jsonb)`,
+						[obs, TAXONOMY, i <= 3 ? 80 : 30, i <= 3 ? "positive" : "negative", JSON.stringify([evidenceSpan(runId(i), "solid tariff", i <= 3 ? "positive" : "negative")])],
 					);
 				}
 			} else if (i === 25) await analysis(runId(i), "failed");
@@ -273,17 +287,28 @@ test.describe("Sentiment page", () => {
 		await page.getByRole("menuitemradio", { name: "Price" }).click();
 		await expect(page).toHaveURL(/aspect=price/);
 		await expect(page).toHaveURL(/sort=name/);
-		// Alpha under Price: 6 aspect rows (3 × 80, 3 × 30) → 55, of 28 mentions.
+		// Alpha under Price: 6 aspect rows (3 × 80, 3 × 30) → 55 over a 6-answer Price sample; Price Mention Visibility 6/30 = 20 %,
+		// Positive 3/30 = 10 %, Negative 10 %; classifier coverage stays 24/28 = 86 % and the Partial cue reflects only that.
 		const alphaRow = page.getByTestId("sentiment-leaderboard-row").filter({ hasText: "Alpha" });
-		await expect(alphaRow.locator("td").nth(3)).toContainText("55 · 6 of 28 analyzed mentions");
-		await expect(page.getByTestId("sentiment-headline-mentions")).toContainText("(Price)");
+		await expect(alphaRow.locator("td").nth(3)).toContainText("55 · 6 Price mentions");
+		await expect(alphaRow.locator("td").nth(4)).toHaveText("20%");
+		await expect(alphaRow.locator("td").nth(5)).toHaveText("10%");
+		await expect(alphaRow.locator("td").nth(6)).toHaveText("10%");
+		await expect(alphaRow.locator("td").nth(8)).toHaveText("86%");
+		await expect(page.getByText("Price Mention Visibility")).toBeVisible();
+		await expect(page.getByTestId("sentiment-headline-mentions")).toContainText("0 Price mentions");
+		await expect(page.getByTestId("sentiment-headline")).toHaveText("—");
+		// Bravo is classified (1 of 6) but never evaluated on Price: an empty sample, not a partial classification.
+		const bravoRow = page.getByTestId("sentiment-leaderboard-row").filter({ hasText: "Bravo" });
+		await expect(bravoRow.locator("td").nth(3)).toContainText("— · 0 Price mentions");
+		await expect(page.getByTestId("sentiment-legend").locator("li").nth(0)).toContainText("— · 0 Price");
 
 		const payloads: string[] = [];
 		page.on("request", (request) => {
 			if (request.url().includes("/_serverFn/")) payloads.push(request.url() + (request.postData() ?? ""));
 		});
 		await page.goto(`${PAGE_URL}?aspect=price&sort=name&q=stale-search&model=chatgpt`);
-		await expect(alphaRow.locator("td").nth(3)).toContainText("55 · 6 of 28 analyzed mentions");
+		await expect(alphaRow.locator("td").nth(3)).toContainText("55 · 6 Price mentions");
 		await expect(page).toHaveURL(/aspect=price/);
 		expect(payloads.length).toBeGreaterThan(0);
 		expect(payloads.join("\n")).not.toMatch(/stale-search/);
@@ -345,6 +370,82 @@ test.describe("Sentiment page", () => {
 		await expect(focused).toHaveAttribute("data-run-id", runId(1));
 		await expect(focused).toContainText("Linked response");
 		await expect(focused).toContainText("Synthetic answer 1.");
+	});
+
+	test("B7: the highlighted excerpt is the exact stored span, not a text search", async ({ page }) => {
+		await page.goto(PAGE_URL);
+		await page.getByTestId("sentiment-leaderboard-row").filter({ hasText: "Alpha" }).click();
+		const first = page.getByTestId("sentiment-evidence-highest").getByTestId("sentiment-evidence-item").first();
+		await expect(first.locator("mark")).toHaveCount(1);
+		await expect(first.locator("mark")).toHaveText("Alpha delivers a solid tariff");
+		// The excerpt around the span is the stored answer, cut at raw offsets.
+		await expect(first.getByTestId("sentiment-evidence-excerpt")).toContainText("Alpha delivers a solid tariff while Sentiment E2E keeps growing");
+	});
+
+	test("B6: deleting a prompt through the real API removes its runs and every sentiment row", async ({ request }) => {
+		const promptId = uuid("2", 9);
+		const run = uuid("3", 99);
+		await client.query(
+			`INSERT INTO prompts (id, brand_id, value, enabled, tags, system_tags, created_at, updated_at)
+			 VALUES ($1, $2, 'Prompt to delete', true, '{}', '{unbranded}', NOW(), NOW())`,
+			[promptId, BRAND_ID],
+		);
+		await client.query(
+			`INSERT INTO prompt_runs (id, prompt_id, brand_id, model, provider, version, web_search_enabled, raw_output, web_queries, brand_mentioned, competitors_mentioned, created_at)
+			 VALUES ($1, $2, $3, 'chatgpt', 'openrouter', 'e2e', true, $4, '{}', true, '{}', NOW())`,
+			[run, promptId, BRAND_ID, JSON.stringify({ choices: [{ message: { content: answerFor(99) } }] })],
+		);
+		await client.query(
+			`INSERT INTO citations (prompt_run_id, prompt_id, brand_id, model, url, domain, title, citation_index, created_at)
+			 VALUES ($1, $2, $3, 'chatgpt', 'https://source-del.example.test/', 'source-del.example.test', 'Del', 0, NOW())`,
+			[run, promptId, BRAND_ID],
+		);
+		await client.query(
+			`INSERT INTO sentiment_detections (prompt_run_id, brand_id, detector_version, status, mention_count) VALUES ($1, $2, $3, 'mentions', 1)`,
+			[run, BRAND_ID, DETECTOR],
+		);
+		const alpha = COMPETITORS[0];
+		const { rows: m } = await client.query<{ id: string }>(
+			`INSERT INTO prompt_run_entity_mentions (prompt_run_id, brand_id, entity_type, competitor_id, entity_key, entity_name, detector_version)
+			 VALUES ($1, $2, 'competitor', $3::uuid, $3::text, $4, $5) RETURNING id`,
+			[run, BRAND_ID, alpha.id, alpha.name, DETECTOR],
+		);
+		const { rows: a } = await client.query<{ id: string }>(
+			`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at)
+			 VALUES ($1, $2, $3, $4, 'completed', NOW()) RETURNING id`,
+			[run, BRAND_ID, CLASSIFIER, TAXONOMY],
+		);
+		const { rows: o } = await client.query<{ id: string }>(
+			`INSERT INTO sentiment_observations (analysis_id, mention_id, prompt_run_id, brand_id, entity_type, competitor_id, entity_key, score, category, confidence, evidence)
+			 VALUES ($1, $2, $3, $4, 'competitor', $5::uuid, $5::text, 80, 'positive', 0.9, $6::jsonb) RETURNING id`,
+			[a[0].id, m[0].id, run, BRAND_ID, alpha.id, JSON.stringify([evidenceSpan(run, "solid tariff", "positive")])],
+		);
+		await client.query(
+			`INSERT INTO sentiment_aspect_observations (observation_id, taxonomy_version, aspect_key, aspect_label, score, category, confidence, evidence)
+			 VALUES ($1, $2, 'price', 'Price', 80, 'positive', 0.8, '[]'::jsonb)`,
+			[o[0].id, TAXONOMY],
+		);
+
+		const response = await request.delete(`/api/v1/prompts/${promptId}`, { headers: { Authorization: `Bearer ${TEST_API_KEY}` } });
+		expect(response.status()).toBe(200);
+		const body = (await response.json()) as { id: string; deletedRunsCount: number };
+		expect(body.id).toBe(promptId);
+		expect(body.deletedRunsCount).toBe(1);
+
+		const { rows } = await client.query<{ n: string }>(
+			`SELECT (SELECT count(*) FROM prompt_runs WHERE id = $1)
+			      + (SELECT count(*) FROM sentiment_detections WHERE prompt_run_id = $1)
+			      + (SELECT count(*) FROM prompt_run_entity_mentions WHERE prompt_run_id = $1)
+			      + (SELECT count(*) FROM sentiment_analyses WHERE prompt_run_id = $1)
+			      + (SELECT count(*) FROM sentiment_observations WHERE prompt_run_id = $1)
+			      + (SELECT count(*) FROM sentiment_aspect_observations WHERE observation_id = $2)
+			      + (SELECT count(*) FROM citations WHERE prompt_run_id = $1) AS n`,
+			[run, o[0].id],
+		);
+		expect(Number(rows[0].n)).toBe(0);
+		// The rest of the seeded graph is untouched.
+		const { rows: remaining } = await client.query<{ n: number }>("SELECT count(*)::int AS n FROM sentiment_observations WHERE brand_id = $1", [BRAND_ID]);
+		expect(remaining[0].n).toBeGreaterThan(20);
 	});
 
 	test("deep link rejects a run that belongs to another prompt", async ({ page }) => {
@@ -422,6 +523,7 @@ async function cleanup(client: pg.Client) {
 	await client.query("DELETE FROM sentiment_observations WHERE brand_id = $1", [BRAND_ID]);
 	await client.query("DELETE FROM sentiment_analyses WHERE brand_id = $1", [BRAND_ID]);
 	await client.query("DELETE FROM prompt_run_entity_mentions WHERE brand_id = $1", [BRAND_ID]);
+	await client.query("DELETE FROM sentiment_detections WHERE brand_id = $1", [BRAND_ID]);
 	await client.query("DELETE FROM citations WHERE brand_id = $1", [BRAND_ID]);
 	await client.query("DELETE FROM prompt_runs WHERE brand_id = $1", [BRAND_ID]);
 	await client.query("DELETE FROM pgboss.job WHERE name = 'process-prompt' AND data->>'promptId' = ANY($1::text[])", [Object.values(PROMPTS)]).catch(() => undefined);

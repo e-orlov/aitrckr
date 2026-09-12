@@ -3,13 +3,18 @@
  * Deployment Smoke Tests against the disposable service database after
  * migrations. Proves on a REAL PostgreSQL what mocked adapters cannot:
  *
- *   1. the mention, analysis, observation and aspect tables reject
- *      inconsistent rows (score/category, entity identity, aspect key) and
- *      enforce one mention per run+entity, one analysis per run+version and
+ *   1. the detection, mention, analysis, observation and aspect tables
+ *      reject inconsistent rows (score/category, entity identity, aspect
+ *      key, receipt status/count) and enforce one receipt per run+detector
+ *      version, one mention per run+entity, one analysis per run+version and
  *      one observation per analysis+entity;
- *   2. concurrent `persistMentions` calls for one run leave exactly one row
- *      per entity, and `ensureAnalysis` is idempotent under concurrency;
- *   3. the classify-sentiment queue's effective policy is `exclusive` and
+ *   2. concurrent `persistDetection` calls for one run leave exactly one
+ *      receipt and one row per entity, `ensureAnalysis` is idempotent under
+ *      concurrency, and exactly one of many concurrent `claimAnalysis` calls
+ *      wins the row;
+ *   3. deleting a prompt run cascades to every sentiment row, while a
+ *      competitor with sentiment history cannot be deleted;
+ *   4. the classify-sentiment queue's effective policy is `exclusive` and
  *      concurrent `boss.send()` with one singleton key yields exactly one
  *      non-null job id.
  *
@@ -21,10 +26,12 @@
  *   DATABASE_URL=postgres://... pnpm -C apps/worker exec tsx scripts/verify-sentiment-db.ts
  */
 import {
+	claimAnalysis,
 	ensureAnalysis,
 	ensureSentimentQueue,
-	persistMentions,
+	persistDetection,
 	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_QUEUE,
 	SENTIMENT_TAXONOMY_VERSION,
 	sentimentSingletonKey,
@@ -62,7 +69,8 @@ async function expectRejected(client: Client, label: string, sql: string, params
 		await client.query(sql, params);
 	} catch (error) {
 		const code = (error as { code?: string }).code;
-		assert(code === "23514" || code === "23505", `${label} is rejected (${code})`);
+		// check_violation, unique_violation, foreign_key_violation
+		assert(code === "23514" || code === "23505" || code === "23503", `${label} is rejected (${code})`);
 		return;
 	}
 	assert(false, `${label} is rejected`);
@@ -109,6 +117,7 @@ async function cleanup(client: Client): Promise<void> {
 	await client.query("DELETE FROM sentiment_observations WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM sentiment_analyses WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM prompt_run_entity_mentions WHERE brand_id = $1", [BRAND]);
+	await client.query("DELETE FROM sentiment_detections WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM usage_events WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM prompt_runs WHERE brand_id = $1", [BRAND]);
 	await client.query("DELETE FROM prompts WHERE brand_id = $1", [BRAND]);
@@ -248,7 +257,9 @@ async function verifyIdempotentPersistence(client: Client): Promise<void> {
 		},
 	];
 	await Promise.all(
-		Array.from({ length: CONCURRENCY }, () => persistMentions({ promptRunId: RUN, brandId: BRAND, mentions })),
+		Array.from({ length: CONCURRENCY }, () =>
+			persistDetection({ promptRunId: RUN, brandId: BRAND, result: { status: "mentions", mentions } }),
+		),
 	);
 	const { rows } = await client.query<{ entity_key: string; n: number }>(
 		"SELECT entity_key, count(*)::int AS n FROM prompt_run_entity_mentions WHERE prompt_run_id = $1 GROUP BY entity_key ORDER BY entity_key",
@@ -256,7 +267,30 @@ async function verifyIdempotentPersistence(client: Client): Promise<void> {
 	);
 	assert(
 		rows.length === 2 && rows.every((row) => row.n === 1),
-		`${CONCURRENCY} concurrent persistMentions leave one row per entity`,
+		`${CONCURRENCY} concurrent persistDetection calls leave one row per entity`,
+	);
+	const receipts = await client.query<{ status: string; mention_count: number; n: number }>(
+		"SELECT status, mention_count, count(*)::int AS n FROM sentiment_detections WHERE prompt_run_id = $1 AND detector_version = $2 GROUP BY 1, 2",
+		[RUN, SENTIMENT_DETECTOR_VERSION],
+	);
+	assert(
+		receipts.rows.length === 1 &&
+			receipts.rows[0].n === 1 &&
+			receipts.rows[0].status === "mentions" &&
+			receipts.rows[0].mention_count === 2,
+		"they also leave exactly one current-version receipt with the detected count",
+	);
+	await expectRejected(
+		client,
+		"a receipt whose status disagrees with its mention count is rejected",
+		`INSERT INTO sentiment_detections (prompt_run_id, brand_id, detector_version, status, mention_count) VALUES ($1, $2, 'other-version', 'mentions', 0)`,
+		[RUN, BRAND],
+	);
+	await expectRejected(
+		client,
+		"a second receipt for the same run and detector version is rejected",
+		`INSERT INTO sentiment_detections (prompt_run_id, brand_id, detector_version, status, mention_count) VALUES ($1, $2, $3, 'no_mentions', 0)`,
+		[RUN, BRAND, SENTIMENT_DETECTOR_VERSION],
 	);
 	const analyses = await Promise.all(
 		Array.from({ length: CONCURRENCY }, () => ensureAnalysis({ promptRunId: RUN, brandId: BRAND })),
@@ -269,6 +303,67 @@ async function verifyIdempotentPersistence(client: Client): Promise<void> {
 		analyses[0].classifierVersion === SENTIMENT_CLASSIFIER_VERSION &&
 			analyses[0].taxonomyVersion === SENTIMENT_TAXONOMY_VERSION,
 		"the analysis row carries the current classifier and taxonomy versions",
+	);
+	const claims = await Promise.all(
+		Array.from({ length: CONCURRENCY }, () => claimAnalysis(analyses[0].id, { allowFinished: false })),
+	);
+	assert(
+		claims.filter((c) => c.claimed).length === 1 &&
+			claims.filter((c) => !c.claimed && c.status === "processing").length === CONCURRENCY - 1,
+		`exactly one of ${CONCURRENCY} concurrent claimAnalysis calls wins; the rest see "processing"`,
+	);
+	const [attempt] = (
+		await client.query<{ attempts: number; provider: string; model: string }>(
+			"SELECT attempts, provider, model FROM sentiment_analyses WHERE id = $1",
+			[analyses[0].id],
+		)
+	).rows;
+	assert(
+		attempt.attempts === 1 && attempt.provider === "openrouter" && attempt.model === "openai/gpt-5-mini",
+		"the winning claim records one attempt attributed to openrouter / openai/gpt-5-mini",
+	);
+}
+
+async function verifyCascade(client: Client): Promise<void> {
+	const [analysis] = (
+		await client.query<{ id: string }>("SELECT id FROM sentiment_analyses WHERE prompt_run_id = $1", [RUN])
+	).rows;
+	const [mention] = (
+		await client.query<{ id: string }>(
+			"SELECT id FROM prompt_run_entity_mentions WHERE prompt_run_id = $1 AND entity_key = $2",
+			[RUN, COMPETITOR],
+		)
+	).rows;
+	const [observation] = (
+		await client.query<{ id: string }>(
+			`INSERT INTO sentiment_observations (analysis_id, mention_id, prompt_run_id, brand_id, entity_type, competitor_id, entity_key, score, category, confidence, evidence)
+			 VALUES ($1, $2, $3, $4, 'competitor', $5::uuid, $5::text, 70, 'positive', 0.9, '[]'::jsonb) RETURNING id`,
+			[analysis.id, mention.id, RUN, BRAND, COMPETITOR],
+		)
+	).rows;
+	await client.query(
+		`INSERT INTO sentiment_aspect_observations (observation_id, taxonomy_version, aspect_key, aspect_label, score, category, confidence, evidence)
+		 VALUES ($1, $2, 'price', 'Price', 70, 'positive', 0.9, '[]'::jsonb)`,
+		[observation.id, SENTIMENT_TAXONOMY_VERSION],
+	);
+	await expectRejected(
+		client,
+		"a competitor with sentiment history cannot be hard-deleted",
+		"DELETE FROM competitors WHERE id = $1",
+		[COMPETITOR],
+	);
+	await client.query("DELETE FROM prompt_runs WHERE id = $1", [RUN]);
+	const leftovers = await client.query<{ n: number }>(
+		`SELECT (SELECT count(*) FROM sentiment_detections WHERE prompt_run_id = $1)
+		      + (SELECT count(*) FROM prompt_run_entity_mentions WHERE prompt_run_id = $1)
+		      + (SELECT count(*) FROM sentiment_analyses WHERE prompt_run_id = $1)
+		      + (SELECT count(*) FROM sentiment_observations WHERE prompt_run_id = $1)
+		      + (SELECT count(*) FROM sentiment_aspect_observations WHERE observation_id = $2) AS n`,
+		[RUN, observation.id],
+	);
+	assert(
+		Number(leftovers.rows[0].n) === 0,
+		"deleting the prompt run cascades to receipt, mentions, analysis, observation and aspects",
 	);
 }
 
@@ -307,6 +402,7 @@ async function main(): Promise<void> {
 		await verifyIdempotentPersistence(client);
 		await boss.start();
 		await verifyQueueDedupe(client, boss);
+		await verifyCascade(client);
 	} finally {
 		await boss.stop({ graceful: false, timeout: 5000 }).catch(() => {});
 		await cleanup(client).catch(() => {});
