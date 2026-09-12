@@ -1,5 +1,5 @@
 {
-  "id": "a587ecac-ef4e-4ee5-9256-92ba7679ef57",
+  "id": "5283aae9-afc0-49fc-84e5-b994a92d973a",
   "prevId": "661025f8-3d75-47f0-abb4-eda806d03956",
   "version": "7",
   "dialect": "postgresql",
@@ -683,6 +683,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "superseded_at": {
+          "name": "superseded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -1355,6 +1361,13 @@
         },
         "attempts": {
           "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "claim_generation": {
+          "name": "claim_generation",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,

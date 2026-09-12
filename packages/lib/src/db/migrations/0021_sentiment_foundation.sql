@@ -9,6 +9,7 @@ CREATE TABLE "prompt_run_entity_mentions" (
 	"detector_version" text NOT NULL,
 	"matched_terms" text[] DEFAULT '{}' NOT NULL,
 	"detected_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"superseded_at" timestamp with time zone,
 	CONSTRAINT "prompt_run_entity_mentions_entity_type_check" CHECK ("prompt_run_entity_mentions"."entity_type" IN ('brand', 'competitor')),
 	CONSTRAINT "prompt_run_entity_mentions_entity_identity_check" CHECK (("prompt_run_entity_mentions"."entity_type" = 'brand' AND "prompt_run_entity_mentions"."competitor_id" IS NULL AND "prompt_run_entity_mentions"."entity_key" = 'brand') OR ("prompt_run_entity_mentions"."entity_type" = 'competitor' AND "prompt_run_entity_mentions"."competitor_id" IS NOT NULL AND "prompt_run_entity_mentions"."entity_key" = "prompt_run_entity_mentions"."competitor_id"::text))
 );
@@ -28,6 +29,7 @@ CREATE TABLE "sentiment_analyses" (
 	"error_code" text,
 	"error_message" text,
 	"attempts" integer DEFAULT 0 NOT NULL,
+	"claim_generation" integer DEFAULT 0 NOT NULL,
 	"started_at" timestamp with time zone,
 	"completed_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,

@@ -425,6 +425,12 @@ export const sentimentDetections = pgTable(
  * names and is kept for the older pages — is the stable mention denominator
  * for sentiment. `entity_key` is `brand` or the competitor uuid so the
  * uniqueness holds although `competitor_id` is nullable.
+ *
+ * Lifecycle: a row is *current* while `superseded_at` is null and its
+ * detector version is the current one. When a newer detector pass no longer
+ * finds the entity, a row that observations still reference is superseded
+ * (kept for the audit trail, invisible to the current projection) instead of
+ * deleted; a later pass that finds the entity again reactivates the same row.
  */
 export const promptRunEntityMentions = pgTable(
 	"prompt_run_entity_mentions",
@@ -443,6 +449,7 @@ export const promptRunEntityMentions = pgTable(
 		detectorVersion: text("detector_version").notNull(),
 		matchedTerms: text("matched_terms").array().notNull().default([]),
 		detectedAt: timestamp("detected_at", { withTimezone: true }).defaultNow().notNull(),
+		supersededAt: timestamp("superseded_at", { withTimezone: true }),
 	},
 	(table) => ({
 		runEntityUnique: uniqueIndex("prompt_run_entity_mentions_run_entity_idx").on(table.promptRunId, table.entityKey),
@@ -465,8 +472,12 @@ export const promptRunEntityMentions = pgTable(
  * exactly one worker (a conditional update on the status), and ends
  * `completed`, `no_mentions` (no provider call was needed) or `failed`.
  * `input_hash` is the canonical classifier input the completed result
- * belongs to; a mismatch means the run is eligible again. Provider/model are
- * attempt attribution and audit metadata only and are never shown on the page.
+ * belongs to; a mismatch means the run is eligible again. `claim_generation`
+ * increments on every successful claim and fences every later write: a
+ * claimant may only complete, fail or replace observations while its
+ * generation is still the row's, so an attempt that outlived its lease can
+ * never overwrite a newer attempt. Provider/model are attempt attribution and
+ * audit metadata only and are never shown on the page.
  */
 export const sentimentAnalyses = pgTable(
 	"sentiment_analyses",
@@ -488,6 +499,7 @@ export const sentimentAnalyses = pgTable(
 		errorCode: text("error_code"),
 		errorMessage: text("error_message"),
 		attempts: integer("attempts").notNull().default(0),
+		claimGeneration: integer("claim_generation").notNull().default(0),
 		startedAt: timestamp("started_at", { withTimezone: true }),
 		completedAt: timestamp("completed_at", { withTimezone: true }),
 		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
