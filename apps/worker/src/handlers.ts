@@ -1,4 +1,3 @@
-import * as Sentry from "@sentry/node";
 import { getDeployment } from "@workspace/deployment";
 import type { OnboardingSuggestion } from "@workspace/lib/onboarding";
 import type { SentimentJobData } from "@workspace/lib/sentiment";
@@ -11,24 +10,7 @@ import { type GenerateReportData, generateReportJob } from "./jobs/generate-repo
 import { type ProcessPromptData, processPromptJob } from "./jobs/process-prompt";
 import { type ScheduleMaintenanceData, scheduleMaintenanceJob } from "./jobs/schedule-maintenance";
 import { type SyncAuth0MembershipsData, syncAuth0MembershipsJob } from "./jobs/sync-auth0-memberships";
-
-/**
- * Wraps a pg-boss handler to report errors to Sentry before re-throwing.
- * Preserves the handler's return value (stored by pg-boss as the job output).
- */
-function withSentry<T, R>(queueName: string, handler: (jobs: Job<T>[]) => Promise<R>): (jobs: Job<T>[]) => Promise<R> {
-	return async (jobs) => {
-		try {
-			return await handler(jobs);
-		} catch (error) {
-			Sentry.withScope((scope) => {
-				scope.setTag("queue", queueName);
-				Sentry.captureException(error);
-			});
-			throw error;
-		}
-	};
-}
+import { withSentry } from "./sentry-wrap";
 
 /**
  * Register all job handlers with pg-boss.

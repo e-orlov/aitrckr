@@ -8,6 +8,7 @@
 		"start": "tsx src/index.ts",
 		"build": "tsc -p tsconfig.json",
 		"check-types": "tsc --noEmit",
+		"test": "node --import tsx --test \"src/**/*.test.ts\"",
 		"backfill:source-classification": "tsx --env-file=../web/.env scripts/source-classification-backfill.ts",
 		"backfill:sentiment": "tsx --env-file=../web/.env scripts/sentiment-backfill.ts"
 	},
