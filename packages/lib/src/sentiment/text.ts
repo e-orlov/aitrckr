@@ -60,19 +60,24 @@ export function normalizeIndexed(raw: string): IndexedText {
 		out.ends.push(end);
 	};
 	let rawIndex = 0;
-	let pendingSpace: { start: number; end: number } | null = null;
+	// Raw span of the whitespace run waiting to be emitted as one space; -1 when none is pending.
+	let spaceStart = -1;
+	let spaceEnd = -1;
 	for (const char of raw) {
 		const rawStart = rawIndex;
 		rawIndex += char.length;
 		for (const unit of char.normalize("NFKC").toLowerCase()) {
 			if (WHITESPACE.test(unit)) {
 				// Leading whitespace is trimmed; an inner run collapses to one space spanning the whole run.
-				if (units.length > 0) pendingSpace = { start: pendingSpace?.start ?? rawStart, end: rawIndex };
+				if (units.length > 0) {
+					if (spaceStart < 0) spaceStart = rawStart;
+					spaceEnd = rawIndex;
+				}
 				continue;
 			}
-			if (pendingSpace) {
-				push(" ", pendingSpace.start, pendingSpace.end);
-				pendingSpace = null;
+			if (spaceStart >= 0) {
+				push(" ", spaceStart, spaceEnd);
+				spaceStart = -1;
 			}
 			for (const codeUnit of unit.split("")) push(codeUnit, rawStart, rawIndex);
 		}
