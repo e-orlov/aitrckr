@@ -1,5 +1,5 @@
 {
-  "id": "9c7c0e4a-2428-472c-8898-1e2c6715f8d3",
+  "id": "a587ecac-ef4e-4ee5-9256-92ba7679ef57",
   "prevId": "661025f8-3d75-47f0-abb4-eda806d03956",
   "version": "7",
   "dialect": "postgresql",
@@ -740,7 +740,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "prompt_run_entity_mentions_brand_id_brands_id_fk": {
@@ -1448,7 +1448,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "sentiment_analyses_brand_id_brands_id_fk": {
@@ -1570,6 +1570,33 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "sentiment_aspect_observations_aspect_score_idx": {
+          "name": "sentiment_aspect_observations_aspect_score_idx",
+          "columns": [
+            {
+              "expression": "taxonomy_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "aspect_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "score",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1583,7 +1610,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -1606,6 +1633,149 @@
         "sentiment_aspect_observations_confidence_check": {
           "name": "sentiment_aspect_observations_confidence_check",
           "value": "\"sentiment_aspect_observations\".\"confidence\" >= 0 AND \"sentiment_aspect_observations\".\"confidence\" <= 1"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.sentiment_detections": {
+      "name": "sentiment_detections",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "prompt_run_id": {
+          "name": "prompt_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "brand_id": {
+          "name": "brand_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "detector_version": {
+          "name": "detector_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mention_count": {
+          "name": "mention_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "detected_at": {
+          "name": "detected_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "sentiment_detections_run_version_idx": {
+          "name": "sentiment_detections_run_version_idx",
+          "columns": [
+            {
+              "expression": "prompt_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "detector_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "sentiment_detections_brand_version_status_idx": {
+          "name": "sentiment_detections_brand_version_status_idx",
+          "columns": [
+            {
+              "expression": "brand_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "detector_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "sentiment_detections_prompt_run_id_prompt_runs_id_fk": {
+          "name": "sentiment_detections_prompt_run_id_prompt_runs_id_fk",
+          "tableFrom": "sentiment_detections",
+          "tableTo": "prompt_runs",
+          "columnsFrom": [
+            "prompt_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "sentiment_detections_brand_id_brands_id_fk": {
+          "name": "sentiment_detections_brand_id_brands_id_fk",
+          "tableFrom": "sentiment_detections",
+          "tableTo": "brands",
+          "columnsFrom": [
+            "brand_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "sentiment_detections_status_check": {
+          "name": "sentiment_detections_status_check",
+          "value": "\"sentiment_detections\".\"status\" IN ('mentions', 'no_mentions', 'unextractable')"
+        },
+        "sentiment_detections_mention_count_check": {
+          "name": "sentiment_detections_mention_count_check",
+          "value": "\"sentiment_detections\".\"mention_count\" >= 0 AND ((\"sentiment_detections\".\"status\" = 'mentions') = (\"sentiment_detections\".\"mention_count\" > 0))"
         }
       },
       "isRLSEnabled": true
@@ -1743,6 +1913,33 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "sentiment_observations_brand_entity_score_idx": {
+          "name": "sentiment_observations_brand_entity_score_idx",
+          "columns": [
+            {
+              "expression": "brand_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "entity_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "score",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1756,7 +1953,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "sentiment_observations_mention_id_prompt_run_entity_mentions_id_fk": {
@@ -1769,7 +1966,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "sentiment_observations_prompt_run_id_prompt_runs_id_fk": {
@@ -1782,7 +1979,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "sentiment_observations_brand_id_brands_id_fk": {

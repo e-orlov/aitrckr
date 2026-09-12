@@ -371,6 +371,52 @@ export type NewSourceDomainClassificationRecord = typeof sourceDomainClassificat
 // ============================================================================
 // Sentiment (SENT-01)
 // ============================================================================
+//
+// Everything below hangs off a prompt run and is deleted with it (ON DELETE
+// CASCADE), so the existing prompt/run deletion sequence — including the one
+// an older application image executes — never trips over sentiment rows.
+// Competitor references stay restrictive: a competitor with sentiment history
+// cannot be hard-deleted (its identity is permanent since SENT-R0).
+
+/**
+ * Run-level receipt that a versioned detector scanned this run. This — not
+ * the presence of mention rows — is what says whether a run was visited:
+ * `mentions` and `no_mentions` are completed scans of an extractable answer,
+ * `unextractable` records that the stored output had no answer text. A run
+ * without a current-version receipt has not been scanned.
+ */
+export const sentimentDetections = pgTable(
+	"sentiment_detections",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		promptRunId: uuid("prompt_run_id")
+			.references(() => promptRuns.id, { onDelete: "cascade" })
+			.notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		detectorVersion: text("detector_version").notNull(),
+		status: text("status").notNull(),
+		mentionCount: integer("mention_count").notNull().default(0),
+		detectedAt: timestamp("detected_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		runVersionUnique: uniqueIndex("sentiment_detections_run_version_idx").on(table.promptRunId, table.detectorVersion),
+		brandVersionStatusIdx: index("sentiment_detections_brand_version_status_idx").on(
+			table.brandId,
+			table.detectorVersion,
+			table.status,
+		),
+		statusCheck: check(
+			"sentiment_detections_status_check",
+			sql`${table.status} IN ('mentions', 'no_mentions', 'unextractable')`,
+		),
+		mentionCountCheck: check(
+			"sentiment_detections_mention_count_check",
+			sql`${table.mentionCount} >= 0 AND ((${table.status} = 'mentions') = (${table.mentionCount} > 0))`,
+		),
+	}),
+).enableRLS();
 
 /**
  * Deterministic entity mentions: one row per stored prompt run and entity
@@ -385,7 +431,7 @@ export const promptRunEntityMentions = pgTable(
 	{
 		id: uuid("id").defaultRandom().primaryKey().notNull(),
 		promptRunId: uuid("prompt_run_id")
-			.references(() => promptRuns.id)
+			.references(() => promptRuns.id, { onDelete: "cascade" })
 			.notNull(),
 		brandId: text("brand_id")
 			.references(() => brands.id)
@@ -415,16 +461,19 @@ export const promptRunEntityMentions = pgTable(
 /**
  * One classifier pass over one prompt run for one classifier version. The
  * lifecycle is what makes retries and the backfill idempotent: a row is
- * created `pending` when the job is queued, moves through `processing`, and
- * ends `completed`, `no_mentions` (no provider call was needed) or `failed`.
- * Provider/model are audit metadata only and are never shown on the page.
+ * created `pending` when the job is queued, is claimed `processing` by
+ * exactly one worker (a conditional update on the status), and ends
+ * `completed`, `no_mentions` (no provider call was needed) or `failed`.
+ * `input_hash` is the canonical classifier input the completed result
+ * belongs to; a mismatch means the run is eligible again. Provider/model are
+ * attempt attribution and audit metadata only and are never shown on the page.
  */
 export const sentimentAnalyses = pgTable(
 	"sentiment_analyses",
 	{
 		id: uuid("id").defaultRandom().primaryKey().notNull(),
 		promptRunId: uuid("prompt_run_id")
-			.references(() => promptRuns.id)
+			.references(() => promptRuns.id, { onDelete: "cascade" })
 			.notNull(),
 		brandId: text("brand_id")
 			.references(() => brands.id)
@@ -465,21 +514,21 @@ export const sentimentAnalyses = pgTable(
  * Entity-level sentiment for one mention within one analysis. Score and
  * category are stored together and cross-checked so an inconsistent pair can
  * never be persisted: Positive 51–100, Negative 0–49, Neutral and Mixed
- * exactly 50. Evidence is a bounded list of exact excerpts from the stored
- * answer with their locator in the normalized body.
+ * exactly 50. Evidence is a bounded list of exact excerpts of the stored
+ * answer with raw-body offsets and a polarity per excerpt.
  */
 export const sentimentObservations = pgTable(
 	"sentiment_observations",
 	{
 		id: uuid("id").defaultRandom().primaryKey().notNull(),
 		analysisId: uuid("analysis_id")
-			.references(() => sentimentAnalyses.id)
+			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
 			.notNull(),
 		mentionId: uuid("mention_id")
-			.references(() => promptRunEntityMentions.id)
+			.references(() => promptRunEntityMentions.id, { onDelete: "cascade" })
 			.notNull(),
 		promptRunId: uuid("prompt_run_id")
-			.references(() => promptRuns.id)
+			.references(() => promptRuns.id, { onDelete: "cascade" })
 			.notNull(),
 		brandId: text("brand_id")
 			.references(() => brands.id)
@@ -502,6 +551,11 @@ export const sentimentObservations = pgTable(
 			table.brandId,
 			table.entityKey,
 			table.promptRunId,
+		),
+		brandEntityScoreIdx: index("sentiment_observations_brand_entity_score_idx").on(
+			table.brandId,
+			table.entityKey,
+			table.score,
 		),
 		scoreCheck: check("sentiment_observations_score_check", sql`${table.score} >= 0 AND ${table.score} <= 100`),
 		categoryCheck: check(
@@ -529,7 +583,7 @@ export const sentimentAspectObservations = pgTable(
 	{
 		id: uuid("id").defaultRandom().primaryKey().notNull(),
 		observationId: uuid("observation_id")
-			.references(() => sentimentObservations.id)
+			.references(() => sentimentObservations.id, { onDelete: "cascade" })
 			.notNull(),
 		taxonomyVersion: text("taxonomy_version").notNull(),
 		aspectKey: text("aspect_key").notNull(),
@@ -545,6 +599,11 @@ export const sentimentAspectObservations = pgTable(
 			table.observationId,
 			table.taxonomyVersion,
 			table.aspectKey,
+		),
+		aspectScoreIdx: index("sentiment_aspect_observations_aspect_score_idx").on(
+			table.taxonomyVersion,
+			table.aspectKey,
+			table.score,
 		),
 		aspectKeyCheck: check(
 			"sentiment_aspect_observations_aspect_key_check",
@@ -562,6 +621,7 @@ export const sentimentAspectObservations = pgTable(
 	}),
 ).enableRLS();
 
+export type SentimentDetection = typeof sentimentDetections.$inferSelect;
 export type PromptRunEntityMention = typeof promptRunEntityMentions.$inferSelect;
 export type NewPromptRunEntityMention = typeof promptRunEntityMentions.$inferInsert;
 export type SentimentAnalysis = typeof sentimentAnalyses.$inferSelect;
