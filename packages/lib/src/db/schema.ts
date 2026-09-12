@@ -368,6 +368,206 @@ export const sourceDomainClassifications = pgTable(
 export type SourceDomainClassificationRecord = typeof sourceDomainClassifications.$inferSelect;
 export type NewSourceDomainClassificationRecord = typeof sourceDomainClassifications.$inferInsert;
 
+// ============================================================================
+// Sentiment (SENT-01)
+// ============================================================================
+
+/**
+ * Deterministic entity mentions: one row per stored prompt run and entity
+ * (own brand or a competitor by id) found in the answer body by a versioned
+ * detector. This — not `prompt_runs.competitors_mentioned`, which stores
+ * names and is kept for the older pages — is the stable mention denominator
+ * for sentiment. `entity_key` is `brand` or the competitor uuid so the
+ * uniqueness holds although `competitor_id` is nullable.
+ */
+export const promptRunEntityMentions = pgTable(
+	"prompt_run_entity_mentions",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		promptRunId: uuid("prompt_run_id")
+			.references(() => promptRuns.id)
+			.notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		entityType: text("entity_type").notNull(),
+		competitorId: uuid("competitor_id").references(() => competitors.id),
+		entityKey: text("entity_key").notNull(),
+		entityName: text("entity_name").notNull(),
+		detectorVersion: text("detector_version").notNull(),
+		matchedTerms: text("matched_terms").array().notNull().default([]),
+		detectedAt: timestamp("detected_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		runEntityUnique: uniqueIndex("prompt_run_entity_mentions_run_entity_idx").on(table.promptRunId, table.entityKey),
+		brandEntityIdx: index("prompt_run_entity_mentions_brand_entity_idx").on(table.brandId, table.entityKey),
+		entityTypeCheck: check(
+			"prompt_run_entity_mentions_entity_type_check",
+			sql`${table.entityType} IN ('brand', 'competitor')`,
+		),
+		entityIdentityCheck: check(
+			"prompt_run_entity_mentions_entity_identity_check",
+			sql`(${table.entityType} = 'brand' AND ${table.competitorId} IS NULL AND ${table.entityKey} = 'brand') OR (${table.entityType} = 'competitor' AND ${table.competitorId} IS NOT NULL AND ${table.entityKey} = ${table.competitorId}::text)`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * One classifier pass over one prompt run for one classifier version. The
+ * lifecycle is what makes retries and the backfill idempotent: a row is
+ * created `pending` when the job is queued, moves through `processing`, and
+ * ends `completed`, `no_mentions` (no provider call was needed) or `failed`.
+ * Provider/model are audit metadata only and are never shown on the page.
+ */
+export const sentimentAnalyses = pgTable(
+	"sentiment_analyses",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		promptRunId: uuid("prompt_run_id")
+			.references(() => promptRuns.id)
+			.notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		classifierVersion: text("classifier_version").notNull(),
+		taxonomyVersion: text("taxonomy_version").notNull(),
+		inputHash: text("input_hash"),
+		status: text("status").notNull().default("pending"),
+		provider: text("provider"),
+		model: text("model"),
+		webSearch: boolean("web_search"),
+		errorCode: text("error_code"),
+		errorMessage: text("error_message"),
+		attempts: integer("attempts").notNull().default(0),
+		startedAt: timestamp("started_at", { withTimezone: true }),
+		completedAt: timestamp("completed_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.$onUpdate(() => new Date())
+			.notNull(),
+	},
+	(table) => ({
+		runVersionUnique: uniqueIndex("sentiment_analyses_run_version_idx").on(table.promptRunId, table.classifierVersion),
+		brandStatusIdx: index("sentiment_analyses_brand_status_idx").on(
+			table.brandId,
+			table.classifierVersion,
+			table.status,
+		),
+		statusCheck: check(
+			"sentiment_analyses_status_check",
+			sql`${table.status} IN ('pending', 'processing', 'completed', 'no_mentions', 'failed')`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * Entity-level sentiment for one mention within one analysis. Score and
+ * category are stored together and cross-checked so an inconsistent pair can
+ * never be persisted: Positive 51–100, Negative 0–49, Neutral and Mixed
+ * exactly 50. Evidence is a bounded list of exact excerpts from the stored
+ * answer with their locator in the normalized body.
+ */
+export const sentimentObservations = pgTable(
+	"sentiment_observations",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		analysisId: uuid("analysis_id")
+			.references(() => sentimentAnalyses.id)
+			.notNull(),
+		mentionId: uuid("mention_id")
+			.references(() => promptRunEntityMentions.id)
+			.notNull(),
+		promptRunId: uuid("prompt_run_id")
+			.references(() => promptRuns.id)
+			.notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		entityType: text("entity_type").notNull(),
+		competitorId: uuid("competitor_id").references(() => competitors.id),
+		entityKey: text("entity_key").notNull(),
+		score: smallint("score").notNull(),
+		category: text("category").notNull(),
+		confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
+		evidence: jsonb("evidence").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		analysisEntityUnique: uniqueIndex("sentiment_observations_analysis_entity_idx").on(
+			table.analysisId,
+			table.entityKey,
+		),
+		brandEntityRunIdx: index("sentiment_observations_brand_entity_run_idx").on(
+			table.brandId,
+			table.entityKey,
+			table.promptRunId,
+		),
+		scoreCheck: check("sentiment_observations_score_check", sql`${table.score} >= 0 AND ${table.score} <= 100`),
+		categoryCheck: check(
+			"sentiment_observations_category_check",
+			sql`(${table.category} = 'positive' AND ${table.score} >= 51) OR (${table.category} = 'negative' AND ${table.score} <= 49) OR (${table.category} IN ('neutral', 'mixed') AND ${table.score} = 50)`,
+		),
+		confidenceCheck: check(
+			"sentiment_observations_confidence_check",
+			sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+		),
+		entityIdentityCheck: check(
+			"sentiment_observations_entity_identity_check",
+			sql`(${table.entityType} = 'brand' AND ${table.competitorId} IS NULL AND ${table.entityKey} = 'brand') OR (${table.entityType} = 'competitor' AND ${table.competitorId} IS NOT NULL AND ${table.entityKey} = ${table.competitorId}::text)`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * Aspect-level sentiment (price, coverage, service, other) under one entity
+ * observation, keyed by the versioned taxonomy so a later taxonomy cannot
+ * silently rewrite what an older row meant.
+ */
+export const sentimentAspectObservations = pgTable(
+	"sentiment_aspect_observations",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		observationId: uuid("observation_id")
+			.references(() => sentimentObservations.id)
+			.notNull(),
+		taxonomyVersion: text("taxonomy_version").notNull(),
+		aspectKey: text("aspect_key").notNull(),
+		aspectLabel: text("aspect_label").notNull(),
+		score: smallint("score").notNull(),
+		category: text("category").notNull(),
+		confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
+		evidence: jsonb("evidence").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		observationAspectUnique: uniqueIndex("sentiment_aspect_observations_observation_aspect_idx").on(
+			table.observationId,
+			table.taxonomyVersion,
+			table.aspectKey,
+		),
+		aspectKeyCheck: check(
+			"sentiment_aspect_observations_aspect_key_check",
+			sql`${table.aspectKey} IN ('price', 'coverage', 'service', 'other')`,
+		),
+		scoreCheck: check("sentiment_aspect_observations_score_check", sql`${table.score} >= 0 AND ${table.score} <= 100`),
+		categoryCheck: check(
+			"sentiment_aspect_observations_category_check",
+			sql`(${table.category} = 'positive' AND ${table.score} >= 51) OR (${table.category} = 'negative' AND ${table.score} <= 49) OR (${table.category} IN ('neutral', 'mixed') AND ${table.score} = 50)`,
+		),
+		confidenceCheck: check(
+			"sentiment_aspect_observations_confidence_check",
+			sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+		),
+	}),
+).enableRLS();
+
+export type PromptRunEntityMention = typeof promptRunEntityMentions.$inferSelect;
+export type NewPromptRunEntityMention = typeof promptRunEntityMentions.$inferInsert;
+export type SentimentAnalysis = typeof sentimentAnalyses.$inferSelect;
+export type SentimentObservation = typeof sentimentObservations.$inferSelect;
+export type SentimentAspectObservation = typeof sentimentAspectObservations.$inferSelect;
+
 // Encrypted overrides for credential environment variables, keyed by the env-var
 // name they stand in for. Separate table, strictest access.
 export const secrets = pgTable("secrets", {
