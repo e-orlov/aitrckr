@@ -52,38 +52,44 @@ const WHITESPACE = /\s/u;
  * across code points, which is fine because both sides use the same rule.
  */
 export function normalizeIndexed(raw: string): IndexedText {
-	const out: IndexedText = { text: "", starts: [], ends: [] };
-	const units: string[] = [];
-	const push = (unit: string, start: number, end: number) => {
-		units.push(unit);
-		out.starts.push(start);
-		out.ends.push(end);
-	};
+	const state: FoldState = { units: [], starts: [], ends: [], spaceStart: -1, spaceEnd: -1 };
 	let rawIndex = 0;
-	// Raw span of the whitespace run waiting to be emitted as one space; -1 when none is pending.
-	let spaceStart = -1;
-	let spaceEnd = -1;
 	for (const char of raw) {
 		const rawStart = rawIndex;
 		rawIndex += char.length;
-		for (const unit of char.normalize("NFKC").toLowerCase()) {
-			if (WHITESPACE.test(unit)) {
-				// Leading whitespace is trimmed; an inner run collapses to one space spanning the whole run.
-				if (units.length > 0) {
-					if (spaceStart < 0) spaceStart = rawStart;
-					spaceEnd = rawIndex;
-				}
-				continue;
-			}
-			if (spaceStart >= 0) {
-				push(" ", spaceStart, spaceEnd);
-				spaceStart = -1;
-			}
-			for (const codeUnit of unit.split("")) push(codeUnit, rawStart, rawIndex);
-		}
+		for (const unit of char.normalize("NFKC").toLowerCase()) consumeUnit(state, unit, rawStart, rawIndex);
 	}
-	out.text = units.join("");
-	return out;
+	return { text: state.units.join(""), starts: state.starts, ends: state.ends };
+}
+
+interface FoldState {
+	units: string[];
+	starts: number[];
+	ends: number[];
+	/** Raw span of the whitespace run waiting to be emitted as one space; `spaceStart` is -1 when none is pending. */
+	spaceStart: number;
+	spaceEnd: number;
+}
+
+function consumeUnit(state: FoldState, unit: string, rawStart: number, rawEnd: number): void {
+	if (WHITESPACE.test(unit)) {
+		// Leading whitespace is trimmed; an inner run collapses to one space spanning the whole run.
+		if (state.units.length === 0) return;
+		if (state.spaceStart < 0) state.spaceStart = rawStart;
+		state.spaceEnd = rawEnd;
+		return;
+	}
+	if (state.spaceStart >= 0) {
+		state.units.push(" ");
+		state.starts.push(state.spaceStart);
+		state.ends.push(state.spaceEnd);
+		state.spaceStart = -1;
+	}
+	for (const codeUnit of unit.split("")) {
+		state.units.push(codeUnit);
+		state.starts.push(rawStart);
+		state.ends.push(rawEnd);
+	}
 }
 
 export function normalizeText(input: string): string {
