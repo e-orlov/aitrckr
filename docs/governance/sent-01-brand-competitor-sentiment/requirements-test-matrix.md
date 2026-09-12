@@ -1,7 +1,8 @@
 # SENT-01 Brand & Competitor Sentiment — requirements and test traceability
 
 Executable contract frozen at CP1 (2026-09-11) before implementation. Two deliverables ship
-in order: **SENT-R0** (competitor identity preservation) and **SENT-R1/R2** (sentiment truth
+in order: **SENT-R0** (competitor identity preservation — **CLOSED 2026-09-12**, see
+`docs/governance/sent-r0-competitor-identity-closeout.md`) and **SENT-R1/R2** (sentiment truth
 foundation + analytics page). Status is updated as each PR lands.
 
 ## Frozen versions and constants
@@ -12,7 +13,7 @@ foundation + analytics page). Status is updated as each PR lands.
 | Mention detector version | `sent-detector-v1` |
 | Sentiment classifier version | `sent-classifier-v1` |
 | Aspect taxonomy version | `sent-aspects-v1` — canonical keys `price`, `coverage`, `service`, `other` |
-| Classifier model/path | existing `Provider.runStructuredResearch({ webSearch: true })` → OpenRouter `DEFAULT_RESEARCH_MODEL = openai/gpt-5-mini`, strict JSON schema, `plugins: [{ id: "web", engine: "native" }]`; no override, no Luna |
+| Classifier model/path | existing `Provider.runStructuredResearch({ webSearch: true })` → OpenRouter `DEFAULT_RESEARCH_MODEL = openai/gpt-5-mini`, strict JSON schema; web search through whatever the shared OpenRouter path sends on `main` (since LOC-01 #36: `openrouter:web_search` server tool, `engine: native`, German `user_location`, one mandatory search); no override, no Luna; validated by one bounded canary at CP6 |
 | Categories | Positive (51–100), Negative (0–49), Neutral (=50, no evaluation), Mixed (=50, both evaluations) |
 | Queue | new exclusive pg-boss queue `classify-sentiment`, singleton key `sentiment:<promptRunId>:<classifierVersion>`, `localConcurrency: 1`, retryLimit 3 / retryDelay 60 / backoff, expiry 900 s |
 | Dependencies added | none |
@@ -73,14 +74,14 @@ Acceptance fixture (encoded in `UT-SNT-002`): T=10; A: scores 100P, 80P, 50 Mixe
 
 | Test ID | Required proof | Where | Status |
 |---|---|---|---|
-| UT-ID-001 | Diff/upsert classification: insert / update / deactivate / reactivate / unchanged | `packages/lib/src/db/__tests__/competitor-roster.test.ts` | planned |
-| UT-ID-002 | Normalization, duplicate domain, ambiguous reactivation, unknown/cross-brand id rejection | same | planned |
-| IT-ID-001 | Populated migration preserves every pre-migration UUID and marks rows active | `apps/web/src/server/__tests__/competitor-identity.integration.test.ts` + rehearsal | planned |
-| IT-ID-002 | No-op settings save preserves ids and business values | same | planned |
-| IT-ID-003 | Soft removal hides current roster but retains the row and FK validity | same | planned |
-| IT-ID-004 | Public competitor API no longer physically deletes | same | planned |
-| REG-ID-001 | Existing Visibility, SoV, Citations, Opportunities, onboarding, prompt processing, caps and settings suites pass with active semantics | `pnpm test`, Storybook, Playwright `local` | planned |
-| E2E-ID-001 | Real settings UI save/reload preserves ids and visible roster | `e2e/tests/local/competitor-identity.spec.ts` | planned |
+| UT-ID-001 | Diff/upsert classification: insert / update / deactivate / reactivate / unchanged | `packages/lib/src/db/__tests__/competitors.test.ts` | PASS (PR #37) |
+| UT-ID-002 | Normalization, duplicate domain, ambiguous reactivation, unknown/cross-brand id rejection | same | PASS (PR #37) |
+| IT-ID-001 | Populated migration preserves every pre-migration UUID and marks rows active | seeded test DB, restored production copy and production: digest identical, all active | PASS (2026-09-12) |
+| IT-ID-002 | No-op settings save preserves ids and business values | same | PASS (PR #37) |
+| IT-ID-003 | Soft removal hides current roster but retains the row and FK validity | same | PASS (PR #37) |
+| IT-ID-004 | Public competitor API no longer physically deletes | `routes/api/v1/competitors/$competitorId.ts` + Bruno collection 60/60 | PASS (PR #37) |
+| REG-ID-001 | Existing Visibility, SoV, Citations, Opportunities, onboarding, prompt processing, caps and settings suites pass with active semantics | `pnpm test`, Storybook, Playwright `local` | PASS (unit 1353, Storybook 161, Playwright local 114, Bruno 126 assertions) |
+| E2E-ID-001 | Real settings UI save/reload preserves ids and visible roster | `e2e/tests/local/competitor-identity.spec.ts` | PASS (local + CI; production acceptance via the page-bound server function, closeout doc) |
 
 ## Traceability — SENT-R1/R2 (frozen, implemented in the second PR)
 
