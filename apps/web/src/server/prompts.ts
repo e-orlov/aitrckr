@@ -511,6 +511,32 @@ export const getPromptRunsFn = createServerFn({ method: "GET" })
 	});
 
 /**
+ * One stored run of a prompt, for deep links that target a response outside
+ * the first history page. Authorization is brand → prompt → run: the run must
+ * belong to the prompt, and the prompt to a brand the caller may read; any
+ * other combination is "not found" without revealing which part mismatched.
+ */
+export const getPromptRunFn = createServerFn({ method: "GET" })
+	.validator(z.object({ promptId: z.string(), runId: z.guid() }))
+	.handler(async ({ data }) => {
+		const prompt = await db.query.prompts.findFirst({ where: eq(prompts.id, data.promptId) });
+		if (!prompt) throw new PublicError("run-not-found", "Response not found");
+
+		const session = await requireAuthSession();
+		await requireBrandAccess(session.user.id, prompt.brandId);
+
+		const run = await db.query.promptRuns.findFirst({
+			where: and(
+				eq(promptRuns.id, data.runId),
+				eq(promptRuns.promptId, data.promptId),
+				eq(promptRuns.brandId, prompt.brandId),
+			),
+		});
+		if (!run) throw new PublicError("run-not-found", "Response not found");
+		return { ...run, rawOutput: run.rawOutput as {} };
+	});
+
+/**
  * Update prompts for a brand (add/edit/delete)
  */
 export const updatePromptsFn = createServerFn({ method: "POST" })
