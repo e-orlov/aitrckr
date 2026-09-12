@@ -388,7 +388,7 @@ test.describe("Sentiment page", () => {
 		const run = uuid("3", 99);
 		await client.query(
 			`INSERT INTO prompts (id, brand_id, value, enabled, tags, system_tags, created_at, updated_at)
-			 VALUES ($1, $2, 'Prompt to delete', true, '{}', '{unbranded}', NOW(), NOW())`,
+			 VALUES ($1, $2, 'Prompt to delete', false, '{}', '{unbranded}', NOW(), NOW())`,
 			[promptId, BRAND_ID],
 		);
 		await client.query(

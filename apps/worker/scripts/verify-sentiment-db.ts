@@ -29,6 +29,7 @@ import {
 	claimAnalysis,
 	ensureAnalysis,
 	ensureSentimentQueue,
+	markAnalysis,
 	persistDetection,
 	SENTIMENT_CLASSIFIER_VERSION,
 	SENTIMENT_DETECTOR_VERSION,
@@ -307,14 +308,14 @@ async function verifyIdempotentPersistence(client: Client): Promise<void> {
 	const claims = await Promise.all(
 		Array.from({ length: CONCURRENCY }, () => claimAnalysis(analyses[0].id, { allowFinished: false })),
 	);
+	const winners = claims.filter((c) => c.claimed);
 	assert(
-		claims.filter((c) => c.claimed).length === 1 &&
-			claims.filter((c) => !c.claimed && c.status === "processing").length === CONCURRENCY - 1,
+		winners.length === 1 && claims.filter((c) => !c.claimed && c.status === "processing").length === CONCURRENCY - 1,
 		`exactly one of ${CONCURRENCY} concurrent claimAnalysis calls wins; the rest see "processing"`,
 	);
 	const [attempt] = (
-		await client.query<{ attempts: number; provider: string; model: string }>(
-			"SELECT attempts, provider, model FROM sentiment_analyses WHERE id = $1",
+		await client.query<{ attempts: number; provider: string; model: string; claim_generation: number }>(
+			"SELECT attempts, provider, model, claim_generation FROM sentiment_analyses WHERE id = $1",
 			[analyses[0].id],
 		)
 	).rows;
@@ -322,7 +323,48 @@ async function verifyIdempotentPersistence(client: Client): Promise<void> {
 		attempt.attempts === 1 && attempt.provider === "openrouter" && attempt.model === "openai/gpt-5-mini",
 		"the winning claim records one attempt attributed to openrouter / openai/gpt-5-mini",
 	);
+	const winner = winners[0];
+	assert(
+		winner.claimed && winner.claim.generation === 1 && attempt.claim_generation === 1,
+		"the winning claim carries generation 1 and the row records it",
+	);
+	// Fence: a write with a stale generation is refused, the current one succeeds.
+	const stale = { analysisId: analyses[0].id, generation: 0 };
+	const current = { analysisId: analyses[0].id, generation: 1 };
+	assert(
+		(await markAnalysis(stale, { status: "failed", errorCode: "provider", errorMessage: "stale" })) === false,
+		"a terminal write with a stale claim generation is refused",
+	);
+	assert(
+		(await markAnalysis(current, { status: "failed", errorCode: "provider", errorMessage: "fenced" })) === true,
+		"the same write with the current claim generation succeeds",
+	);
+	const [afterFence] = (
+		await client.query<{ status: string; error_message: string }>(
+			"SELECT status, error_message FROM sentiment_analyses WHERE id = $1",
+			[analyses[0].id],
+		)
+	).rows;
+	assert(afterFence.status === "failed" && afterFence.error_message === "fenced", "only the fenced write landed");
+	// Superseded lifecycle: a mention the next pass no longer finds is superseded when referenced, deleted otherwise.
+	await persistDetection({ promptRunId: RUN, brandId: BRAND, result: { status: "mentions", mentions: [mentions[0]] } });
+	const [{ n: remaining }] = (
+		await client.query<{ n: number }>(
+			"SELECT count(*)::int AS n FROM prompt_run_entity_mentions WHERE prompt_run_id = $1 AND superseded_at IS NULL",
+			[RUN],
+		)
+	).rows;
+	assert(remaining === 1, "an unreferenced mention the newest pass no longer finds is removed from the projection");
+	await persistDetection({ promptRunId: RUN, brandId: BRAND, result: { status: "mentions", mentions } });
 }
+
+const mentionsBrandOnly = {
+	key: "brand",
+	entityType: "brand" as const,
+	competitorId: null,
+	entityName: "Verify",
+	matchedTerms: ["verify"],
+};
 
 async function verifyCascade(client: Client): Promise<void> {
 	const [analysis] = (
@@ -351,6 +393,22 @@ async function verifyCascade(client: Client): Promise<void> {
 		"a competitor with sentiment history cannot be hard-deleted",
 		"DELETE FROM competitors WHERE id = $1",
 		[COMPETITOR],
+	);
+	// A referenced mention the newest pass no longer finds is superseded, not deleted, and leaves the projection.
+	await persistDetection({
+		promptRunId: RUN,
+		brandId: BRAND,
+		result: { status: "mentions", mentions: [mentionsBrandOnly] },
+	});
+	const [{ n: superseded }] = (
+		await client.query<{ n: number }>(
+			"SELECT count(*)::int AS n FROM prompt_run_entity_mentions WHERE id = $1 AND superseded_at IS NOT NULL",
+			[mention.id],
+		)
+	).rows;
+	assert(
+		superseded === 1,
+		"a mention with observations that the newest pass no longer finds is superseded, not deleted",
 	);
 	await client.query("DELETE FROM prompt_runs WHERE id = $1", [RUN]);
 	const leftovers = await client.query<{ n: number }>(
