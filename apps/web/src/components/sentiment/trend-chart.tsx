@@ -48,7 +48,7 @@ export function SentimentTrendChart({
 		const row: Row = { bucketStart: point.bucketStart, __midpoint: 50 };
 		for (const key of roster) {
 			row[key] = point.values[key]?.sentiment ?? null;
-			row[`${key}__n`] = point.values[key]?.classified ?? 0;
+			row[`${key}__n`] = point.values[key]?.sample ?? 0;
 		}
 		return row;
 	});

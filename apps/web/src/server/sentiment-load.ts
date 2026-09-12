@@ -17,6 +17,7 @@ import {
 	SYSTEM_TAGS,
 	sentimentAnalyses,
 	sentimentAspectObservations,
+	sentimentDetections,
 	sentimentObservations,
 } from "@workspace/lib/db/schema";
 import { extractAnswerBody } from "@workspace/lib/sentiment";
@@ -24,10 +25,11 @@ import {
 	bucketForRange,
 	computeEntityMetrics,
 	type EntityMetrics,
+	extremesAllocation,
 	LOW_SAMPLE_THRESHOLD,
 	type SentimentBucket,
+	type SentimentView,
 	selectChartRoster,
-	splitExtremes,
 } from "@workspace/lib/sentiment/metrics";
 import {
 	BRAND_ENTITY_KEY,
@@ -41,7 +43,8 @@ import {
 	type SentimentEvidence,
 } from "@workspace/lib/sentiment/types";
 import { getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
-import { and, eq, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
+import type { PgSelect } from "drizzle-orm/pg-core";
 import type { LookbackPeriod } from "@/lib/chart-utils";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
 
@@ -55,6 +58,13 @@ export interface SentimentScope {
 	timezone: string;
 }
 
+/**
+ * One leaderboard row. Three counts are kept apart on purpose (see
+ * `EntityCounts` in the metrics module): `mentions` (M) and `classified` (C)
+ * are aspect-independent, `sample` (S) is what the displayed score rests on
+ * — every classified mention in the overall view, only the mentions whose
+ * answer evaluated the selected aspect in an aspect view.
+ */
 export interface SentimentEntityRow {
 	key: string;
 	entityType: "brand" | "competitor";
@@ -63,30 +73,39 @@ export interface SentimentEntityRow {
 	isBrand: boolean;
 	/** Distinct responses mentioning the entity (`M`). */
 	mentions: number;
-	/** Mentions classified at the current version for the selected aspect (`C`). */
+	/** Mentions with a completed current-version entity classification (`C`). */
 	classified: number;
+	/** Observations in the selected view (`S`): `classified` overall, the aspect's observations otherwise. */
+	sample: number;
+	/** Category counts over the sample. */
 	counts: { positive: number; neutral: number; mixed: number; negative: number };
 	metrics: EntityMetrics;
+	/** Fewer than `LOW_SAMPLE_THRESHOLD` observations in the sample. */
 	lowSample: boolean;
 }
 
 export interface SentimentSeriesPoint {
 	bucketStart: string;
-	values: Record<string, { sentiment: number | null; classified: number }>;
+	/** Per roster entity: mean score over the bucket's sample and that sample's size. */
+	values: Record<string, { sentiment: number | null; sample: number }>;
 }
 
 export interface SentimentOverviewResponse {
 	brand: { id: string; name: string };
 	dateRange: { fromDate: string; toDate: string; timezone: string };
 	aspect: SentimentAspectFilter;
+	/** Label of the selected aspect (`null` in the overall view) for sample wording. */
+	aspectLabel: string | null;
 	availableAspects: { key: SentimentAspectKey; label: string; count: number }[];
 	/** Eligible stored responses in scope (`T`). */
 	eligibleResponses: number;
 	coverage: {
-		/** Responses in scope the detector has visited (any mention row, any version). */
+		/** Responses in scope with a completed current-version detection receipt (any status). */
 		responsesDetected: number;
-		/** Responses in scope with at least one current-version mention. */
+		/** Responses whose receipt found at least one entity. */
 		responsesWithMentions: number;
+		/** Responses whose receipt says the stored output had no extractable answer text. */
+		responsesUnextractable: number;
 		analyses: { completed: number; pending: number; failed: number; noMentions: number };
 	};
 	entities: SentimentEntityRow[];
@@ -105,11 +124,18 @@ export interface SentimentEvidenceItem {
 	runCreatedAt: string;
 	score: number;
 	category: SentimentCategory;
+	/** Exact excerpts with raw-body offsets and polarity. */
 	evidence: SentimentEvidence[];
-	/** A short window of the stored answer around the first excerpt. */
+	/**
+	 * A short window of the stored answer around the first excerpt. Raw offset
+	 * `excerptStart` maps evidence offsets onto it: an excerpt character at
+	 * index `i` is raw offset `excerptStart + i` (the leading ellipsis, when
+	 * present, is accounted for).
+	 */
 	excerpt: string;
+	excerptStart: number;
 	aspects: { key: SentimentAspectKey; label: string; score: number; category: SentimentCategory }[];
-	/** The monitoring answer's own citations — never classifier search results. */
+	/** The monitoring answer's own citations — deduplicated and bounded; never classifier search results. */
 	sources: { url: string; domain: string; title: string | null }[];
 }
 
@@ -122,6 +148,10 @@ export interface SentimentEvidenceResponse {
 }
 
 const EXCERPT_RADIUS = 160;
+/** Original citations returned per stored answer in the evidence cards. */
+export const EVIDENCE_SOURCES_PER_RUN = 8;
+
+const viewOf = (aspect: SentimentAspectFilter): SentimentView => (aspect === "overall" ? "overall" : "aspect");
 
 function dayAfter(dateStr: string): string {
 	const [y, m, d] = dateStr.split("-").map(Number);
@@ -197,9 +227,11 @@ function scopeRuns(
 
 const runIdsInScope = (scope: ScopeSql) => db.select({ id: promptRuns.id }).from(promptRuns).where(scope.runsWhere);
 
+/** Completed current-version analyses only; a stale taxonomy never counts as current. */
 function completedObservationsWhere(aspect: SentimentAspectFilter, scope: ScopeSql): SQL {
 	const base = and(
 		eq(sentimentAnalyses.classifierVersion, SENTIMENT_CLASSIFIER_VERSION),
+		eq(sentimentAnalyses.taxonomyVersion, SENTIMENT_TAXONOMY_VERSION),
 		eq(sentimentAnalyses.status, "completed"),
 		inArray(sentimentObservations.promptRunId, runIdsInScope(scope)),
 	) as SQL;
@@ -218,27 +250,20 @@ function scoreColumns(aspect: SentimentAspectFilter) {
 		: { score: sentimentAspectObservations.score, category: sentimentAspectObservations.category };
 }
 
-function observationQuery(aspect: SentimentAspectFilter) {
-	const base = db
-		.select({
-			entityKey: sentimentObservations.entityKey,
-			promptRunId: sentimentObservations.promptRunId,
-			observationId: sentimentObservations.id,
-			...scoreColumns(aspect),
-		})
-		.from(sentimentObservations)
-		.innerJoin(sentimentAnalyses, eq(sentimentAnalyses.id, sentimentObservations.analysisId));
-	return aspect === "overall"
-		? base
-		: base.innerJoin(
-				sentimentAspectObservations,
-				eq(sentimentAspectObservations.observationId, sentimentObservations.id),
-			);
+/** For an aspect view, join that aspect's rows onto an observations query; the overall view needs no join. */
+function joinAspect<Q extends PgSelect>(query: Q, aspect: SentimentAspectFilter): Q {
+	if (aspect === "overall") return query;
+	return query.innerJoin(
+		sentimentAspectObservations,
+		eq(sentimentAspectObservations.observationId, sentimentObservations.id),
+	) as unknown as Q;
 }
+
+const withAnalysis = eq(sentimentAnalyses.id, sentimentObservations.analysisId);
 
 interface AggRow {
 	entityKey: string;
-	classified: number;
+	sample: number;
 	scoreSum: number;
 	positive: number;
 	neutral: number;
@@ -248,26 +273,24 @@ interface AggRow {
 
 async function aggregateByEntity(aspect: SentimentAspectFilter, scope: ScopeSql): Promise<Map<string, AggRow>> {
 	const { score, category } = scoreColumns(aspect);
-	const base = db
-		.select({
-			entityKey: sentimentObservations.entityKey,
-			classified: sql<number>`count(*)::int`,
-			scoreSum: sql<number>`coalesce(sum(${score}), 0)::int`,
-			positive: sql<number>`count(*) filter (where ${category} = 'positive')::int`,
-			neutral: sql<number>`count(*) filter (where ${category} = 'neutral')::int`,
-			mixed: sql<number>`count(*) filter (where ${category} = 'mixed')::int`,
-			negative: sql<number>`count(*) filter (where ${category} = 'negative')::int`,
-		})
-		.from(sentimentObservations)
-		.innerJoin(sentimentAnalyses, eq(sentimentAnalyses.id, sentimentObservations.analysisId));
-	const joined =
-		aspect === "overall"
-			? base
-			: base.innerJoin(
-					sentimentAspectObservations,
-					eq(sentimentAspectObservations.observationId, sentimentObservations.id),
-				);
-	const rows = await joined.where(completedObservationsWhere(aspect, scope)).groupBy(sentimentObservations.entityKey);
+	const rows: AggRow[] = await joinAspect(
+		db
+			.select({
+				entityKey: sentimentObservations.entityKey,
+				sample: sql<number>`count(*)::int`,
+				scoreSum: sql<number>`coalesce(sum(${score}), 0)::int`,
+				positive: sql<number>`count(*) filter (where ${category} = 'positive')::int`,
+				neutral: sql<number>`count(*) filter (where ${category} = 'neutral')::int`,
+				mixed: sql<number>`count(*) filter (where ${category} = 'mixed')::int`,
+				negative: sql<number>`count(*) filter (where ${category} = 'negative')::int`,
+			})
+			.from(sentimentObservations)
+			.innerJoin(sentimentAnalyses, withAnalysis)
+			.$dynamic(),
+		aspect,
+	)
+		.where(completedObservationsWhere(aspect, scope))
+		.groupBy(sentimentObservations.entityKey);
 	return new Map(rows.map((row) => [row.entityKey, row]));
 }
 
@@ -289,20 +312,17 @@ async function mentionsByEntity(scope: ScopeSql): Promise<Map<string, number>> {
 }
 
 async function coverageStats(scope: ScopeSql) {
-	const [[detected], [withMentions], statuses] = await Promise.all([
+	const [receipts, statuses] = await Promise.all([
 		db
-			.select({ value: sql<number>`count(distinct ${promptRunEntityMentions.promptRunId})::int` })
-			.from(promptRunEntityMentions)
-			.where(inArray(promptRunEntityMentions.promptRunId, runIdsInScope(scope))),
-		db
-			.select({ value: sql<number>`count(distinct ${promptRunEntityMentions.promptRunId})::int` })
-			.from(promptRunEntityMentions)
+			.select({ status: sentimentDetections.status, value: sql<number>`count(*)::int` })
+			.from(sentimentDetections)
 			.where(
 				and(
-					eq(promptRunEntityMentions.detectorVersion, SENTIMENT_DETECTOR_VERSION),
-					inArray(promptRunEntityMentions.promptRunId, runIdsInScope(scope)),
+					eq(sentimentDetections.detectorVersion, SENTIMENT_DETECTOR_VERSION),
+					inArray(sentimentDetections.promptRunId, runIdsInScope(scope)),
 				),
-			),
+			)
+			.groupBy(sentimentDetections.status),
 		db
 			.select({ status: sentimentAnalyses.status, value: sql<number>`count(*)::int` })
 			.from(sentimentAnalyses)
@@ -314,10 +334,14 @@ async function coverageStats(scope: ScopeSql) {
 			)
 			.groupBy(sentimentAnalyses.status),
 	]);
+	const byReceipt = new Map(receipts.map((row) => [row.status, row.value]));
 	const byStatus = new Map(statuses.map((row) => [row.status, row.value]));
+	const withMentions = byReceipt.get("mentions") ?? 0;
+	const unextractable = byReceipt.get("unextractable") ?? 0;
 	return {
-		responsesDetected: detected?.value ?? 0,
-		responsesWithMentions: withMentions?.value ?? 0,
+		responsesDetected: withMentions + unextractable + (byReceipt.get("no_mentions") ?? 0),
+		responsesWithMentions: withMentions,
+		responsesUnextractable: unextractable,
 		analyses: {
 			completed: byStatus.get("completed") ?? 0,
 			pending: (byStatus.get("pending") ?? 0) + (byStatus.get("processing") ?? 0),
@@ -392,41 +416,37 @@ async function seriesByBucket(
 	if (roster.length === 0 || buckets.length === 0) return [];
 	const { score } = scoreColumns(aspect);
 	const bucketExpr = bucketExpression(bucket, scope.timezone);
-	const base = db
-		.select({
-			entityKey: sentimentObservations.entityKey,
-			bucketStart: bucketExpr.as("bucket_start"),
-			classified: sql<number>`count(*)::int`,
-			scoreSum: sql<number>`coalesce(sum(${score}), 0)::int`,
-		})
-		.from(sentimentObservations)
-		.innerJoin(sentimentAnalyses, eq(sentimentAnalyses.id, sentimentObservations.analysisId))
-		.innerJoin(promptRuns, eq(promptRuns.id, sentimentObservations.promptRunId));
-	const joined =
-		aspect === "overall"
-			? base
-			: base.innerJoin(
-					sentimentAspectObservations,
-					eq(sentimentAspectObservations.observationId, sentimentObservations.id),
-				);
-	const rows = await joined
+	const rows: { entityKey: string; bucketStart: string; sample: number; scoreSum: number }[] = await joinAspect(
+		db
+			.select({
+				entityKey: sentimentObservations.entityKey,
+				bucketStart: bucketExpr.as("bucket_start"),
+				sample: sql<number>`count(*)::int`,
+				scoreSum: sql<number>`coalesce(sum(${score}), 0)::int`,
+			})
+			.from(sentimentObservations)
+			.innerJoin(sentimentAnalyses, withAnalysis)
+			.$dynamic(),
+		aspect,
+	)
+		.innerJoin(promptRuns, eq(promptRuns.id, sentimentObservations.promptRunId))
 		.where(and(completedObservationsWhere(aspect, scope), inArray(sentimentObservations.entityKey, roster)))
 		// Ordinal grouping: the bucket expression binds the timezone as a parameter,
 		// and Postgres would not match a second copy of it in GROUP BY.
 		.groupBy(sql`1`, sql`2`);
-	const byBucket = new Map<string, Map<string, { sentiment: number | null; classified: number }>>();
+	const byBucket = new Map<string, Map<string, { sentiment: number | null; sample: number }>>();
 	for (const row of rows) {
 		const entry = byBucket.get(row.bucketStart) ?? new Map();
 		entry.set(row.entityKey, {
-			sentiment: row.classified === 0 ? null : row.scoreSum / row.classified,
-			classified: row.classified,
+			sentiment: row.sample === 0 ? null : row.scoreSum / row.sample,
+			sample: row.sample,
 		});
 		byBucket.set(row.bucketStart, entry);
 	}
 	return buckets.map((bucketStart) => {
 		const values: SentimentSeriesPoint["values"] = {};
 		const entry = byBucket.get(bucketStart);
-		for (const key of roster) values[key] = entry?.get(key) ?? { sentiment: null, classified: 0 };
+		for (const key of roster) values[key] = entry?.get(key) ?? { sentiment: null, sample: 0 };
 		return { bucketStart, values };
 	});
 }
@@ -435,8 +455,9 @@ export async function loadSentimentOverview(scope: SentimentScope): Promise<Sent
 	const { timezone, fromDate, toDate } = await resolveSentimentRange(scope.brandId, scope.lookback, scope.timezone);
 	const promptIds = await resolveTaggedPromptIds(scope.brandId, scope.tags);
 	const sqlScope = scopeRuns(scope.brandId, fromDate, toDate, timezone, promptIds);
+	const view = viewOf(scope.aspect);
 
-	const [brandRows, roster, [eligible], mentions, aggregates, coverage, aspects] = await Promise.all([
+	const [brandRows, roster, [eligible], mentions, classifiedAgg, sampleAgg, coverage, aspects] = await Promise.all([
 		db.select({ id: brands.id, name: brands.name }).from(brands).where(eq(brands.id, scope.brandId)).limit(1),
 		db
 			.select({ id: competitors.id, name: competitors.name })
@@ -445,13 +466,15 @@ export async function loadSentimentOverview(scope: SentimentScope): Promise<Sent
 			.orderBy(competitors.createdAt, competitors.id),
 		db.select({ value: sql<number>`count(*)::int` }).from(promptRuns).where(sqlScope.runsWhere),
 		mentionsByEntity(sqlScope),
-		aggregateByEntity(scope.aspect, sqlScope),
+		aggregateByEntity("overall", sqlScope),
+		view === "overall" ? Promise.resolve(null) : aggregateByEntity(scope.aspect, sqlScope),
 		coverageStats(sqlScope),
 		availableAspects(sqlScope),
 	]);
 	const brand = brandRows[0];
 	if (!brand) throw new Error("Brand not found");
 	const eligibleResponses = eligible?.value ?? 0;
+	const samples = sampleAgg ?? classifiedAgg;
 
 	const toRow = (
 		key: string,
@@ -459,15 +482,16 @@ export async function loadSentimentOverview(scope: SentimentScope): Promise<Sent
 		competitorId: string | null,
 		name: string,
 	): SentimentEntityRow => {
-		const agg = aggregates.get(key);
+		const agg = samples.get(key);
 		const mentionCount = mentions.get(key) ?? 0;
+		const classified = classifiedAgg.get(key)?.sample ?? 0;
+		const sample = agg?.sample ?? 0;
 		const counts = {
 			positive: agg?.positive ?? 0,
 			neutral: agg?.neutral ?? 0,
 			mixed: agg?.mixed ?? 0,
 			negative: agg?.negative ?? 0,
 		};
-		const classified = agg?.classified ?? 0;
 		return {
 			key,
 			entityType,
@@ -476,20 +500,22 @@ export async function loadSentimentOverview(scope: SentimentScope): Promise<Sent
 			isBrand: entityType === "brand",
 			mentions: mentionCount,
 			classified,
+			sample,
 			counts,
 			metrics: computeEntityMetrics({
 				eligibleResponses,
 				mentions: mentionCount,
 				classified,
+				sample,
 				...counts,
 				scoreSum: agg?.scoreSum ?? 0,
 			}),
-			lowSample: classified > 0 && classified < LOW_SAMPLE_THRESHOLD,
+			lowSample: sample > 0 && sample < LOW_SAMPLE_THRESHOLD,
 		};
 	};
 	const brandRow = toRow(BRAND_ENTITY_KEY, "brand", null, brand.name);
 	const competitorRows = roster.map((c) => toRow(c.id, "competitor", c.id, c.name));
-	const chartRoster = [BRAND_ENTITY_KEY, ...selectChartRoster(competitorRows, 6).map((row) => row.key)];
+	const chartRoster = [BRAND_ENTITY_KEY, ...selectChartRoster(competitorRows, 6, view).map((row) => row.key)];
 
 	const bucket = bucketForRange(daysBetween(fromDate, toDate));
 	const buckets = enumerateBuckets(fromDate, toDate, bucket);
@@ -499,6 +525,7 @@ export async function loadSentimentOverview(scope: SentimentScope): Promise<Sent
 		brand,
 		dateRange: { fromDate, toDate, timezone },
 		aspect: scope.aspect,
+		aspectLabel: scope.aspect === "overall" ? null : SENTIMENT_ASPECTS[scope.aspect].label,
 		availableAspects: aspects,
 		eligibleResponses,
 		coverage,
@@ -514,14 +541,167 @@ export interface SentimentEvidenceScope extends SentimentScope {
 	limit: number;
 }
 
-function excerptAround(answer: string, evidence: SentimentEvidence[]): string {
+/**
+ * The answer window around the first excerpt, cut at raw offsets so the
+ * client can highlight `evidence[i].start - excerptStart`. Excerpts are
+ * stored with raw offsets; nothing is re-searched by text here.
+ */
+function excerptAround(answer: string, evidence: SentimentEvidence[]): { excerpt: string; excerptStart: number } {
 	const first = evidence[0];
-	if (!first) return answer.slice(0, EXCERPT_RADIUS * 2);
-	const at = answer.toLowerCase().indexOf(first.quote.toLowerCase());
-	if (at === -1) return answer.slice(0, EXCERPT_RADIUS * 2);
-	const start = Math.max(0, at - EXCERPT_RADIUS);
-	const end = Math.min(answer.length, at + first.quote.length + EXCERPT_RADIUS);
-	return `${start > 0 ? "…" : ""}${answer.slice(start, end)}${end < answer.length ? "…" : ""}`;
+	const anchor = first && first.start >= 0 && first.end <= answer.length ? first : null;
+	const start = anchor ? Math.max(0, anchor.start - EXCERPT_RADIUS) : 0;
+	const end = anchor
+		? Math.min(answer.length, anchor.end + EXCERPT_RADIUS)
+		: Math.min(answer.length, EXCERPT_RADIUS * 2);
+	return {
+		excerpt: `${start > 0 ? "…" : ""}${answer.slice(start, end)}${end < answer.length ? "…" : ""}`,
+		excerptStart: start > 0 ? start - 1 : 0,
+	};
+}
+
+interface ExtremeRow {
+	observationId: string;
+	promptRunId: string;
+	promptId: string;
+	runCreatedAt: Date;
+	score: number;
+}
+
+/**
+ * The evidence extremes for one entity, bounded in SQL: one COUNT, then two
+ * `ORDER BY … LIMIT` queries over the same total order (score, run
+ * timestamp, prompt id, run id, observation id). With fewer than `2 × limit`
+ * observations `extremesAllocation` splits the records so the two sets never
+ * overlap; nothing but the at-most-`2 × limit` selected rows is materialized.
+ */
+async function loadExtremes(
+	scope: SentimentEvidenceScope,
+	sqlScope: ScopeSql,
+): Promise<{ total: number; highest: ExtremeRow[]; lowest: ExtremeRow[] }> {
+	const { score } = scoreColumns(scope.aspect);
+	const where = and(
+		completedObservationsWhere(scope.aspect, sqlScope),
+		eq(sentimentObservations.brandId, scope.brandId),
+		eq(sentimentObservations.entityKey, scope.entityKey),
+	);
+	const [counted]: { total: number }[] = await joinAspect(
+		db
+			.select({ total: sql<number>`count(*)::int` })
+			.from(sentimentObservations)
+			.innerJoin(sentimentAnalyses, withAnalysis)
+			.$dynamic(),
+		scope.aspect,
+	).where(where);
+	const total = counted?.total ?? 0;
+	const { highCount, lowCount } = extremesAllocation(total, scope.limit);
+	const selection = {
+		observationId: sentimentObservations.id,
+		promptRunId: sentimentObservations.promptRunId,
+		promptId: promptRuns.promptId,
+		runCreatedAt: promptRuns.createdAt,
+		score,
+	};
+	const ordered = (direction: typeof asc | typeof desc, limit: number): Promise<ExtremeRow[]> =>
+		limit === 0
+			? Promise.resolve([])
+			: joinAspect(
+					db.select(selection).from(sentimentObservations).innerJoin(sentimentAnalyses, withAnalysis).$dynamic(),
+					scope.aspect,
+				)
+					.innerJoin(promptRuns, eq(promptRuns.id, sentimentObservations.promptRunId))
+					.where(where)
+					.orderBy(
+						direction(score),
+						direction(promptRuns.createdAt),
+						direction(promptRuns.promptId),
+						direction(sentimentObservations.promptRunId),
+						direction(sentimentObservations.id),
+					)
+					.limit(limit);
+	const [highest, lowest] = await Promise.all([ordered(desc, highCount), ordered(asc, lowCount)]);
+	return { total, highest, lowest };
+}
+
+/**
+ * `EXPLAIN (ANALYZE, BUFFERS)` of the highest-evidence query exactly as the
+ * loader issues it — used by the integration suite to record that the
+ * extremes are answered with `Limit` nodes rather than a full materialization.
+ */
+export async function explainSentimentEvidence(scope: SentimentEvidenceScope): Promise<string[]> {
+	const { timezone, fromDate, toDate } = await resolveSentimentRange(scope.brandId, scope.lookback, scope.timezone);
+	const promptIds = await resolveTaggedPromptIds(scope.brandId, scope.tags);
+	const sqlScope = scopeRuns(scope.brandId, fromDate, toDate, timezone, promptIds);
+	const { score } = scoreColumns(scope.aspect);
+	const query = joinAspect(
+		db
+			.select({
+				observationId: sentimentObservations.id,
+				promptRunId: sentimentObservations.promptRunId,
+				promptId: promptRuns.promptId,
+				runCreatedAt: promptRuns.createdAt,
+				score,
+			})
+			.from(sentimentObservations)
+			.innerJoin(sentimentAnalyses, withAnalysis)
+			.$dynamic(),
+		scope.aspect,
+	)
+		.innerJoin(promptRuns, eq(promptRuns.id, sentimentObservations.promptRunId))
+		.where(
+			and(
+				completedObservationsWhere(scope.aspect, sqlScope),
+				eq(sentimentObservations.brandId, scope.brandId),
+				eq(sentimentObservations.entityKey, scope.entityKey),
+			),
+		)
+		.orderBy(
+			desc(score),
+			desc(promptRuns.createdAt),
+			desc(promptRuns.promptId),
+			desc(sentimentObservations.promptRunId),
+			desc(sentimentObservations.id),
+		)
+		.limit(scope.limit);
+	const result = await db.execute<{ "QUERY PLAN": string }>(sql`EXPLAIN (ANALYZE, BUFFERS) ${query.getSQL()}`);
+	return result.rows.map((row) => row["QUERY PLAN"]);
+}
+
+/** The runs' own citations, deduplicated by URL and capped per run, in citation order. */
+async function loadRunSources(runIds: string[]) {
+	if (runIds.length === 0) return new Map<string, { url: string; domain: string; title: string | null }[]>();
+	const ranked = db.$with("ranked").as(
+		db
+			.selectDistinctOn([citations.promptRunId, citations.url], {
+				promptRunId: citations.promptRunId,
+				url: citations.url,
+				domain: citations.domain,
+				title: citations.title,
+				citationIndex: citations.citationIndex,
+			})
+			.from(citations)
+			.where(inArray(citations.promptRunId, runIds))
+			.orderBy(citations.promptRunId, citations.url, citations.citationIndex),
+	);
+	const rows = await db
+		.with(ranked)
+		.select({
+			promptRunId: ranked.promptRunId,
+			url: ranked.url,
+			domain: ranked.domain,
+			title: ranked.title,
+			rank: sql<number>`row_number() over (partition by ${ranked.promptRunId} order by ${ranked.citationIndex}, ${ranked.url})::int`,
+		})
+		.from(ranked)
+		.orderBy(ranked.promptRunId, ranked.citationIndex);
+	const byRun = new Map<string, { url: string; domain: string; title: string | null }[]>();
+	for (const row of rows) {
+		if (row.rank > EVIDENCE_SOURCES_PER_RUN) continue;
+		byRun.set(row.promptRunId, [
+			...(byRun.get(row.promptRunId) ?? []),
+			{ url: row.url, domain: row.domain, title: row.title },
+		]);
+	}
+	return byRun;
 }
 
 export async function loadSentimentEvidence(scope: SentimentEvidenceScope): Promise<SentimentEvidenceResponse> {
@@ -541,45 +721,20 @@ export async function loadSentimentEvidence(scope: SentimentEvidenceScope): Prom
 				)[0]?.name;
 	if (!entityName) throw new Error("Entity not found");
 
-	const scored = await observationQuery(scope.aspect)
-		.innerJoin(promptRuns, eq(promptRuns.id, sentimentObservations.promptRunId))
-		.where(
-			and(completedObservationsWhere(scope.aspect, sqlScope), eq(sentimentObservations.entityKey, scope.entityKey)),
-		);
-	const runMeta = new Map(
-		(
-			await db
-				.select({ id: promptRuns.id, createdAt: promptRuns.createdAt, promptId: promptRuns.promptId })
-				.from(promptRuns)
-				.where(
-					inArray(
-						promptRuns.id,
-						scored.map((row) => row.promptRunId),
-					),
-				)
-		).map((row) => [row.id, row]),
-	);
-	const candidates = scored.map((row) => ({
-		observationId: row.observationId,
-		promptRunId: row.promptRunId,
-		score: row.score,
-		runCreatedAt: runMeta.get(row.promptRunId)?.createdAt.toISOString() ?? "",
-		promptId: runMeta.get(row.promptRunId)?.promptId ?? "",
-	}));
-	const { highest, lowest } = splitExtremes(candidates, scope.limit);
+	const { total, highest, lowest } = await loadExtremes(scope, sqlScope);
 	const picked = [...highest, ...lowest];
 	if (picked.length === 0)
 		return {
 			entity: { key: scope.entityKey, name: entityName },
 			aspect: scope.aspect,
-			totalObservations: 0,
+			totalObservations: total,
 			highest: [],
 			lowest: [],
 		};
 
 	const observationIds = picked.map((row) => row.observationId);
 	const runIds = [...new Set(picked.map((row) => row.promptRunId))];
-	const [observations, aspectRows, runs, sources] = await Promise.all([
+	const [observations, aspectRows, runs, sourcesByRun] = await Promise.all([
 		db
 			.select({
 				id: sentimentObservations.id,
@@ -620,31 +775,15 @@ export async function loadSentimentEvidence(scope: SentimentEvidenceScope): Prom
 			.from(promptRuns)
 			.innerJoin(prompts, eq(prompts.id, promptRuns.promptId))
 			.where(inArray(promptRuns.id, runIds)),
-		db
-			.select({
-				promptRunId: citations.promptRunId,
-				url: citations.url,
-				domain: citations.domain,
-				title: citations.title,
-				index: citations.citationIndex,
-			})
-			.from(citations)
-			.where(inArray(citations.promptRunId, runIds))
-			.orderBy(citations.citationIndex),
+		loadRunSources(runIds),
 	]);
 	const observationById = new Map(observations.map((row) => [row.id, row]));
 	const aspectsByObservation = new Map<string, typeof aspectRows>();
 	for (const row of aspectRows)
 		aspectsByObservation.set(row.observationId, [...(aspectsByObservation.get(row.observationId) ?? []), row]);
 	const runById = new Map(runs.map((row) => [row.id, row]));
-	const sourcesByRun = new Map<string, { url: string; domain: string; title: string | null }[]>();
-	for (const row of sources)
-		sourcesByRun.set(row.promptRunId, [
-			...(sourcesByRun.get(row.promptRunId) ?? []),
-			{ url: row.url, domain: row.domain, title: row.title },
-		]);
 
-	const toItem = (candidate: (typeof picked)[number]): SentimentEvidenceItem | null => {
+	const toItem = (candidate: ExtremeRow): SentimentEvidenceItem | null => {
 		const observation = observationById.get(candidate.observationId);
 		const run = runById.get(candidate.promptRunId);
 		if (!observation || !run) return null;
@@ -673,7 +812,7 @@ export async function loadSentimentEvidence(scope: SentimentEvidenceScope): Prom
 			score: candidate.score,
 			category: (selectedAspect ? selectedAspect.category : observation.category) as SentimentCategory,
 			evidence,
-			excerpt: excerptAround(body, evidence),
+			...excerptAround(body, evidence),
 			aspects,
 			sources: sourcesByRun.get(run.id) ?? [],
 		};
@@ -681,7 +820,7 @@ export async function loadSentimentEvidence(scope: SentimentEvidenceScope): Prom
 	return {
 		entity: { key: scope.entityKey, name: entityName },
 		aspect: scope.aspect,
-		totalObservations: candidates.length,
+		totalObservations: total,
 		highest: highest.map(toItem).filter((item): item is SentimentEvidenceItem => item !== null),
 		lowest: lowest.map(toItem).filter((item): item is SentimentEvidenceItem => item !== null),
 	};

@@ -20,10 +20,13 @@ export function entityRow(args: {
 	eligible: number;
 	mentions: number;
 	classified: number;
+	/** Aspect sample; defaults to `classified` (the overall view). */
+	sample?: number;
 	counts?: Partial<Counts>;
 	scoreSum?: number;
 }): SentimentEntityRow {
 	const counts: Counts = { positive: 0, neutral: 0, mixed: 0, negative: 0, ...args.counts };
+	const sample = args.sample ?? args.classified;
 	return {
 		key: args.key,
 		entityType: args.isBrand ? "brand" : "competitor",
@@ -32,15 +35,17 @@ export function entityRow(args: {
 		isBrand: args.isBrand === true,
 		mentions: args.mentions,
 		classified: args.classified,
+		sample,
 		counts,
 		metrics: computeEntityMetrics({
 			eligibleResponses: args.eligible,
 			mentions: args.mentions,
 			classified: args.classified,
+			sample,
 			...counts,
 			scoreSum: args.scoreSum ?? 0,
 		}),
-		lowSample: args.classified > 0 && args.classified < LOW_SAMPLE_THRESHOLD,
+		lowSample: sample > 0 && sample < LOW_SAMPLE_THRESHOLD,
 	};
 }
 
@@ -52,7 +57,7 @@ function series(roster: string[], values: Record<string, (number | null)[]>): Se
 		values: Object.fromEntries(
 			roster.map((key) => {
 				const v = values[key]?.[i] ?? null;
-				return [key, { sentiment: v, classified: v === null ? 0 : 1 + (i % 3) }];
+				return [key, { sentiment: v, sample: v === null ? 0 : 1 + (i % 3) }];
 			}),
 		),
 	}));
@@ -62,6 +67,7 @@ const base = (over: Partial<SentimentOverviewResponse>): SentimentOverviewRespon
 	brand: { id: "mock-brand-id", name: "Acme Insurance" },
 	dateRange: { fromDate: DATES_20[0], toDate: DATES_20[DATES_20.length - 1], timezone: "UTC" },
 	aspect: "overall",
+	aspectLabel: null,
 	availableAspects: [
 		{ key: "price", label: "Price", count: 4 },
 		{ key: "coverage", label: "Coverage", count: 2 },
@@ -72,6 +78,7 @@ const base = (over: Partial<SentimentOverviewResponse>): SentimentOverviewRespon
 	coverage: {
 		responsesDetected: 10,
 		responsesWithMentions: 8,
+		responsesUnextractable: 0,
 		analyses: { completed: 8, pending: 0, failed: 0, noMentions: 2 },
 	},
 	entities: [],
@@ -167,6 +174,7 @@ export function mockSentimentOverview(): SentimentOverviewResponse {
 		coverage: {
 			responsesDetected: 10,
 			responsesWithMentions: 9,
+			responsesUnextractable: 0,
 			analyses: { completed: 8, pending: 1, failed: 0, noMentions: 1 },
 		},
 		series: series(roster, {
@@ -177,6 +185,131 @@ export function mockSentimentOverview(): SentimentOverviewResponse {
 			e: [null, null, 70, 72, 74, 71, 73, null, null, 75, 72, 70, 71, 74, 76, 73, 72, 70, 71, 74],
 			f: [50, null, null, 50, 50, null, 50, 50, null, 50, 50, 50, null, 50, 50, 50, 50, null, 50, 50],
 			g: [null, 55, 52, 50, 48, 53, 55, 57, 52, 51, 49, 54, 56, 52, 50, 53, 55, 54, 52, 51],
+		}),
+	});
+}
+
+/**
+ * B4 acceptance fixture — the Price view of the canonical data: T = 10, Alpha
+ * mentioned in 5 responses, all 5 classified, only 1 response evaluates Price
+ * (score 72). Expected: Price sentiment 72 · "1 Price mention", Price Mention
+ * Visibility 10 %, Positive Visibility 10 %, coverage still 100 %, no Partial.
+ */
+export function mockSentimentPriceAspect(): SentimentOverviewResponse {
+	const T = 10;
+	const entities = [
+		entityRow({
+			key: "brand",
+			name: "Acme Insurance",
+			isBrand: true,
+			eligible: T,
+			mentions: 8,
+			classified: 8,
+			sample: 3,
+			counts: { positive: 2, negative: 1 },
+			scoreSum: 80 + 75 + 40,
+		}),
+		entityRow({
+			key: "a",
+			name: "Alpha Legal",
+			eligible: T,
+			mentions: 5,
+			classified: 5,
+			sample: 1,
+			counts: { positive: 1 },
+			scoreSum: 72,
+		}),
+		entityRow({ key: "b", name: "Bravo Protect", eligible: T, mentions: 1, classified: 1, sample: 0 }),
+		entityRow({
+			key: "c",
+			name: "Charlie Cover",
+			eligible: T,
+			mentions: 4,
+			classified: 4,
+			sample: 2,
+			counts: { negative: 2 },
+			scoreSum: 20 + 30,
+		}),
+	];
+	const roster = ["brand", "c", "a"];
+	return base({
+		aspect: "price",
+		aspectLabel: "Price",
+		entities,
+		chartRoster: roster,
+		coverage: {
+			responsesDetected: 10,
+			responsesWithMentions: 9,
+			responsesUnextractable: 0,
+			analyses: { completed: 9, pending: 0, failed: 0, noMentions: 1 },
+		},
+		series: series(roster, {
+			brand: [
+				80,
+				null,
+				null,
+				75,
+				null,
+				null,
+				null,
+				null,
+				40,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+			],
+			a: [
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				72,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+			],
+			c: [
+				null,
+				20,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				30,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+			],
 		}),
 	});
 }
@@ -200,6 +333,7 @@ export function mockSentimentBrandOnly(): SentimentOverviewResponse {
 		coverage: {
 			responsesDetected: 6,
 			responsesWithMentions: 6,
+			responsesUnextractable: 0,
 			analyses: { completed: 6, pending: 0, failed: 0, noMentions: 0 },
 		},
 		series: series(["brand"], {
@@ -220,6 +354,7 @@ export function mockSentimentPending(): SentimentOverviewResponse {
 		coverage: {
 			responsesDetected: 7,
 			responsesWithMentions: 7,
+			responsesUnextractable: 0,
 			analyses: { completed: 0, pending: 5, failed: 2, noMentions: 0 },
 		},
 		series: series(["brand", "a"], {}),
@@ -233,6 +368,7 @@ export function mockSentimentEmpty(): SentimentOverviewResponse {
 		coverage: {
 			responsesDetected: 0,
 			responsesWithMentions: 0,
+			responsesUnextractable: 0,
 			analyses: { completed: 0, pending: 0, failed: 0, noMentions: 0 },
 		},
 	});
@@ -284,17 +420,23 @@ export function mockSentimentSparse(): SentimentOverviewResponse {
 		coverage: {
 			responsesDetected: 41,
 			responsesWithMentions: 15,
-			analyses: { completed: 15, pending: 0, failed: 0, noMentions: 26 },
+			responsesUnextractable: 2,
+			analyses: { completed: 15, pending: 0, failed: 0, noMentions: 24 },
 		},
 		series: months.map((bucketStart, i) => ({
 			bucketStart,
 			values: {
-				brand: { sentiment: brand[i], classified: brand[i] === null ? 0 : 2 },
-				a: { sentiment: i === 4 ? 30 : null, classified: i === 4 ? 3 : 0 },
+				brand: { sentiment: brand[i], sample: brand[i] === null ? 0 : 2 },
+				a: { sentiment: i === 4 ? 30 : null, sample: i === 4 ? 3 : 0 },
 			},
 		})),
 	});
 }
+
+/** The answer window every fixture item shows; it starts at this raw offset of the (fictional) stored body. */
+const EXCERPT_RAW_START = 412;
+const EXCERPT_BODY =
+	"Im Vergleich der Anbieter fällt auf: Alpha Legal reguliert Schäden schnell, verlangt aber überdurchschnittliche Beiträge. Für Familien lohnt sich der Blick auf den Leistungsumfang";
 
 const item = (args: {
 	id: string;
@@ -311,9 +453,20 @@ const item = (args: {
 	runCreatedAt: "2026-08-20T10:00:00.000Z",
 	score: args.score,
 	category: args.category,
-	evidence: [{ quote: "Alpha Legal reguliert Schäden schnell", start: 0, end: 10 }],
-	excerpt:
-		"…Im Vergleich der Anbieter fällt auf: Alpha Legal reguliert Schäden schnell, verlangt aber überdurchschnittliche Beiträge. Für Familien lohnt sich der Blick auf den Leistungsumfang…",
+	evidence: [
+		{
+			quote: "Alpha Legal reguliert Schäden schnell",
+			start: EXCERPT_RAW_START + EXCERPT_BODY.indexOf("Alpha Legal reguliert Schäden schnell"),
+			end:
+				EXCERPT_RAW_START +
+				EXCERPT_BODY.indexOf("Alpha Legal reguliert Schäden schnell") +
+				"Alpha Legal reguliert Schäden schnell".length,
+			polarity: "positive",
+		},
+	],
+	excerpt: `…${EXCERPT_BODY}…`,
+	// The leading ellipsis occupies index 0, so the window's first body character is raw offset EXCERPT_RAW_START.
+	excerptStart: EXCERPT_RAW_START - 1,
 	aspects: args.aspects ?? [{ key: "service", label: "Service", score: 82, category: "positive" }],
 	sources: args.withSources
 		? [

@@ -610,7 +610,9 @@ function ResponsesTab({
 		typeof rawOutput === "string" ? rawOutput : JSON.stringify(rawOutput, null, 2);
 	const focusedRef = useRef<HTMLDivElement | null>(null);
 	useEffect(() => {
-		if (focusedRun && focusedRef.current) focusedRef.current.scrollIntoView({ block: "start", behavior: "smooth" });
+		if (!focusedRun || !focusedRef.current) return;
+		const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+		focusedRef.current.scrollIntoView({ block: "start", behavior: reducedMotion ? "auto" : "smooth" });
 	}, [focusedRun]);
 	const listed = focusedRun ? runs.filter((run: any) => run.id !== focusedRun.id) : runs;
 	const ordered = focusedRun ? [focusedRun, ...listed] : listed;

@@ -15,8 +15,17 @@ export const formatScore = (value: number | null | undefined): string =>
 export const formatPct = (value: number | null | undefined): string =>
 	typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)}%` : "—";
 
-/** "24 mentions" or "21 of 24 analyzed mentions" when classification is incomplete. */
-export function formatMentionCount(row: { mentions: number; classified: number }): string {
+/**
+ * The sample beside a score, spelled out. Overall view: "24 mentions", or
+ * "21 of 24 analyzed mentions" while classification is incomplete. Aspect
+ * view: the aspect sample, e.g. "1 Price mention" — an answer that never
+ * discussed Price is not in that sample and is not "unanalyzed".
+ */
+export function formatSampleCount(
+	row: { mentions: number; classified: number; sample: number },
+	aspectLabel: string | null,
+): string {
+	if (aspectLabel !== null) return `${row.sample} ${aspectLabel} ${row.sample === 1 ? "mention" : "mentions"}`;
 	if (row.mentions === 0) return "0 mentions";
 	if (row.classified < row.mentions) {
 		return `${row.classified} of ${row.mentions} analyzed ${row.mentions === 1 ? "mention" : "mentions"}`;
@@ -24,8 +33,12 @@ export function formatMentionCount(row: { mentions: number; classified: number }
 	return `${row.mentions} ${row.mentions === 1 ? "mention" : "mentions"}`;
 }
 
-/** Compact legend form of the same sample size: "24 mentions" or "21/24 analyzed". */
-export function formatMentionCountCompact(row: { mentions: number; classified: number }): string {
+/** Compact legend form of the same sample: "24 mentions", "21/24 analyzed" or "1 Price". */
+export function formatSampleCountCompact(
+	row: { mentions: number; classified: number; sample: number },
+	aspectLabel: string | null,
+): string {
+	if (aspectLabel !== null) return `${row.sample} ${aspectLabel}`;
 	if (row.mentions === 0) return "0 mentions";
 	if (row.classified < row.mentions) return `${row.classified}/${row.mentions} analyzed`;
 	return `${row.mentions} ${row.mentions === 1 ? "mention" : "mentions"}`;

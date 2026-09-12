@@ -18,20 +18,23 @@ import { type SentimentFilters, useSentimentEvidence } from "@/hooks/use-sentime
 import type { SentimentAspectParam } from "@/lib/sentiment-search";
 import type { SentimentEvidenceItem, SentimentEvidenceResponse } from "@/server/sentiment";
 
-/** Wrap every occurrence of the evidence quotes in `<mark>`, case-insensitively, without overlapping. */
-export function highlightExcerpt(excerpt: string, quotes: readonly string[]): ReactNode[] {
+/**
+ * Wrap the stored evidence spans in `<mark>` using their raw offsets mapped
+ * onto the excerpt window (`start - excerptStart`), clipped to the window and
+ * without overlapping. Nothing is re-searched by text, so an excerpt whose
+ * stored form differs from the model's quote in whitespace or Unicode form
+ * still highlights exactly the cited characters.
+ */
+export function highlightExcerpt(
+	excerpt: string,
+	spans: readonly { start: number; end: number }[],
+	excerptStart: number,
+): ReactNode[] {
 	const ranges: [number, number][] = [];
-	const lower = excerpt.toLowerCase();
-	for (const quote of quotes) {
-		const needle = quote.trim().toLowerCase();
-		if (!needle) continue;
-		let from = 0;
-		while (from < lower.length) {
-			const at = lower.indexOf(needle, from);
-			if (at === -1) break;
-			ranges.push([at, at + needle.length]);
-			from = at + needle.length;
-		}
+	for (const span of spans) {
+		const start = Math.max(0, span.start - excerptStart);
+		const end = Math.min(excerpt.length, span.end - excerptStart);
+		if (end > start) ranges.push([start, end]);
 	}
 	ranges.sort((a, b) => a[0] - b[0]);
 	const parts: ReactNode[] = [];
@@ -86,10 +89,7 @@ function EvidenceCard({
 				className="text-muted-foreground mt-2 line-clamp-6 whitespace-pre-line text-xs leading-relaxed"
 				data-testid="sentiment-evidence-excerpt"
 			>
-				{highlightExcerpt(
-					item.excerpt,
-					item.evidence.map((e) => e.quote),
-				)}
+				{highlightExcerpt(item.excerpt, item.evidence, item.excerptStart)}
 			</p>
 			<p className="mt-2 truncate text-xs" title={item.promptText}>
 				<span className="text-muted-foreground">Prompt: </span>

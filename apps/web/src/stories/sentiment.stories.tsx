@@ -11,6 +11,7 @@ import {
 	mockSentimentEvidenceFew,
 	mockSentimentOverview,
 	mockSentimentPending,
+	mockSentimentPriceAspect,
 	mockSentimentSparse,
 } from "./sentiment-fixtures";
 
@@ -142,6 +143,43 @@ export const SortedByNegativeVisibility: Story = {
 		expect(
 			rowFor(canvasElement, "Foxtrot Rechtsschutz").querySelector('[role="img"]')?.getAttribute("aria-label"),
 		).toBe("Positive 0, Neutral 0, Mixed 2, Negative 0");
+	},
+};
+
+/** B4 — the Price view: sample-based score and visibility, no Partial cue for answers that skip Price. */
+export const PriceAspect: Story = {
+	args: { data: mockSentimentPriceAspect() },
+	play: async ({ canvasElement }) => {
+		const root = canvasElement;
+		await waitFor(() => expect(q(root, "sentiment-leaderboard")).toBeTruthy());
+		const a = rowFor(root, "Alpha Legal");
+		expect(cellText(a, 3)).toContain("72 · 1 Price mention");
+		expect(cellText(a, 3)).toContain("Low sample");
+		expect(cellText(a, 3)).not.toContain("Partial");
+		expect(cellText(a, 4)).toBe("10%");
+		expect(cellText(a, 5)).toBe("10%");
+		expect(cellText(a, 6)).toBe("0%");
+		expect(cellText(a, 8)).toBe("100%");
+		expect(a.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe(
+			"Positive 1, Neutral 0, Mixed 0, Negative 0",
+		);
+		// Bravo is mentioned and classified but never discusses Price: a dash, 0 %, and still full coverage.
+		const b = rowFor(root, "Bravo Protect");
+		expect(cellText(b, 3)).toBe("— · 0 Price mentions");
+		expect(cellText(b, 4)).toBe("0%");
+		expect(cellText(b, 8)).toBe("100%");
+		expect(root.querySelector("[data-testid=sentiment-coverage-note]")).toBeNull();
+		expect(root.textContent).toContain("Price Mention Visibility");
+		expect(q(root, "sentiment-headline").textContent).toBe("65");
+		expect(q(root, "sentiment-headline-mentions").textContent).toContain("3 Price mentions");
+		const legend = [...q(root, "sentiment-legend").querySelectorAll("li")].map((li) => li.textContent ?? "");
+		expect(legend[0]).toContain("65 · 3 Price");
+		// Roster order follows the Price sample (Charlie 2 before Alpha 1), never the mention count.
+		expect(legend.map((text) => text.replace(/\d.*$/, "").trim())).toEqual([
+			"Acme InsuranceYou",
+			"Charlie Cover",
+			"Alpha Legal",
+		]);
 	},
 };
 

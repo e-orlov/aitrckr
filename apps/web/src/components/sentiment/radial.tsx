@@ -10,9 +10,9 @@ import type { MetricLegendItem } from "@/components/metric-summary/metric-legend
 import {
 	colorFor,
 	entityColorMap,
-	formatMentionCount,
-	formatMentionCountCompact,
 	formatPct,
+	formatSampleCount,
+	formatSampleCountCompact,
 	formatScore,
 } from "@/components/sentiment/format";
 import type { SentimentEntityRow } from "@/server/sentiment";
@@ -21,17 +21,25 @@ export interface SentimentRing {
 	key: string;
 	name: string;
 	isBrand: boolean;
-	/** Drawn value; 0 when nothing is classified so the track stays empty. */
+	/** Drawn value; 0 when the sample is empty so the track stays empty. */
 	value: number;
 	sentiment: number | null;
 	mentions: number;
 	classified: number;
+	sample: number;
 	mentionVisibility: number | null;
+	sampleVisibility: number | null;
+	/** Selected aspect label, null in the overall view. */
+	aspectLabel: string | null;
 	fill: string;
 }
 
 /** The one ordered dataset behind the rings and the legend: brand first, then the roster in order. */
-export function buildSentimentRings(roster: readonly string[], rows: readonly SentimentEntityRow[]): SentimentRing[] {
+export function buildSentimentRings(
+	roster: readonly string[],
+	rows: readonly SentimentEntityRow[],
+	aspectLabel: string | null = null,
+): SentimentRing[] {
 	const colors = entityColorMap(roster);
 	const byKey = new Map(rows.map((row) => [row.key, row]));
 	return roster.flatMap((key) => {
@@ -46,23 +54,26 @@ export function buildSentimentRings(roster: readonly string[], rows: readonly Se
 				sentiment: row.metrics.sentiment,
 				mentions: row.mentions,
 				classified: row.classified,
+				sample: row.sample,
 				mentionVisibility: row.metrics.mentionVisibility,
+				sampleVisibility: row.metrics.sampleVisibility,
+				aspectLabel,
 				fill: colorFor(colors, key),
 			},
 		];
 	});
 }
 
-/** Legend rows in ring order: score and mention count, the same once-rounded values the tooltip shows. */
+/** Legend rows in ring order: score and sample, the same once-rounded values the tooltip shows. */
 export function sentimentLegendItems(rings: readonly SentimentRing[]): MetricLegendItem[] {
 	return rings.map((ring) => ({
 		id: ring.key,
 		label: ring.name,
 		color: ring.fill,
-		valueLabel: `${formatScore(ring.sentiment)} · ${formatMentionCountCompact(ring)}`,
+		valueLabel: `${formatScore(ring.sentiment)} · ${formatSampleCountCompact(ring, ring.aspectLabel)}`,
 		emphasis: ring.isBrand ? "primary" : "muted",
 		badgeLabel: ring.isBrand ? "You" : undefined,
-		title: `${ring.name}: ${formatScore(ring.sentiment)} · ${formatMentionCount(ring)}`,
+		title: `${ring.name}: ${formatScore(ring.sentiment)} · ${formatSampleCount(ring, ring.aspectLabel)}`,
 	}));
 }
 
@@ -124,13 +135,20 @@ export function SentimentRadialChart({
 									<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 tabular-nums">
 										<dt className="text-muted-foreground">Sentiment</dt>
 										<dd className="text-right font-mono">{formatScore(ring.sentiment)} / 100</dd>
-										<dt className="text-muted-foreground">Analyzed</dt>
+										<dt className="text-muted-foreground">
+											{ring.aspectLabel ? `${ring.aspectLabel} sample` : "Analyzed"}
+										</dt>
 										<dd className="text-right font-mono">
-											{ring.classified} of {ring.mentions} mentions
+											{ring.aspectLabel
+												? `${ring.sample} of ${ring.classified} analyzed`
+												: `${ring.classified} of ${ring.mentions} mentions`}
 										</dd>
-										<dt className="text-muted-foreground">Mentioned in</dt>
+										<dt className="text-muted-foreground">
+											{ring.aspectLabel ? `${ring.aspectLabel} in` : "Mentioned in"}
+										</dt>
 										<dd className="text-right font-mono">
-											{ring.mentions} / {eligibleResponses} responses ({formatPct(ring.mentionVisibility)})
+											{ring.aspectLabel ? ring.sample : ring.mentions} / {eligibleResponses} responses (
+											{formatPct(ring.aspectLabel ? ring.sampleVisibility : ring.mentionVisibility)})
 										</dd>
 									</dl>
 									<div className="text-muted-foreground">50 = neutral midpoint</div>
