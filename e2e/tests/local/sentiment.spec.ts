@@ -37,7 +37,8 @@ const runId = (i: number) => uuid("3", i);
 const ALPHA_SCORES = [100, 96, 92, 88, 84, 80, 76, 72, 68, 64, 60, 56, 52, 50, 50, 48, 44, 40, 36, 32, 28, 24, 20, 10];
 const categoryFor = (score: number, mixed = false) => (score > 50 ? "positive" : score < 50 ? "negative" : mixed ? "mixed" : "neutral");
 const answerFor = (i: number) => `Synthetic answer ${i}. Alpha delivers a solid tariff while ${BRAND_NAME} keeps growing. Bravo is also named.`;
-const runIndex = (run: string) => Number.parseInt(run.slice(-12), 10);
+// `uuid("3", i)` puts the block digit before the zero-padded index; the index is the last eleven digits.
+const runIndex = (run: string) => Number.parseInt(run.slice(-11), 10);
 /** An exact evidence span with raw offsets into the seeded answer body. */
 const evidenceSpan = (run: string, quote: string, polarity: "positive" | "negative" | "neutral") => {
 	const start = answerFor(runIndex(run)).indexOf(quote);

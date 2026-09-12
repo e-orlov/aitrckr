@@ -85,32 +85,43 @@ Acceptance fixture (encoded in `UT-SNT-002`): T=10; A: scores 100P, 80P, 50 Mixe
 
 ## Traceability — SENT-R1/R2
 
-Implemented in the second PR (`feat/sent-01-brand-competitor-sentiment`). Tables: `prompt_run_entity_mentions`,
-`sentiment_analyses`, `sentiment_observations`, `sentiment_aspect_observations` (migration `0021_sentiment_foundation`,
-journal 21 → 22). Library `packages/lib/src/sentiment/`, worker queue `classify-sentiment` (`localConcurrency: 1`),
-CLI `pnpm -C apps/worker backfill:sentiment {mentions|sentiment}`, page `/app/org/$org/brand/$brand/sentiment`.
+Implemented in the second PR (`feat/sent-01-brand-competitor-sentiment`). Tables: `sentiment_detections` (run-level,
+detector-versioned receipts), `prompt_run_entity_mentions`, `sentiment_analyses`, `sentiment_observations`,
+`sentiment_aspect_observations` (migration `0021_sentiment_foundation`, journal 21 → 22; every row cascades with its
+prompt run, competitor references stay restrictive). Library `packages/lib/src/sentiment/`, worker queue
+`classify-sentiment` (`localConcurrency: 1`, atomic job-side claim), CLI `pnpm -C apps/worker backfill:sentiment
+{mentions|sentiment}`, page `/app/org/$org/brand/$brand/sentiment`.
+
+Corrective round (SENTIMENT MERGE GO withheld → B1–B8): provider lock (B1), detection receipts (B2), atomic claim (B3),
+aspect sample metrics (B4), SQL-bounded evidence (B5), cascade deletion (B6), raw-offset evidence + Mixed polarity (B7),
+input-hash freshness (B8). Rows below were reset from PASS and re-proven with the new tests.
 
 | Test ID | Required proof | Where | Status |
 |---|---|---|---|
 | UT-SNT-001 | Score/category boundaries, Mixed vs Neutral, null behaviour, round-once | `packages/lib/src/sentiment/__tests__/metrics.test.ts` | PASS |
 | UT-SNT-002 | Canonical T/M/C/P/U/X/N formulas using the mandated fixture | same (`UT-SNT-002 canonical fixture`) + Storybook `Default` + integration `IT-SNT-006` | PASS |
 | UT-SNT-003 | Entity detection with aliases, domains, Unicode boundaries, repetition, citation-only exclusion | `__tests__/detector.test.ts` | PASS |
-| UT-SNT-004 | Entity-targeted comparisons, negations and multi-entity attribution | golden corpus critical cases (g05–g09, g13, g19, g20, g25, g31, g40, g41) validated through `classifySentiment` | PASS (reference labels); live agreement gated at CP6 |
-| UT-SNT-005 | Versioned aspect normalization and overall/aspect divergence | `types.ts` taxonomy `sent-aspects-v1`, `__tests__/classifier.test.ts` (aspect keys, duplicates), `IT-SNT-006` aspect view, golden g04/g14/g34 | PASS |
-| UT-SNT-006 | Evidence matching/offset validation and Mixed dual evidence | `__tests__/classifier.test.ts` | PASS |
-| UT-SNT-007 | Deterministic top/bottom non-overlap and tie-breaks | `__tests__/metrics.test.ts` + `IT-SNT-007` + E2E-SNT-003 | PASS |
+| UT-SNT-004 | Entity-targeted comparisons, negations and multi-entity attribution | golden corpus critical cases validated through `classifySentiment` | PASS (reference labels); live agreement gated at CP6 |
+| UT-SNT-005 | Versioned aspect normalization and overall/aspect divergence | `types.ts` taxonomy `sent-aspects-v1`, `__tests__/classifier.test.ts`, `IT-SNT-006` aspect view, golden g04/g14/g34 | PASS |
+| UT-SNT-006 | Evidence matching/offset validation and Mixed dual evidence | `__tests__/classifier.test.ts`: raw offsets resolve into the stored body (NFKC ligature, fullwidth, collapsed whitespace), per-excerpt polarity, Mixed needs one positive + one negative (two same-polarity excerpts fail) | PASS (B7 re-proven) |
+| UT-SNT-007 | Deterministic top/bottom non-overlap and tie-breaks | `__tests__/metrics.test.ts` (`extremesAllocation`, code-unit tie-breaks) + `IT-SNT-007` + E2E-SNT-003 | PASS (B5 re-proven) |
 | UT-SNT-008 | Adaptive buckets, null gaps, Top-6 roster and stable sorting | `__tests__/metrics.test.ts` + `IT-SNT-006` series | PASS |
-| GOLD-SNT-001 | ≥40 synthetic labelled DE/EN cases; reference labels validate 100 %; evaluator gates | `golden/corpus.ts` (42 cases, 23 DE / 19 EN, 14 critical), `golden/evaluate.ts`, `__tests__/golden.test.ts`; live: `pnpm --filter @workspace/lib eval:sentiment-golden -- --live --max N` (paid, gated) | PASS offline; live at CP6 |
-| CT-SNT-001 | Tables, checks, unique constraints, RLS and indexes | `apps/worker/scripts/verify-sentiment-db.ts` (21 checks on real Postgres) | PASS |
-| CT-SNT-002 | Structured research uses `openai/gpt-5-mini`, strict schema and web search; no Luna override | `classifier.test.ts` (one call, `webSearch: true`); provider path unchanged (`providers/registry/openrouter.ts` `DEFAULT_RESEARCH_MODEL`) | PASS |
-| IT-SNT-001 | Job success, no-mention, invalid output, evidence failure, retry and stale version | `__tests__/job.test.ts` + local worker run with the stub provider (schema failure → `failed`, 0 observations, failure usage event, bounded retry) | PASS |
-| IT-SNT-002 | Queue policy, singleton dedupe, DB idempotency and concurrency race | `verify-sentiment-db.ts` (8 concurrent sends → 1 accepted; 8 concurrent persistMentions/ensureAnalysis → 1 row) | PASS |
-| IT-SNT-003 | New prompt run remains successful if supplemental enqueue fails; repair recovers it | `__tests__/job.test.ts` (best-effort enqueue never throws), `job.ts` repair path, CLI `mentions` mode | PASS |
-| IT-SNT-004 | Mention inventory/backfill dry run, cursor resume and stable totals | CLI dry → apply → dry on the seeded DB (written 1 → alreadyCurrent 1, stable counts) | PASS |
-| IT-SNT-005 | Paid enqueue limit counts accepted jobs and never calls provider in CLI | CLI `--enqueue --limit 1`: accepted 1, second run deduplicated 1; no provider import in the CLI | PASS |
-| IT-SNT-006 | Overview auth/tenancy, filters, formulas, all active rows, inactive exclusion, bounded payload and no writes | `apps/web/src/server/__tests__/sentiment-overview.integration.test.ts` | PASS |
-| IT-SNT-007 | Evidence endpoint bounds, original citations only, authorization and deterministic extremes | same | PASS |
-| IT-SNT-008 | Run-specific prompt deep link authorization and pagination-independent retrieval | `getPromptRunFn` (brand → prompt → run) + E2E-SNT-003 / "deep link rejects a run that belongs to another prompt" | PASS |
-| IT-SNT-009 | Empty and populated migrations plus rollback-compatible old app paths | 0021 applied on the seeded DB and the empty chain; additive tables only (old images ignore them) — populated production copy at CP5 | PASS (local); rehearsal at CP5 |
-| ST-SNT-001…003 | Storybook default/edge/evidence fixtures | `apps/web/src/stories/sentiment.stories.tsx` (10 stories: Default, SortedByNegativeVisibility, BrandOnly, ClassificationPending, SparseAllTime, Empty, Loading, ErrorState, ExpandedEvidence, ExpandedFewObservations) | PASS |
-| E2E-SNT-001…006 | Route/sidebar/filter parity, URL state + stale `q`/`model`, expansion + lazy request + 10/10 + deep link, 375/768/1280/1400 + dark + focus + tooltip containment, regressions, SQL oracle | `e2e/tests/local/sentiment.spec.ts` (8 tests) | PASS |
+| UT-SNT-009 | Selected-aspect sample metrics: S vs M vs C, `S/T` visibility, no Partial from an absent aspect | `__tests__/metrics.test.ts` (`B4` cases), Storybook `PriceAspect`, `IT-SNT-006` "B4" case, E2E-SNT-002 Price view | PASS (B4) |
+| UT-SNT-010 | Input hash covers normalized body and every candidate identity in stable order | `__tests__/classifier.test.ts` (`B8`) | PASS (B8) |
+| GOLD-SNT-001 | ≥40 synthetic labelled DE/EN cases; reference labels validate 100 %; evaluator gates | `golden/corpus.ts` (42 cases, 23 DE / 19 EN, 14 critical, polarity-labelled evidence), `golden/evaluate.ts`, `__tests__/golden.test.ts`; live: `pnpm --filter @workspace/lib eval:sentiment-golden -- --live --max N` (paid, gated) | PASS offline; live at CP6 |
+| CT-SNT-001 | Tables, checks, unique constraints, RLS, indexes, cascades | `apps/worker/scripts/verify-sentiment-db.ts` (28 checks on real Postgres, incl. receipt checks, concurrent `claimAnalysis`, cascade on run delete, competitor FK restrictive) | PASS (B2/B3/B6) |
+| CT-SNT-002 | Sentiment resolves OpenRouter `openai/gpt-5-mini`, strict schema, web-search server tool; ignores `ONBOARDING_LLM_TARGET` and direct OpenAI/Anthropic keys | `__tests__/provider.test.ts` (all keys configured → OpenRouter; stubbed fetch body asserted), `classifier.test.ts` model-mismatch guard | PASS (B1) |
+| IT-SNT-001 | Job success, no-mention, invalid output, evidence failure, retry, stale version, lost claim | `__tests__/job.test.ts` + stub-runtime worker run (fails closed without `OPENROUTER_API_KEY`; attempt attributed to openrouter / gpt-5-mini) | PASS |
+| IT-SNT-002 | Queue policy, singleton dedupe, DB idempotency and concurrency race | `verify-sentiment-db.ts` (8 concurrent sends → 1 accepted; 8 concurrent `persistDetection` → 1 receipt + 1 row per entity; 8 concurrent claims → 1 winner) | PASS |
+| IT-SNT-003 | New prompt run remains successful if supplemental enqueue fails; repair recovers it | `__tests__/job.test.ts` (receipt written for no-answer/no-mentions, enqueue never throws), `job.ts` repair path | PASS |
+| IT-SNT-004 | Receipt-based inventory/backfill: dry → apply → dry for mention, zero-mention and unextractable runs; detector-version change | `sentiment-pipeline.integration.test.ts` "IT-SNT-004" + CLI dry → apply → dry on the seeded DB (written 49 → alreadyCurrent 49) | PASS (B2) |
+| IT-SNT-005 | Paid enqueue limit counts accepted jobs and never calls provider in CLI | CLI `sentiment --enqueue --limit 1`: accepted 1; worker fails closed in the stub runtime, 0 calls | PASS |
+| IT-SNT-006 | Overview auth/tenancy, filters, formulas, all active rows, inactive exclusion, coverage from receipts, aspect sample, no writes | `sentiment-overview.integration.test.ts` | PASS (B2/B4) |
+| IT-SNT-007 | Evidence bounded in SQL (COUNT + ORDER BY/LIMIT), non-overlap allocation, tie-breaks, ≤20 run fetch, deduped/capped citations, EXPLAIN | `sentiment-pipeline.integration.test.ts` "IT-SNT-007" (3,001 observations; SQL oracle; plan = `Limit` over `Index Scan Backward … brand_entity_score_idx`, evidence file `evidence-explain.txt`) + `sentiment-overview.integration.test.ts` | PASS (B5) |
+| IT-SNT-008 | Run-specific prompt deep link authorization and pagination-independent retrieval; reduced motion respected | `getPromptRunFn` + E2E-SNT-003 / "deep link rejects a run that belongs to another prompt"; `prefers-reduced-motion` → `behavior: auto` | PASS |
+| IT-SNT-009 | Empty and populated migrations plus rollback-compatible old app paths | 0021 (regenerated, unmerged) applied on the empty chain 0000→0021 and the seeded DB; additive tables only, cascades make the old deletion sequence safe | PASS (local); rehearsal at CP5 |
+| IT-SNT-010 | Atomic job-side claim: N simultaneous `runSentimentJob` + barrier → 1 provider call, 1 observation set, 1 usage event; abandoned claim recovery | `sentiment-pipeline.integration.test.ts` "IT-SNT-010" (6 concurrent, real Postgres) | PASS (B3) |
+| IT-SNT-011 | Hash/taxonomy freshness: alias edit and newly detected competitor become eligible and are reclassified once; taxonomy mismatch never current | `sentiment-pipeline.integration.test.ts` "IT-SNT-011" | PASS (B8) |
+| IT-SNT-012 | Prompt DELETE with a full sentiment graph leaves no orphans; competitor cannot be hard-deleted | `sentiment-pipeline.integration.test.ts` "IT-SNT-012" (exact handler sequence) + `e2e/tests/local/sentiment.spec.ts` "B6" (real `DELETE /api/v1/prompts/:id`) | PASS (B6) |
+| ST-SNT-001…003 | Storybook default/edge/evidence fixtures | `apps/web/src/stories/sentiment.stories.tsx` (11 stories incl. `PriceAspect`; offset-based highlight fixture) | PASS |
+| E2E-SNT-001…006 | Route/sidebar/filter parity, URL state + stale `q`/`model`, expansion + lazy request + 10/10 + deep link, 375/768/1280/1400 + dark + focus + tooltip containment, regressions, SQL oracle | `e2e/tests/local/sentiment.spec.ts` (10 tests) | PASS |

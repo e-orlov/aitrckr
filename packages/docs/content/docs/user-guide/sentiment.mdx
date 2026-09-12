@@ -32,18 +32,18 @@ Click a row (or press Enter on it) to open the ten **highest-** and ten **lowest
 
 Use **Tags** and **Lookback** as on the other analytics pages, plus:
 
-- **Aspect** — switch every number on the page from the overall brand sentiment to one aspect (Price, Coverage, Service, Other).
+- **Aspect** — switch every number on the page from the overall brand sentiment to one aspect (Price, Coverage, Service, Other). In an aspect view the sample is the answers that actually evaluate that aspect (`72 · 1 Price mention`), Mention Visibility becomes the share of responses evaluating it, and an answer that mentions a brand without discussing the aspect is simply not part of the sample — it does not count as unanalyzed.
 - **Sort** — order the leaderboard by Sentiment, Mentions, Mention Visibility, Positive Visibility, Negative Visibility or Brand A–Z.
 
 There is no prompt search and no model selector on this page.
 
 ## How the numbers are computed
 
-For a brand `e` in the selected period: `T` evaluated responses, `M` responses mentioning `e`, `C` of those analyzed by the current classifier version:
+For a brand `e` in the selected period: `T` evaluated responses, `M` responses mentioning `e`, `C` of those analyzed by the current classifier version, and `S` the sample the view rests on (`S = C` overall; in an aspect view, the analyzed mentions whose answer evaluates that aspect):
 
-- Sentiment = mean score over the `C` analyzed mentions (no value when `C = 0`)
-- Mention Visibility = `M / T`, Positive Visibility = `Positive / T`, Negative Visibility = `Negative / T`
-- Coverage = `C / M`
+- Sentiment = mean score over the `S` answers in the sample (no value when `S = 0`)
+- Mention Visibility = `M / T` overall, `S / T` in an aspect view; Positive Visibility = `Positive / T`, Negative Visibility = `Negative / T` over the sample
+- Coverage = `C / M` — independent of the selected aspect; **Partial** appears only while `C < M`
 
 Citations never weight sentiment; they appear only as source links in the evidence details.
 
