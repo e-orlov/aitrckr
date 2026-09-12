@@ -42,22 +42,36 @@ export interface IndexedText {
 }
 
 const WHITESPACE = /\s/u;
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /**
  * The one normalization the detector, the evidence check and the excerpt
- * mapping share: NFKC and case folding per code point, every whitespace run
- * collapsed to one space, trimmed. Two strings that differ only in these
- * ways are the same text. Per-code-point folding keeps the mapping exact
- * (one raw code point → n normalized units) at the price of not composing
- * across code points, which is fine because both sides use the same rule.
+ * mapping share: whole-string Unicode NFKC, case folding, every whitespace
+ * run collapsed to one space, trimmed. Two strings that differ only in these
+ * ways are the same text.
+ *
+ * The offset map is built per grapheme cluster: canonical composition and
+ * reordering only ever act inside a cluster (a base with its combining
+ * marks, Hangul jamo), so normalizing cluster by cluster reproduces the
+ * whole-string result exactly — which is asserted, not assumed: `text` is
+ * always `raw.normalize("NFKC")` folded, and if a pathological input ever
+ * made the per-cluster concatenation differ, the whole body maps to one span
+ * (a match then still resolves to raw text that re-normalizes to the quote,
+ * or is rejected). Case folding is applied per cluster as well, so a raw
+ * cluster always maps to a contiguous run of normalized units.
  */
 export function normalizeIndexed(raw: string): IndexedText {
 	const state: FoldState = { units: [], starts: [], ends: [], spaceStart: -1, spaceEnd: -1 };
-	let rawIndex = 0;
-	for (const char of raw) {
-		const rawStart = rawIndex;
-		rawIndex += char.length;
-		for (const unit of char.normalize("NFKC").toLowerCase()) consumeUnit(state, unit, rawStart, rawIndex);
+	const whole = raw.normalize("NFKC");
+	const clusters = [...GRAPHEMES.segment(raw)].map((part) => ({
+		start: part.index,
+		end: part.index + part.segment.length,
+		normalized: part.segment.normalize("NFKC"),
+	}));
+	const aligned = clusters.map((c) => c.normalized).join("") === whole;
+	const pieces = aligned ? clusters : [{ start: 0, end: raw.length, normalized: whole }];
+	for (const piece of pieces) {
+		for (const unit of piece.normalized.toLowerCase()) consumeUnit(state, unit, piece.start, piece.end);
 	}
 	return { text: state.units.join(""), starts: state.starts, ends: state.ends };
 }

@@ -112,6 +112,34 @@ describe("UT-SNT-006 evidence and consistency validation", () => {
 		);
 	});
 
+	it("whole-string NFKC: decomposed body vs composed quote, and the reverse, resolve to exact raw slices", () => {
+		// Decomposed raw (e + U+0301), composed quote.
+		const decomposed = "Das Cafe\u0301 am Markt ist ausgezeichnet.";
+		const hit1 = locateEvidence(normalizeIndexed(decomposed), decomposed, "Caf\u00e9 am Markt", "positive");
+		expect(hit1).not.toBeNull();
+		expect(hit1).toMatchObject({ start: 4, end: 18 });
+		expect(decomposed.slice(hit1?.start, hit1?.end)).toBe("Cafe\u0301 am Markt");
+		expect(hit1?.quote).toBe("Cafe\u0301 am Markt");
+		// Composed raw, decomposed quote.
+		const composed = "Das Caf\u00e9 am Markt ist ausgezeichnet.";
+		const hit2 = locateEvidence(normalizeIndexed(composed), composed, "Cafe\u0301 am Markt", "positive");
+		expect(hit2).toMatchObject({ start: 4, end: 17 });
+		expect(composed.slice(hit2?.start, hit2?.end)).toBe("Caf\u00e9 am Markt");
+		// Composition across two adjacent code points inside a larger word (o + U+0308 → ö) with a stacked second mark.
+		const stacked = "Sch\u006f\u0308\u0301n und gut";
+		const hit3 = locateEvidence(normalizeIndexed(stacked), stacked, "sch\u00f6\u0301n", "positive");
+		expect(hit3).toMatchObject({ start: 0, end: 7 });
+		expect(stacked.slice(hit3?.start, hit3?.end)).toBe("Sch\u006f\u0308\u0301n");
+		// NFKC compatibility: circled digit, ligature and fullwidth letter in the body, plain ASCII in the quote.
+		const compat = "Tarif \u2460 ist \ufb01x und \uff21AA-bewertet";
+		const hit4 = locateEvidence(normalizeIndexed(compat), compat, "1 ist fix und AAA-bewertet", "positive");
+		expect(hit4).toMatchObject({ start: 6, end: compat.length });
+		expect(normalizeText(compat.slice(hit4?.start, hit4?.end))).toBe("1 ist fix und aaa-bewertet");
+		// The normalized text itself is the whole-string NFKC of the body, folded.
+		expect(normalizeIndexed(decomposed).text).toBe(decomposed.normalize("NFKC").toLowerCase());
+		expect(normalizeIndexed(compat).text).toBe(compat.normalize("NFKC").toLowerCase());
+	});
+
 	it("B7: offsets survive NFKC ligatures, fullwidth letters and collapsed whitespace in the stored body", () => {
 		const raw = "Die  Schadenregulierung\u00a0ist   e\uFB03zient;\n\n\uFF21RAG   bleibt  fair.";
 		const indexed = normalizeIndexed(raw);
@@ -219,10 +247,16 @@ describe("classifySentiment through an injected provider", () => {
 			modelVersion: "openai/gpt-5-mini",
 		}));
 		const provider = { id: "openrouter", runStructuredResearch: run } as unknown as Provider;
-		const result = await classifySentiment({ answerBody: answer, candidates }, { resolveProvider: () => provider });
+		const controller = new AbortController();
+		const result = await classifySentiment(
+			{ answerBody: answer, candidates },
+			{ resolveProvider: () => provider },
+			controller.signal,
+		);
 		expect(run).toHaveBeenCalledTimes(1);
-		const call = run.mock.calls[0][0] as unknown as { prompt: string; webSearch: boolean };
+		const call = run.mock.calls[0][0] as unknown as { prompt: string; webSearch: boolean; signal: AbortSignal };
 		expect(call.webSearch).toBe(true);
+		expect(call.signal).toBe(controller.signal);
 		expect(call.prompt).toContain('key "c-huk": HUK-COBURG (also known as: HUK)');
 		expect(call.prompt).toContain(answer);
 		expect(result.provider).toBe("openrouter");
