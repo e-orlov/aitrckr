@@ -1,0 +1,52 @@
+---
+title: Sentiment
+description: How AI engines describe your brand and your competitors when they mention them.
+---
+
+## Sentiment Page
+
+The **Sentiment** page sits beside Visibility and Share of Voice. Where those pages count *whether* a brand is mentioned, Sentiment measures *how* the stored AI answers portray each brand when they do mention it.
+
+Every stored answer is first scanned for mentions of your brand and of the competitors you track (names, aliases and domains). Each mentioned brand in an answer is then scored once, on the answer's own wording:
+
+- **Score** — 0 (maximally negative) to 100 (unequivocal endorsement); **50 is neutral**.
+- **Category** — Positive (51–100), Negative (0–49), Neutral (exactly 50, the answer only names or describes the brand) or **Mixed** (exactly 50, the answer contains meaningful praise *and* criticism of that brand).
+- **Aspects** — where the answer evaluates them, the same score and category are also recorded for **Price**, **Coverage**, **Service** and **Other**.
+
+Repeated mentions of one brand inside an answer count once. Comparisons, negations ("not expensive") and opinions the answer attributes to a cited source are judged for the brand they actually concern.
+
+## Reading the Page
+
+- **AI Sentiment** (top left) — your brand's selected-period sentiment as a large score with, right beside it, the number of mentions it rests on. The rings compare your brand with the up to six competitors that were mentioned most often in the period; the legend repeats score and mention count for each.
+- **Sentiment Trends** (top right) — the same brands over time on a fixed 0–100 axis with the neutral midpoint marked. A bucket without classified mentions is left blank rather than carried forward.
+- **Sentiment Leaderboard** — every tracked competitor and your brand with:
+  - **Sentiment** and the sample size (`60 · 24 mentions`, or `60 · 21 of 24 analyzed mentions` while analysis is still running),
+  - **Mention Visibility**, **Positive Visibility** and **Negative Visibility** — the share of all evaluated responses in the period that mention the brand, portray it positively, or portray it negatively,
+  - the Positive / Neutral / Mixed / Negative distribution, the analysis **Coverage**, and the number of evaluated **Responses**.
+
+A score based on fewer than five analyzed mentions carries a **Low sample** cue. A brand nobody mentioned shows a dash, never a fabricated score.
+
+Click a row (or press Enter on it) to open the ten **highest-** and ten **lowest-sentiment answers** for that brand: the exact excerpt the score rests on, the prompt, date and tags, aspect labels, the answer's own source links, and a link to the full stored response.
+
+## Filters
+
+Use **Tags** and **Lookback** as on the other analytics pages, plus:
+
+- **Aspect** — switch every number on the page from the overall brand sentiment to one aspect (Price, Coverage, Service, Other).
+- **Sort** — order the leaderboard by Sentiment, Mentions, Mention Visibility, Positive Visibility, Negative Visibility or Brand A–Z.
+
+There is no prompt search and no model selector on this page.
+
+## How the numbers are computed
+
+For a brand `e` in the selected period: `T` evaluated responses, `M` responses mentioning `e`, `C` of those analyzed by the current classifier version:
+
+- Sentiment = mean score over the `C` analyzed mentions (no value when `C = 0`)
+- Mention Visibility = `M / T`, Positive Visibility = `Positive / T`, Negative Visibility = `Negative / T`
+- Coverage = `C / M`
+
+Citations never weight sentiment; they appear only as source links in the evidence details.
+
+## Historical answers
+
+Answers stored before the feature existed are analyzed in the background in bounded batches. While that runs, the page shows how many responses are covered and marks scores as partial where mentions are still unanalyzed.

@@ -83,21 +83,34 @@ Acceptance fixture (encoded in `UT-SNT-002`): T=10; A: scores 100P, 80P, 50 Mixe
 | REG-ID-001 | Existing Visibility, SoV, Citations, Opportunities, onboarding, prompt processing, caps and settings suites pass with active semantics | `pnpm test`, Storybook, Playwright `local` | PASS (unit 1353, Storybook 161, Playwright local 114, Bruno 126 assertions) |
 | E2E-ID-001 | Real settings UI save/reload preserves ids and visible roster | `e2e/tests/local/competitor-identity.spec.ts` | PASS (local + CI; production acceptance via the page-bound server function, closeout doc) |
 
-## Traceability — SENT-R1/R2 (frozen, implemented in the second PR)
+## Traceability — SENT-R1/R2
 
-| Test ID | Required proof |
-|---|---|
-| UT-SNT-001 | Score/category boundaries, Mixed vs Neutral, null behaviour, round-once |
-| UT-SNT-002 | Canonical T/M/C/P/U/X/N formulas using the mandated fixture |
-| UT-SNT-003 | Entity detection with aliases, domains, Unicode boundaries, repetition, citation-only exclusion |
-| UT-SNT-004 | Entity-targeted comparisons, negations and multi-entity attribution |
-| UT-SNT-005 | Versioned aspect normalization and overall/aspect divergence |
-| UT-SNT-006 | Evidence matching/offset validation and Mixed dual evidence |
-| UT-SNT-007 | Deterministic top/bottom non-overlap and tie-breaks |
-| UT-SNT-008 | Adaptive buckets, null gaps, Top-6 roster and stable sorting |
-| GOLD-SNT-001 | ≥40 synthetic labelled DE/EN cases; 100 % schema/identity/consistency, ≥90 % category, ≥85 % aspect agreement |
-| CT-SNT-001 | Tables, checks, unique constraints, RLS and indexes |
-| CT-SNT-002 | Structured research uses `openai/gpt-5-mini`, strict schema and web search; no Luna override |
-| IT-SNT-001…009 | Job lifecycle, queue dedupe, enqueue-failure isolation, backfill dry run/cursor, paid enqueue limit, overview/evidence auth + read-only, run deep link, migrations on empty and populated databases |
-| ST-SNT-001…003 | Storybook default/edge/evidence fixtures |
-| E2E-SNT-001…006 | Route/sidebar/filter parity, URL state, expansion + deep link, responsive/dark/a11y, regressions, SQL oracle |
+Implemented in the second PR (`feat/sent-01-brand-competitor-sentiment`). Tables: `prompt_run_entity_mentions`,
+`sentiment_analyses`, `sentiment_observations`, `sentiment_aspect_observations` (migration `0021_sentiment_foundation`,
+journal 21 → 22). Library `packages/lib/src/sentiment/`, worker queue `classify-sentiment` (`localConcurrency: 1`),
+CLI `pnpm -C apps/worker backfill:sentiment {mentions|sentiment}`, page `/app/org/$org/brand/$brand/sentiment`.
+
+| Test ID | Required proof | Where | Status |
+|---|---|---|---|
+| UT-SNT-001 | Score/category boundaries, Mixed vs Neutral, null behaviour, round-once | `packages/lib/src/sentiment/__tests__/metrics.test.ts` | PASS |
+| UT-SNT-002 | Canonical T/M/C/P/U/X/N formulas using the mandated fixture | same (`UT-SNT-002 canonical fixture`) + Storybook `Default` + integration `IT-SNT-006` | PASS |
+| UT-SNT-003 | Entity detection with aliases, domains, Unicode boundaries, repetition, citation-only exclusion | `__tests__/detector.test.ts` | PASS |
+| UT-SNT-004 | Entity-targeted comparisons, negations and multi-entity attribution | golden corpus critical cases (g05–g09, g13, g19, g20, g25, g31, g40, g41) validated through `classifySentiment` | PASS (reference labels); live agreement gated at CP6 |
+| UT-SNT-005 | Versioned aspect normalization and overall/aspect divergence | `types.ts` taxonomy `sent-aspects-v1`, `__tests__/classifier.test.ts` (aspect keys, duplicates), `IT-SNT-006` aspect view, golden g04/g14/g34 | PASS |
+| UT-SNT-006 | Evidence matching/offset validation and Mixed dual evidence | `__tests__/classifier.test.ts` | PASS |
+| UT-SNT-007 | Deterministic top/bottom non-overlap and tie-breaks | `__tests__/metrics.test.ts` + `IT-SNT-007` + E2E-SNT-003 | PASS |
+| UT-SNT-008 | Adaptive buckets, null gaps, Top-6 roster and stable sorting | `__tests__/metrics.test.ts` + `IT-SNT-006` series | PASS |
+| GOLD-SNT-001 | ≥40 synthetic labelled DE/EN cases; reference labels validate 100 %; evaluator gates | `golden/corpus.ts` (42 cases, 23 DE / 19 EN, 14 critical), `golden/evaluate.ts`, `__tests__/golden.test.ts`; live: `pnpm --filter @workspace/lib eval:sentiment-golden -- --live --max N` (paid, gated) | PASS offline; live at CP6 |
+| CT-SNT-001 | Tables, checks, unique constraints, RLS and indexes | `apps/worker/scripts/verify-sentiment-db.ts` (21 checks on real Postgres) | PASS |
+| CT-SNT-002 | Structured research uses `openai/gpt-5-mini`, strict schema and web search; no Luna override | `classifier.test.ts` (one call, `webSearch: true`); provider path unchanged (`providers/registry/openrouter.ts` `DEFAULT_RESEARCH_MODEL`) | PASS |
+| IT-SNT-001 | Job success, no-mention, invalid output, evidence failure, retry and stale version | `__tests__/job.test.ts` + local worker run with the stub provider (schema failure → `failed`, 0 observations, failure usage event, bounded retry) | PASS |
+| IT-SNT-002 | Queue policy, singleton dedupe, DB idempotency and concurrency race | `verify-sentiment-db.ts` (8 concurrent sends → 1 accepted; 8 concurrent persistMentions/ensureAnalysis → 1 row) | PASS |
+| IT-SNT-003 | New prompt run remains successful if supplemental enqueue fails; repair recovers it | `__tests__/job.test.ts` (best-effort enqueue never throws), `job.ts` repair path, CLI `mentions` mode | PASS |
+| IT-SNT-004 | Mention inventory/backfill dry run, cursor resume and stable totals | CLI dry → apply → dry on the seeded DB (written 1 → alreadyCurrent 1, stable counts) | PASS |
+| IT-SNT-005 | Paid enqueue limit counts accepted jobs and never calls provider in CLI | CLI `--enqueue --limit 1`: accepted 1, second run deduplicated 1; no provider import in the CLI | PASS |
+| IT-SNT-006 | Overview auth/tenancy, filters, formulas, all active rows, inactive exclusion, bounded payload and no writes | `apps/web/src/server/__tests__/sentiment-overview.integration.test.ts` | PASS |
+| IT-SNT-007 | Evidence endpoint bounds, original citations only, authorization and deterministic extremes | same | PASS |
+| IT-SNT-008 | Run-specific prompt deep link authorization and pagination-independent retrieval | `getPromptRunFn` (brand → prompt → run) + E2E-SNT-003 / "deep link rejects a run that belongs to another prompt" | PASS |
+| IT-SNT-009 | Empty and populated migrations plus rollback-compatible old app paths | 0021 applied on the seeded DB and the empty chain; additive tables only (old images ignore them) — populated production copy at CP5 | PASS (local); rehearsal at CP5 |
+| ST-SNT-001…003 | Storybook default/edge/evidence fixtures | `apps/web/src/stories/sentiment.stories.tsx` (10 stories: Default, SortedByNegativeVisibility, BrandOnly, ClassificationPending, SparseAllTime, Empty, Loading, ErrorState, ExpandedEvidence, ExpandedFewObservations) | PASS |
+| E2E-SNT-001…006 | Route/sidebar/filter parity, URL state + stale `q`/`model`, expansion + lazy request + 10/10 + deep link, 375/768/1280/1400 + dark + focus + tooltip containment, regressions, SQL oracle | `e2e/tests/local/sentiment.spec.ts` (8 tests) | PASS |
