@@ -23,6 +23,7 @@ import {
 	selectRunTargets,
 	targetKey,
 } from "@workspace/lib/run-policy";
+import { brandEntity, competitorEntity, enqueueSentimentBestEffort, extractAnswerBody } from "@workspace/lib/sentiment";
 import { enqueueSourceClassificationsBestEffort } from "@workspace/lib/source-classification";
 import type { Citation } from "@workspace/lib/text-extraction";
 import { estimateRunCostUsd } from "@workspace/lib/usage";
@@ -373,6 +374,7 @@ async function runModelIteration({
 			eventType: "prompt_run",
 			config,
 		});
+		await enqueueSentiment(promptRunId, brand, competitorsList, rawOutput, config, logPrefix);
 		return extractedCitations;
 	} catch (error) {
 		// A single run's failure doesn't fail the job, so report it here to keep
@@ -393,6 +395,32 @@ async function runModelIteration({
 		});
 		throw error;
 	}
+}
+
+/**
+ * Best-effort supplemental sentiment for a freshly persisted run: deterministic
+ * mention rows for the own brand and the ACTIVE competitor roster, then at most
+ * one queued classify-sentiment job when something was mentioned. Never fails
+ * the run — the outcome is logged and a missed run is recovered by the
+ * sentiment backfill/repair scan.
+ */
+async function enqueueSentiment(
+	promptRunId: string,
+	brand: Brand,
+	competitorsList: Competitor[],
+	rawOutput: unknown,
+	config: ModelConfig,
+	logPrefix: string,
+): Promise<void> {
+	const outcome = await enqueueSentimentBestEffort({
+		promptRunId,
+		brandId: brand.id,
+		answerBody: extractAnswerBody(rawOutput, config.provider, config.model),
+		entities: [brandEntity(brand), ...competitorsList.map(competitorEntity)],
+		sender: boss,
+	});
+	const detail = "mentions" in outcome ? ` (${outcome.mentions} mention${outcome.mentions === 1 ? "" : "s"})` : "";
+	console.log(`${logPrefix} Sentiment enqueue for run ${promptRunId}: ${outcome.status}${detail}`);
 }
 
 /**

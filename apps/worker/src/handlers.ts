@@ -1,9 +1,11 @@
 import * as Sentry from "@sentry/node";
 import { getDeployment } from "@workspace/deployment";
 import type { OnboardingSuggestion } from "@workspace/lib/onboarding";
+import type { SentimentJobData } from "@workspace/lib/sentiment";
 import type { SourceClassificationJobData } from "@workspace/lib/source-classification";
 import type { Job, PgBoss } from "pg-boss";
 import { type AnalyzeBrandData, analyzeBrandJob } from "./jobs/analyze-brand";
+import { classifySentimentJob } from "./jobs/classify-sentiment";
 import { classifySourceDomainJob } from "./jobs/classify-source-domain";
 import { type GenerateReportData, generateReportJob } from "./jobs/generate-report";
 import { type ProcessPromptData, processPromptJob } from "./jobs/process-prompt";
@@ -65,6 +67,16 @@ export async function registerHandlers(boss: PgBoss): Promise<void> {
 		withSentry("classify-source-domain", classifySourceDomainJob),
 	);
 	console.log("Registered handler: classify-source-domain");
+
+	// One at a time: each job is one paid structured call with web search, and
+	// the backfill must never fan out against the provider; the exclusive queue
+	// and the analysis row already deduplicate.
+	await boss.work<SentimentJobData>(
+		"classify-sentiment",
+		{ localConcurrency: 1 },
+		withSentry("classify-sentiment", classifySentimentJob),
+	);
+	console.log("Registered handler: classify-sentiment");
 
 	await boss.work<ScheduleMaintenanceData>(
 		"schedule-maintenance",
