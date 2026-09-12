@@ -16,7 +16,7 @@ import type { ReactNode } from "react";
 import { CATEGORY_STYLE, formatScore } from "@/components/sentiment/format";
 import { type SentimentFilters, useSentimentEvidence } from "@/hooks/use-sentiment";
 import type { SentimentAspectParam } from "@/lib/sentiment-search";
-import type { SentimentEvidenceItem } from "@/server/sentiment";
+import type { SentimentEvidenceItem, SentimentEvidenceResponse } from "@/server/sentiment";
 
 /** Wrap every occurrence of the evidence quotes in `<mark>`, case-insensitively, without overlapping. */
 export function highlightExcerpt(excerpt: string, quotes: readonly string[]): ReactNode[] {
@@ -182,6 +182,47 @@ function EvidenceColumn({
 	);
 }
 
+/** Presentation only: the empty state or the two columns for a loaded evidence response. */
+export function SentimentEvidenceColumns({
+	data,
+	aspect,
+	org,
+	brand,
+}: {
+	data: SentimentEvidenceResponse;
+	aspect: SentimentAspectParam;
+	org: string;
+	brand: string;
+}) {
+	if (data.totalObservations === 0) {
+		return (
+			<p className="text-muted-foreground text-sm" data-testid="sentiment-evidence-empty">
+				No analyzed mentions of {data.entity.name} in the selected scope yet.
+			</p>
+		);
+	}
+	return (
+		<div className="grid gap-4 md:grid-cols-2" data-testid="sentiment-evidence" data-total={data.totalObservations}>
+			<EvidenceColumn
+				heading="Highest sentiment"
+				items={data.highest}
+				aspect={aspect}
+				org={org}
+				brand={brand}
+				testId="sentiment-evidence-highest"
+			/>
+			<EvidenceColumn
+				heading="Lowest sentiment"
+				items={data.lowest}
+				aspect={aspect}
+				org={org}
+				brand={brand}
+				testId="sentiment-evidence-lowest"
+			/>
+		</div>
+	);
+}
+
 export function SentimentEvidencePanels({
 	brandId,
 	entityKey,
@@ -214,31 +255,5 @@ export function SentimentEvidencePanels({
 			</div>
 		);
 	}
-	if (data.totalObservations === 0) {
-		return (
-			<p className="text-muted-foreground text-sm" data-testid="sentiment-evidence-empty">
-				No analyzed mentions of {data.entity.name} in the selected scope yet.
-			</p>
-		);
-	}
-	return (
-		<div className="grid gap-4 md:grid-cols-2" data-testid="sentiment-evidence" data-total={data.totalObservations}>
-			<EvidenceColumn
-				heading="Highest sentiment"
-				items={data.highest}
-				aspect={filters.aspect}
-				org={org}
-				brand={brand}
-				testId="sentiment-evidence-highest"
-			/>
-			<EvidenceColumn
-				heading="Lowest sentiment"
-				items={data.lowest}
-				aspect={filters.aspect}
-				org={org}
-				brand={brand}
-				testId="sentiment-evidence-lowest"
-			/>
-		</div>
-	);
+	return <SentimentEvidenceColumns data={data} aspect={filters.aspect} org={org} brand={brand} />;
 }

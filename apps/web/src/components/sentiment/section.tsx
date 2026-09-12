@@ -10,7 +10,7 @@ import { Button } from "@workspace/ui/components/button";
 import { Card, CardContent, CardHeader } from "@workspace/ui/components/card";
 import { Skeleton } from "@workspace/ui/components/skeleton";
 import { TooltipProvider } from "@workspace/ui/components/tooltip";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { MetricLegend } from "@/components/metric-summary/metric-legend";
 import { MetricCardTitle, MetricSummaryCard } from "@/components/metric-summary/metric-summary-card";
 import { SentimentEvidencePanels } from "@/components/sentiment/evidence-panels";
@@ -21,6 +21,7 @@ import { SentimentTrendChart } from "@/components/sentiment/trend-chart";
 import { type SentimentFilters, useSentimentOverview } from "@/hooks/use-sentiment";
 import { useSiteIcons } from "@/hooks/use-site-icons";
 import { SENTIMENT_ASPECT_OPTIONS } from "@/lib/sentiment-search";
+import type { SentimentEntityRow, SentimentOverviewResponse } from "@/server/sentiment";
 
 export const SENTIMENT_TIPS = {
 	summary:
@@ -31,80 +32,85 @@ export const SENTIMENT_TIPS = {
 		"Every tracked competitor and your brand. Sentiment is shown with its sample size; the visibility columns share one denominator — the evaluated responses in the period.",
 } as const;
 
-export function SentimentSection({
-	brandId,
-	filters,
-	sortKey,
-	org,
-	brand,
-}: {
-	brandId: string;
-	filters: SentimentFilters;
-	sortKey: SentimentSortKey;
-	org: string;
-	brand: string;
-}) {
-	const { data, isLoading, isPlaceholderData, isError, refetch } = useSentimentOverview(brandId, filters);
-	const { domainFor } = useSiteIcons(brandId);
-	const [expandedKey, setExpandedKey] = useState<string | null>(null);
-
-	if (isError) {
-		return (
-			<Card data-testid="sentiment-error">
-				<CardContent className="flex flex-wrap items-center gap-3 pt-6 text-sm" role="alert">
-					<span className="text-destructive">Sentiment could not be loaded.</span>
-					<Button type="button" size="sm" variant="outline" onClick={() => refetch()}>
-						Retry
-					</Button>
-				</CardContent>
-			</Card>
-		);
-	}
-	if (isLoading || !data || isPlaceholderData) {
-		return (
-			<div className="space-y-6" data-testid="sentiment-loading">
-				<div className="grid gap-6 lg:grid-cols-2">
-					<Card>
-						<CardHeader>
-							<Skeleton className="h-6 w-40" />
-						</CardHeader>
-						<CardContent className="space-y-3">
-							<Skeleton className="h-10 w-24" />
-							<Skeleton className="h-4 w-3/4" />
-							<Skeleton className="h-[220px] w-full" />
-						</CardContent>
-					</Card>
-					<Card>
-						<CardHeader>
-							<Skeleton className="h-6 w-40" />
-						</CardHeader>
-						<CardContent>
-							<Skeleton className="h-[220px] w-full" />
-						</CardContent>
-					</Card>
-				</div>
+export function SentimentSkeleton() {
+	return (
+		<div className="space-y-6" data-testid="sentiment-loading">
+			<div className="grid gap-6 lg:grid-cols-2">
 				<Card>
-					<CardContent className="space-y-2 pt-6">
-						<Skeleton className="h-4 w-full" />
-						<Skeleton className="h-4 w-5/6" />
+					<CardHeader>
+						<Skeleton className="h-6 w-40" />
+					</CardHeader>
+					<CardContent className="space-y-3">
+						<Skeleton className="h-10 w-24" />
+						<Skeleton className="h-4 w-3/4" />
+						<Skeleton className="h-[220px] w-full" />
+					</CardContent>
+				</Card>
+				<Card>
+					<CardHeader>
+						<Skeleton className="h-6 w-40" />
+					</CardHeader>
+					<CardContent>
+						<Skeleton className="h-[220px] w-full" />
 					</CardContent>
 				</Card>
 			</div>
-		);
-	}
-
-	if (data.eligibleResponses === 0) {
-		return (
-			<Card data-testid="sentiment-empty">
-				<CardContent className="pt-6">
-					<div className="text-muted-foreground py-8 text-center">
-						No stored responses for the selected filters yet. Sentiment appears once your prompts have been run.
-					</div>
+			<Card>
+				<CardContent className="space-y-2 pt-6">
+					<Skeleton className="h-4 w-full" />
+					<Skeleton className="h-4 w-5/6" />
 				</CardContent>
 			</Card>
-		);
-	}
+		</div>
+	);
+}
 
+export function SentimentEmpty() {
+	return (
+		<Card data-testid="sentiment-empty">
+			<CardContent className="pt-6">
+				<div className="text-muted-foreground py-8 text-center">
+					No stored responses for the selected filters yet. Sentiment appears once your prompts have been run.
+				</div>
+			</CardContent>
+		</Card>
+	);
+}
+
+export function SentimentError({ onRetry }: { onRetry: () => void }) {
+	return (
+		<Card data-testid="sentiment-error">
+			<CardContent className="flex flex-wrap items-center gap-3 pt-6 text-sm" role="alert">
+				<span className="text-destructive">Sentiment could not be loaded.</span>
+				<Button type="button" size="sm" variant="outline" onClick={onRetry}>
+					Retry
+				</Button>
+			</CardContent>
+		</Card>
+	);
+}
+
+/**
+ * Presentation only: the three cards for one loaded overview. Expansion state
+ * and the expanded content are owned by the caller so Storybook can render
+ * evidence fixtures without the network.
+ */
+export function SentimentCards({
+	data,
+	sortKey,
+	expandedKey,
+	onToggle,
+	domainFor,
+	renderExpanded,
+}: {
+	data: SentimentOverviewResponse;
+	sortKey: SentimentSortKey;
+	expandedKey: string | null;
+	onToggle: (key: string) => void;
+	domainFor: (name: string) => string | undefined;
+	renderExpanded: (row: SentimentEntityRow) => ReactNode;
+}) {
+	if (data.eligibleResponses === 0) return <SentimentEmpty />;
 	const brandRow = data.entities.find((row) => row.isBrand);
 	const rings = buildSentimentRings(data.chartRoster, data.entities);
 	const sorted = sortEntityRows(data.entities, sortKey);
@@ -201,21 +207,46 @@ export function SentimentSection({
 							chartRoster={data.chartRoster}
 							eligibleResponses={data.eligibleResponses}
 							expandedKey={expandedKey}
-							onToggle={(key) => setExpandedKey((current) => (current === key ? null : key))}
+							onToggle={onToggle}
 							domainFor={domainFor}
-							renderExpanded={(row) => (
-								<SentimentEvidencePanels
-									brandId={brandId}
-									entityKey={row.key}
-									filters={filters}
-									org={org}
-									brand={brand}
-								/>
-							)}
+							renderExpanded={renderExpanded}
 						/>
 					</CardContent>
 				</Card>
 			</div>
 		</TooltipProvider>
+	);
+}
+
+export function SentimentSection({
+	brandId,
+	filters,
+	sortKey,
+	org,
+	brand,
+}: {
+	brandId: string;
+	filters: SentimentFilters;
+	sortKey: SentimentSortKey;
+	org: string;
+	brand: string;
+}) {
+	const { data, isLoading, isPlaceholderData, isError, refetch } = useSentimentOverview(brandId, filters);
+	const { domainFor } = useSiteIcons(brandId);
+	const [expandedKey, setExpandedKey] = useState<string | null>(null);
+
+	if (isError) return <SentimentError onRetry={() => refetch()} />;
+	if (isLoading || !data || isPlaceholderData) return <SentimentSkeleton />;
+	return (
+		<SentimentCards
+			data={data}
+			sortKey={sortKey}
+			expandedKey={expandedKey}
+			onToggle={(key) => setExpandedKey((current) => (current === key ? null : key))}
+			domainFor={domainFor}
+			renderExpanded={(row) => (
+				<SentimentEvidencePanels brandId={brandId} entityKey={row.key} filters={filters} org={org} brand={brand} />
+			)}
+		/>
 	);
 }
