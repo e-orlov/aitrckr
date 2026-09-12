@@ -16,11 +16,14 @@
  *              time under the exclusive queue.
  *
  * Usage:
- *   pnpm -C apps/worker backfill:sentiment -- mentions            # inventory
- *   pnpm -C apps/worker backfill:sentiment -- mentions --apply    # write rows
- *   pnpm -C apps/worker backfill:sentiment -- sentiment           # inventory
- *   pnpm -C apps/worker backfill:sentiment -- sentiment --enqueue --limit 5
+ *   pnpm -C apps/worker backfill:sentiment mentions            # inventory
+ *   pnpm -C apps/worker backfill:sentiment mentions --apply    # write rows
+ *   pnpm -C apps/worker backfill:sentiment sentiment           # inventory
+ *   pnpm -C apps/worker backfill:sentiment sentiment --enqueue --limit 5
  *   … --brand <id> --cursor <token> --max-pages <n> --page-size <n>
+ *
+ * Do not put `--` before the mode: pnpm forwards it literally and everything
+ * after it would be read as positional text instead of flags (refused below).
  *
  * Repeated dry runs on unchanged data print identical counts.
  */
@@ -128,6 +131,11 @@ async function main(): Promise<void> {
 		maxPages: positiveInt(values["max-pages"], "--max-pages"),
 		pageSize: positiveInt(values["page-size"], "--page-size"),
 	};
+	if (positionals.length !== 1) {
+		throw new Error(
+			`expected exactly one mode argument, got ${JSON.stringify(positionals)} — drop any "--" before the mode`,
+		);
+	}
 	switch (positionals[0]) {
 		case "mentions":
 			return runMentionsMode(values, common);
