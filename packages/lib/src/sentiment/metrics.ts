@@ -60,9 +60,14 @@ export const LOW_SAMPLE_THRESHOLD = 5;
 
 export type SentimentBucket = "day" | "week" | "month";
 
-/** Daily through 31 days, weekly through 180 days, monthly beyond — deterministic and bounded. */
+/**
+ * Daily for one-month windows (a calendar month inclusive of both ends is at
+ * most 32 days), weekly through 180 days, monthly beyond — deterministic and
+ * bounded to a safe number of points.
+ */
+export const DAILY_BUCKET_MAX_DAYS = 35;
 export function bucketForRange(days: number): SentimentBucket {
-	if (days <= 31) return "day";
+	if (days <= DAILY_BUCKET_MAX_DAYS) return "day";
 	if (days <= 180) return "week";
 	return "month";
 }

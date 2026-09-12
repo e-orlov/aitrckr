@@ -65,7 +65,7 @@ Full precision internally, round once at display. `T = 0` → empty state. No si
 sentiment, no sentiment×visibility composite. Chart roster = own brand + up to six active
 competitors by mention count desc, then normalized name, then id; frozen for the whole trend.
 Default leaderboard sort: sentiment desc, nulls last, then classified mentions desc, name, id.
-Buckets: daily ≤ 31 days, weekly ≤ 180 days, monthly beyond; gaps stay `null`.
+Buckets: daily for month-sized windows (≤ 35 days, so a calendar month stays daily), weekly ≤ 180 days, monthly beyond; gaps stay `null`.
 
 Acceptance fixture (encoded in `UT-SNT-002`): T=10; A: scores 100P, 80P, 50 Mixed, 40N, 30N →
 60 / 50 % / 20 % / 20 % / mix 40-0-20-40 / coverage 100 %; B: one 90P → 90 / 10 %.

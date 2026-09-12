@@ -411,7 +411,9 @@ async function seriesByBucket(
 				);
 	const rows = await joined
 		.where(and(completedObservationsWhere(aspect, scope), inArray(sentimentObservations.entityKey, roster)))
-		.groupBy(sentimentObservations.entityKey, bucketExpr);
+		// Ordinal grouping: the bucket expression binds the timezone as a parameter,
+		// and Postgres would not match a second copy of it in GROUP BY.
+		.groupBy(sql`1`, sql`2`);
 	const byBucket = new Map<string, Map<string, { sentiment: number | null; classified: number }>>();
 	for (const row of rows) {
 		const entry = byBucket.get(row.bucketStart) ?? new Map();

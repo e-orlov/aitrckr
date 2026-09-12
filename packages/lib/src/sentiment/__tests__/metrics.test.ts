@@ -126,10 +126,11 @@ describe("UT-SNT-002 canonical fixture", () => {
 });
 
 describe("UT-SNT-008 buckets, roster and sorting", () => {
-	it("chooses daily ≤ 31, weekly ≤ 180, monthly beyond", () => {
+	it("chooses daily for month-sized windows, weekly ≤ 180, monthly beyond", () => {
 		expect(bucketForRange(7)).toBe("day");
-		expect(bucketForRange(31)).toBe("day");
-		expect(bucketForRange(32)).toBe("week");
+		expect(bucketForRange(32)).toBe("day");
+		expect(bucketForRange(35)).toBe("day");
+		expect(bucketForRange(36)).toBe("week");
 		expect(bucketForRange(180)).toBe("week");
 		expect(bucketForRange(181)).toBe("month");
 		expect(bucketForRange(2000)).toBe("month");
