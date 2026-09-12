@@ -43,7 +43,7 @@ import {
 	type SentimentEvidence,
 } from "@workspace/lib/sentiment/types";
 import { getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
-import { and, asc, desc, eq, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { PgSelect } from "drizzle-orm/pg-core";
 import type { LookbackPeriod } from "@/lib/chart-utils";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
@@ -227,11 +227,29 @@ function scopeRuns(
 
 const runIdsInScope = (scope: ScopeSql) => db.select({ id: promptRuns.id }).from(promptRuns).where(scope.runsWhere);
 
-/** Completed current-version analyses only; a stale taxonomy never counts as current. */
-function completedObservationsWhere(aspect: SentimentAspectFilter, scope: ScopeSql): SQL {
-	const base = and(
+/**
+ * The one eligibility contract every read shares: an analysis counts — for
+ * coverage and for metrics alike — only under the current classifier AND
+ * taxonomy version. A completed analysis under an older taxonomy is stale
+ * (it will be reclassified) and contributes to neither.
+ */
+const currentAnalysisWhere = (): SQL =>
+	and(
 		eq(sentimentAnalyses.classifierVersion, SENTIMENT_CLASSIFIER_VERSION),
 		eq(sentimentAnalyses.taxonomyVersion, SENTIMENT_TAXONOMY_VERSION),
+	) as SQL;
+
+/** Observations are read through their mention: only the current, non-superseded mention projection counts. */
+const withCurrentMention = and(
+	eq(promptRunEntityMentions.id, sentimentObservations.mentionId),
+	eq(promptRunEntityMentions.detectorVersion, SENTIMENT_DETECTOR_VERSION),
+	isNull(promptRunEntityMentions.supersededAt),
+) as SQL;
+
+/** Completed current analyses over current mentions; a stale taxonomy or superseded mention never counts. */
+function completedObservationsWhere(aspect: SentimentAspectFilter, scope: ScopeSql): SQL {
+	const base = and(
+		currentAnalysisWhere(),
 		eq(sentimentAnalyses.status, "completed"),
 		inArray(sentimentObservations.promptRunId, runIdsInScope(scope)),
 	) as SQL;
@@ -286,6 +304,7 @@ async function aggregateByEntity(aspect: SentimentAspectFilter, scope: ScopeSql)
 			})
 			.from(sentimentObservations)
 			.innerJoin(sentimentAnalyses, withAnalysis)
+			.innerJoin(promptRunEntityMentions, withCurrentMention)
 			.$dynamic(),
 		aspect,
 	)
@@ -304,6 +323,7 @@ async function mentionsByEntity(scope: ScopeSql): Promise<Map<string, number>> {
 		.where(
 			and(
 				eq(promptRunEntityMentions.detectorVersion, SENTIMENT_DETECTOR_VERSION),
+				isNull(promptRunEntityMentions.supersededAt),
 				inArray(promptRunEntityMentions.promptRunId, runIdsInScope(scope)),
 			),
 		)
@@ -324,7 +344,11 @@ async function coverageStats(scope: ScopeSql) {
 			)
 			.groupBy(sentimentDetections.status),
 		db
-			.select({ status: sentimentAnalyses.status, value: sql<number>`count(*)::int` })
+			.select({
+				status: sentimentAnalyses.status,
+				current: sql<boolean>`(${currentAnalysisWhere()})`,
+				value: sql<number>`count(*)::int`,
+			})
 			.from(sentimentAnalyses)
 			.where(
 				and(
@@ -332,22 +356,26 @@ async function coverageStats(scope: ScopeSql) {
 					inArray(sentimentAnalyses.promptRunId, runIdsInScope(scope)),
 				),
 			)
-			.groupBy(sentimentAnalyses.status),
+			.groupBy(sql`1`, sql`2`),
 	]);
 	const byReceipt = new Map(receipts.map((row) => [row.status, row.value]));
-	const byStatus = new Map(statuses.map((row) => [row.status, row.value]));
 	const withMentions = byReceipt.get("mentions") ?? 0;
 	const unextractable = byReceipt.get("unextractable") ?? 0;
+	// Finished rows outside the current eligibility contract (older taxonomy)
+	// are stale work still to be redone: they count as pending, never as done.
+	const analyses = { completed: 0, pending: 0, failed: 0, noMentions: 0 };
+	for (const row of statuses) {
+		if (!row.current && (row.status === "completed" || row.status === "no_mentions")) analyses.pending += row.value;
+		else if (row.status === "completed") analyses.completed += row.value;
+		else if (row.status === "failed") analyses.failed += row.value;
+		else if (row.status === "no_mentions") analyses.noMentions += row.value;
+		else analyses.pending += row.value;
+	}
 	return {
 		responsesDetected: withMentions + unextractable + (byReceipt.get("no_mentions") ?? 0),
 		responsesWithMentions: withMentions,
 		responsesUnextractable: unextractable,
-		analyses: {
-			completed: byStatus.get("completed") ?? 0,
-			pending: (byStatus.get("pending") ?? 0) + (byStatus.get("processing") ?? 0),
-			failed: byStatus.get("failed") ?? 0,
-			noMentions: byStatus.get("no_mentions") ?? 0,
-		},
+		analyses,
 	};
 }
 
@@ -357,6 +385,7 @@ async function availableAspects(scope: ScopeSql) {
 		.from(sentimentAspectObservations)
 		.innerJoin(sentimentObservations, eq(sentimentObservations.id, sentimentAspectObservations.observationId))
 		.innerJoin(sentimentAnalyses, eq(sentimentAnalyses.id, sentimentObservations.analysisId))
+		.innerJoin(promptRunEntityMentions, withCurrentMention)
 		.where(
 			and(
 				eq(sentimentAspectObservations.taxonomyVersion, SENTIMENT_TAXONOMY_VERSION),
@@ -426,6 +455,7 @@ async function seriesByBucket(
 			})
 			.from(sentimentObservations)
 			.innerJoin(sentimentAnalyses, withAnalysis)
+			.innerJoin(promptRunEntityMentions, withCurrentMention)
 			.$dynamic(),
 		aspect,
 	)
@@ -589,6 +619,7 @@ async function loadExtremes(
 			.select({ total: sql<number>`count(*)::int` })
 			.from(sentimentObservations)
 			.innerJoin(sentimentAnalyses, withAnalysis)
+			.innerJoin(promptRunEntityMentions, withCurrentMention)
 			.$dynamic(),
 		scope.aspect,
 	).where(where);
@@ -605,7 +636,12 @@ async function loadExtremes(
 		limit === 0
 			? Promise.resolve([])
 			: joinAspect(
-					db.select(selection).from(sentimentObservations).innerJoin(sentimentAnalyses, withAnalysis).$dynamic(),
+					db
+						.select(selection)
+						.from(sentimentObservations)
+						.innerJoin(sentimentAnalyses, withAnalysis)
+						.innerJoin(promptRunEntityMentions, withCurrentMention)
+						.$dynamic(),
 					scope.aspect,
 				)
 					.innerJoin(promptRuns, eq(promptRuns.id, sentimentObservations.promptRunId))
@@ -643,6 +679,7 @@ export async function explainSentimentEvidence(scope: SentimentEvidenceScope): P
 			})
 			.from(sentimentObservations)
 			.innerJoin(sentimentAnalyses, withAnalysis)
+			.innerJoin(promptRunEntityMentions, withCurrentMention)
 			.$dynamic(),
 		scope.aspect,
 	)
@@ -666,10 +703,22 @@ export async function explainSentimentEvidence(scope: SentimentEvidenceScope): P
 	return result.rows.map((row) => row["QUERY PLAN"]);
 }
 
-/** The runs' own citations, deduplicated by URL and capped per run, in citation order. */
-async function loadRunSources(runIds: string[]) {
-	if (runIds.length === 0) return new Map<string, { url: string; domain: string; title: string | null }[]>();
-	const ranked = db.$with("ranked").as(
+export interface RunSourceRow {
+	promptRunId: string;
+	url: string;
+	domain: string;
+	title: string | null;
+}
+
+/**
+ * The runs' own citations, deduplicated by URL and capped at
+ * `EVIDENCE_SOURCES_PER_RUN` per run inside the database (`WHERE rank <= n`
+ * over a ranked CTE), in citation order. Every row the query returns is
+ * served; nothing is filtered afterwards.
+ */
+export async function loadRunSources(runIds: string[]): Promise<RunSourceRow[]> {
+	if (runIds.length === 0) return [];
+	const distinct = db.$with("distinct_sources").as(
 		db
 			.selectDistinctOn([citations.promptRunId, citations.url], {
 				promptRunId: citations.promptRunId,
@@ -682,20 +731,32 @@ async function loadRunSources(runIds: string[]) {
 			.where(inArray(citations.promptRunId, runIds))
 			.orderBy(citations.promptRunId, citations.url, citations.citationIndex),
 	);
-	const rows = await db
+	const ranked = db.$with("ranked_sources").as(
+		db
+			.with(distinct)
+			.select({
+				promptRunId: distinct.promptRunId,
+				url: distinct.url,
+				domain: distinct.domain,
+				title: distinct.title,
+				citationIndex: distinct.citationIndex,
+				rank: sql<number>`row_number() over (partition by ${distinct.promptRunId} order by ${distinct.citationIndex}, ${distinct.url})::int`.as(
+					"rank",
+				),
+			})
+			.from(distinct),
+	);
+	return db
 		.with(ranked)
-		.select({
-			promptRunId: ranked.promptRunId,
-			url: ranked.url,
-			domain: ranked.domain,
-			title: ranked.title,
-			rank: sql<number>`row_number() over (partition by ${ranked.promptRunId} order by ${ranked.citationIndex}, ${ranked.url})::int`,
-		})
+		.select({ promptRunId: ranked.promptRunId, url: ranked.url, domain: ranked.domain, title: ranked.title })
 		.from(ranked)
-		.orderBy(ranked.promptRunId, ranked.citationIndex);
+		.where(sql`${ranked.rank} <= ${EVIDENCE_SOURCES_PER_RUN}`)
+		.orderBy(ranked.promptRunId, ranked.citationIndex, ranked.url);
+}
+
+function groupSources(rows: RunSourceRow[]): Map<string, { url: string; domain: string; title: string | null }[]> {
 	const byRun = new Map<string, { url: string; domain: string; title: string | null }[]>();
 	for (const row of rows) {
-		if (row.rank > EVIDENCE_SOURCES_PER_RUN) continue;
 		byRun.set(row.promptRunId, [
 			...(byRun.get(row.promptRunId) ?? []),
 			{ url: row.url, domain: row.domain, title: row.title },
@@ -734,7 +795,7 @@ export async function loadSentimentEvidence(scope: SentimentEvidenceScope): Prom
 
 	const observationIds = picked.map((row) => row.observationId);
 	const runIds = [...new Set(picked.map((row) => row.promptRunId))];
-	const [observations, aspectRows, runs, sourcesByRun] = await Promise.all([
+	const [observations, aspectRows, runs, sourceRows] = await Promise.all([
 		db
 			.select({
 				id: sentimentObservations.id,
@@ -782,6 +843,7 @@ export async function loadSentimentEvidence(scope: SentimentEvidenceScope): Prom
 	for (const row of aspectRows)
 		aspectsByObservation.set(row.observationId, [...(aspectsByObservation.get(row.observationId) ?? []), row]);
 	const runById = new Map(runs.map((row) => [row.id, row]));
+	const sourcesByRun = groupSources(sourceRows);
 
 	const toItem = (candidate: ExtremeRow): SentimentEvidenceItem | null => {
 		const observation = observationById.get(candidate.observationId);
