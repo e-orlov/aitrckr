@@ -4,6 +4,7 @@
  * route-local URL state; the default value is dropped from the URL.
  */
 import { useNavigate, useSearch } from "@tanstack/react-router";
+import type { SentimentSortKey } from "@workspace/lib/sentiment/metrics";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -11,7 +12,6 @@ import {
 	DropdownMenuRadioItem,
 	DropdownMenuTrigger,
 } from "@workspace/ui/components/dropdown-menu";
-import type { SentimentSortKey } from "@workspace/lib/sentiment/metrics";
 import { ArrowUpDown, Tags } from "lucide-react";
 import { FilterTriggerButton } from "@/components/filter-bar";
 import {

@@ -24,6 +24,13 @@ export function formatMentionCount(row: { mentions: number; classified: number }
 	return `${row.mentions} ${row.mentions === 1 ? "mention" : "mentions"}`;
 }
 
+/** Compact legend form of the same sample size: "24 mentions" or "21/24 analyzed". */
+export function formatMentionCountCompact(row: { mentions: number; classified: number }): string {
+	if (row.mentions === 0) return "0 mentions";
+	if (row.classified < row.mentions) return `${row.classified}/${row.mentions} analyzed`;
+	return `${row.mentions} ${row.mentions === 1 ? "mention" : "mentions"}`;
+}
+
 export function localDate(value: string): Date {
 	const [year, month, day] = value.split("-").map(Number);
 	return new Date(year, month - 1, day);

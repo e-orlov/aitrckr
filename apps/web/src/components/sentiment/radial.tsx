@@ -7,7 +7,14 @@
 import { ChartContainer } from "@workspace/ui/components/chart";
 import { Cell, PolarAngleAxis, RadialBar, RadialBarChart, Tooltip } from "recharts";
 import type { MetricLegendItem } from "@/components/metric-summary/metric-legend";
-import { colorFor, entityColorMap, formatMentionCount, formatPct, formatScore } from "@/components/sentiment/format";
+import {
+	colorFor,
+	entityColorMap,
+	formatMentionCount,
+	formatMentionCountCompact,
+	formatPct,
+	formatScore,
+} from "@/components/sentiment/format";
 import type { SentimentEntityRow } from "@/server/sentiment";
 
 export interface SentimentRing {
@@ -52,9 +59,10 @@ export function sentimentLegendItems(rings: readonly SentimentRing[]): MetricLeg
 		id: ring.key,
 		label: ring.name,
 		color: ring.fill,
-		valueLabel: `${formatScore(ring.sentiment)} · ${formatMentionCount(ring)}`,
+		valueLabel: `${formatScore(ring.sentiment)} · ${formatMentionCountCompact(ring)}`,
 		emphasis: ring.isBrand ? "primary" : "muted",
 		badgeLabel: ring.isBrand ? "You" : undefined,
+		title: `${ring.name}: ${formatScore(ring.sentiment)} · ${formatMentionCount(ring)}`,
 	}));
 }
 

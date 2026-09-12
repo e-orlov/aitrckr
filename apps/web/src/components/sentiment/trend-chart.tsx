@@ -43,7 +43,9 @@ export function SentimentTrendChart({
 		];
 	});
 	const rows: Row[] = series.map((point) => {
-		const row: Row = { bucketStart: point.bucketStart };
+		// `__midpoint` is an invisible constant series: it keeps every bucket a
+		// hover target (Recharts hides the tooltip when a bucket has no value at all).
+		const row: Row = { bucketStart: point.bucketStart, __midpoint: 50 };
 		for (const key of roster) {
 			row[key] = point.values[key]?.sentiment ?? null;
 			row[`${key}__n`] = point.values[key]?.classified ?? 0;
@@ -109,9 +111,10 @@ export function SentimentTrendChart({
 					/>
 					<ChartTooltip
 						isAnimationActive={false}
-						content={({ active, payload, label }) => {
-							if (!active || !payload?.length) return null;
-							const row = payload[0]?.payload as Row | undefined;
+						content={({ active, label }) => {
+							// Buckets without any classified mention have an empty payload but are
+							// still hover targets; they read "— · 0 analyzed" instead of vanishing.
+							const row = active ? rows.find((candidate) => candidate.bucketStart === String(label)) : undefined;
 							if (!row) return null;
 							return (
 								<div
@@ -144,6 +147,14 @@ export function SentimentTrendChart({
 								</div>
 							);
 						}}
+					/>
+					<Line
+						dataKey="__midpoint"
+						stroke="none"
+						dot={false}
+						activeDot={false}
+						legendType="none"
+						isAnimationActive={false}
 					/>
 					{styled.map((s) => (
 						<Line
