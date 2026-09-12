@@ -9,6 +9,7 @@ import {
 	IconDashboard,
 	IconLink,
 	IconListDetails,
+	IconMoodSmile,
 	IconSitemap,
 	IconSpeakerphone,
 	IconTarget,
@@ -76,6 +77,7 @@ function brandGroups(organization: OrganizationSummary, brand: BrandWithPrompts)
 				link: { to: "/app/org/$org/brand/$brand/share-of-voice", params },
 				icon: IconSpeakerphone,
 			},
+			{ title: "Sentiment", link: { to: "/app/org/$org/brand/$brand/sentiment", params }, icon: IconMoodSmile },
 			{ title: "Query Fan-Out", link: { to: "/app/org/$org/brand/$brand/query-fan-out", params }, icon: IconSitemap },
 			{ title: "Citations", link: { to: "/app/org/$org/brand/$brand/citations", params }, icon: IconLink },
 			{

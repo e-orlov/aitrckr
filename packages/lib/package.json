@@ -9,7 +9,8 @@
 		"compare:onboarding": "tsx scripts/compare-onboarding.ts",
 		"eval:source-classification": "tsx scripts/source-classification-live-eval.ts",
 		"generate:auth-schema": "bash scripts/generate-auth-schema.sh",
-		"verify:membership-dedupe": "tsx scripts/verify-membership-dedupe.ts"
+		"verify:membership-dedupe": "tsx scripts/verify-membership-dedupe.ts",
+		"eval:sentiment-golden": "tsx scripts/sentiment-golden-live-eval.ts"
 	},
 	"exports": {
 		"./db/db": "./src/db/db.ts",
@@ -24,6 +25,9 @@
 		"./citations/domain-categories": "./src/citations/domain-categories.ts",
 		"./citations/domain-categories.server": "./src/citations/domain-categories.server.ts",
 		"./source-classification": "./src/source-classification/index.ts",
+		"./sentiment": "./src/sentiment/index.ts",
+		"./sentiment/metrics": "./src/sentiment/metrics.ts",
+		"./sentiment/types": "./src/sentiment/types.ts",
 		"./constants": "./src/constants.ts",
 		"./app-urls": "./src/app-urls.ts",
 		"./expedite": "./src/expedite.ts",
