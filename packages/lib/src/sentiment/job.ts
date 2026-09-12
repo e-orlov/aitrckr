@@ -1,12 +1,14 @@
-import {
-	classifySentiment,
-	type SentimentClassifierDeps,
-	SentimentValidationError,
-	sentimentInputHash,
-} from "./classifier";
+import { classifySentiment, type SentimentClassifierDeps, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import {
-	boundedErrorMessage,
+	ClaimLostError,
+	type SafeSentimentError,
+	SentimentJobError,
+	safeErrorMessage,
+	sanitizeSentimentError,
+} from "./errors";
+import {
+	type AnalysisClaim,
 	candidatesFromMentions,
 	claimAnalysis,
 	detectionResultFor,
@@ -25,8 +27,6 @@ import {
 } from "./store";
 import {
 	SENTIMENT_CLASSIFIER_VERSION,
-	SENTIMENT_MODEL,
-	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentCandidate,
 	type SentimentJobData,
@@ -37,6 +37,8 @@ export type SentimentJobOutcome =
 	| { status: "classified"; entities: number }
 	| { status: "already-completed" }
 	| { status: "claimed-elsewhere"; analysisStatus: string }
+	/** The attempt ran but a later attempt took the row over; nothing of this attempt was written. */
+	| { status: "claim-lost"; generation: number }
 	| { status: "no-mentions" }
 	| { status: "skipped"; reason: string };
 
@@ -52,6 +54,11 @@ export interface SentimentJobDeps extends SentimentClassifierDeps {
 	classify?: typeof classifySentiment;
 	persist?: typeof persistClassification;
 	recordUsage?: typeof recordSentimentUsageEvent;
+}
+
+export interface SentimentJobOptions {
+	/** pg-boss job signal: aborted on graceful shutdown or expiry; forwarded to the provider request. */
+	signal?: AbortSignal;
 }
 
 /**
@@ -75,36 +82,60 @@ async function resolveMentions(
 	});
 }
 
+function failAttempt(claim: AnalysisClaim, safe: SafeSentimentError, deps: SentimentJobDeps): Promise<boolean> {
+	return (deps.markAnalysis ?? markAnalysis)(claim, {
+		status: "failed",
+		errorCode: safe.code,
+		errorMessage: safeErrorMessage(safe),
+	});
+}
+
 async function classifyAndPersist(
 	run: StoredRunForSentiment & { answerBody: string },
-	analysisId: string,
+	claim: AnalysisClaim,
 	mentions: StoredMention[],
 	candidates: SentimentCandidate[],
 	deps: SentimentJobDeps,
-): Promise<number> {
+	options: SentimentJobOptions,
+): Promise<SentimentJobOutcome> {
 	const recordUsage = deps.recordUsage ?? recordSentimentUsageEvent;
 	const usage = { organizationId: run.organizationId, brandId: run.brandId, promptId: run.promptId };
+	let classification: Awaited<ReturnType<typeof classifySentiment>>;
 	try {
-		const classification = await (deps.classify ?? classifySentiment)({ answerBody: run.answerBody, candidates }, deps);
+		classification = await (deps.classify ?? classifySentiment)(
+			{ answerBody: run.answerBody, candidates },
+			deps,
+			options.signal,
+		);
+	} catch (error) {
+		// The request went out (or was cut off): attribute the attempt, then
+		// record only the safe summary — the original error may quote a
+		// response body, the answer or a header and is dropped here.
+		const safe = sanitizeSentimentError(error);
+		const owned = await failAttempt(claim, safe, deps);
+		await recordUsage({ ...usage, provider: safe.provider, model: safe.model, succeeded: false });
+		if (!owned) return { status: "claim-lost", generation: claim.generation };
+		throw new SentimentJobError(safe);
+	}
+	try {
 		await (deps.persist ?? persistClassification)({
-			analysisId,
+			claim,
 			promptRunId: run.id,
 			brandId: run.brandId,
 			mentions,
 			classification,
 		});
-		await recordUsage({ ...usage, provider: classification.provider, model: classification.model, succeeded: true });
-		return classification.entities.length;
 	} catch (error) {
-		const code = error instanceof SentimentValidationError ? error.code : "provider";
-		await (deps.markAnalysis ?? markAnalysis)(analysisId, {
-			status: "failed",
-			errorCode: code,
-			errorMessage: boundedErrorMessage(error),
-		});
-		await recordUsage({ ...usage, provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL, succeeded: false });
-		throw error;
+		if (error instanceof ClaimLostError) {
+			await recordUsage({ ...usage, provider: classification.provider, model: classification.model, succeeded: true });
+			return { status: "claim-lost", generation: claim.generation };
+		}
+		const safe = sanitizeSentimentError(error);
+		await failAttempt(claim, safe, deps);
+		throw new SentimentJobError(safe);
 	}
+	await recordUsage({ ...usage, provider: classification.provider, model: classification.model, succeeded: true });
+	return { status: "classified", entities: classification.entities.length };
 }
 
 /**
@@ -113,13 +144,19 @@ async function classifyAndPersist(
  * input hash still matches the current classifier input makes no call; every
  * other state must first be claimed with a conditional update, and exactly
  * one claimant proceeds to the provider boundary while the others return a
- * non-calling outcome. Observations are written atomically with the status
- * flip. Invalid or stale payloads are skipped without a call and without
- * failing the job; provider and validation errors mark the analysis `failed`
- * with a bounded reason and propagate so pg-boss applies its bounded retry
+ * non-calling outcome. Every terminal write is fenced on the claim
+ * generation, so an attempt that outlived its lease ends as `claim-lost`
+ * without touching what a later attempt wrote. Invalid or stale payloads are
+ * skipped without a call and without failing the job; provider and
+ * validation errors mark the analysis `failed` with a safe summary and
+ * propagate as `SentimentJobError` so pg-boss applies its bounded retry
  * policy — nothing partial is ever written.
  */
-export async function runSentimentJob(data: unknown, deps: SentimentJobDeps = {}): Promise<SentimentJobOutcome> {
+export async function runSentimentJob(
+	data: unknown,
+	deps: SentimentJobDeps = {},
+	options: SentimentJobOptions = {},
+): Promise<SentimentJobOutcome> {
 	const parsed = sentimentJobSchema.safeParse(data);
 	if (!parsed.success)
 		return { status: "skipped", reason: `invalid payload: ${parsed.error.issues[0]?.message ?? "unknown"}` };
@@ -143,15 +180,19 @@ export async function runSentimentJob(data: unknown, deps: SentimentJobDeps = {}
 	if (body !== null && isAnalysisCurrent(analysis, sentimentInputHash(body, candidates)))
 		return { status: "already-completed" };
 
-	const claim = await (deps.claimAnalysis ?? claimAnalysis)(analysis.id, { allowFinished: true });
-	if (!claim.claimed) return { status: "claimed-elsewhere", analysisStatus: claim.status };
+	const claimed = await (deps.claimAnalysis ?? claimAnalysis)(analysis.id, { allowFinished: true });
+	if (!claimed.claimed) return { status: "claimed-elsewhere", analysisStatus: claimed.status };
+	const claim = claimed.claim;
 
-	const mark = deps.markAnalysis ?? markAnalysis;
 	if (body === null) {
-		await mark(analysis.id, { status: "no_mentions", completedAt: new Date(), errorCode: null, errorMessage: null });
-		return { status: "no-mentions" };
+		const owned = await (deps.markAnalysis ?? markAnalysis)(claim, {
+			status: "no_mentions",
+			completedAt: new Date(),
+			errorCode: null,
+			errorMessage: null,
+		});
+		return owned ? { status: "no-mentions" } : { status: "claim-lost", generation: claim.generation };
 	}
 
-	const classified = await classifyAndPersist({ ...run, answerBody: body }, analysis.id, mentions, candidates, deps);
-	return { status: "classified", entities: classified };
+	return classifyAndPersist({ ...run, answerBody: body }, claim, mentions, candidates, deps, options);
 }

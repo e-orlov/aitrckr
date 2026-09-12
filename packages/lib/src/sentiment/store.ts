@@ -1,4 +1,4 @@
-import { and, eq, inArray, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import {
 	brands,
@@ -17,6 +17,7 @@ import {
 import { estimateRunCostUsd } from "../usage/cost";
 import type { SentimentClassification } from "./classifier";
 import { brandEntity, competitorEntity, type DetectableEntity, type DetectedMention } from "./detector";
+import { ClaimLostError } from "./errors";
 import { extractAnswerBody } from "./text";
 import {
 	SENTIMENT_ASPECTS,
@@ -120,8 +121,10 @@ export function detectionResultFor(answerBody: string | null, mentions: Detected
 
 /**
  * Idempotently persist the detector's mention rows for one run at the current
- * detector version: rows for entities no longer detected at this version are
- * removed, existing rows are refreshed in place (ids preserved), new rows
+ * detector version. Rows for entities the newest pass no longer finds leave
+ * the current projection: unreferenced ones are deleted, ones that
+ * observations still reference are superseded (kept, invisible). Rows the
+ * pass finds are refreshed in place (ids preserved) or reactivated, new rows
  * inserted. Part of `persistDetection`; exported for the DB verifier only.
  */
 export async function persistMentions(
@@ -134,9 +137,6 @@ export async function persistMentions(
 	});
 	const stale = existing.filter((row) => !keys.includes(row.entityKey));
 	if (stale.length > 0) {
-		// Observations reference mention rows; a mention that disappeared under
-		// a newer detector keeps its row when it already has observations so the
-		// audit trail survives — it is simply marked with the old detector version.
 		const referenced = new Set(
 			(
 				await executor
@@ -153,6 +153,12 @@ export async function persistMentions(
 		const deletable = stale.filter((row) => !referenced.has(row.id)).map((row) => row.id);
 		if (deletable.length > 0)
 			await executor.delete(promptRunEntityMentions).where(inArray(promptRunEntityMentions.id, deletable));
+		const supersede = stale.filter((row) => referenced.has(row.id) && row.supersededAt === null).map((row) => row.id);
+		if (supersede.length > 0)
+			await executor
+				.update(promptRunEntityMentions)
+				.set({ supersededAt: new Date() })
+				.where(inArray(promptRunEntityMentions.id, supersede));
 	}
 	for (const mention of args.mentions) {
 		await executor
@@ -174,6 +180,7 @@ export async function persistMentions(
 					detectorVersion: SENTIMENT_DETECTOR_VERSION,
 					matchedTerms: mention.matchedTerms,
 					detectedAt: new Date(),
+					supersededAt: null,
 				},
 			});
 	}
@@ -220,11 +227,13 @@ export async function loadDetection(promptRunId: string, executor: Executor = db
 	return row ?? null;
 }
 
+/** The current mention projection of a run: current detector version and not superseded. */
 export async function loadMentions(promptRunId: string, executor: Executor = db): Promise<StoredMention[]> {
 	const rows = await executor.query.promptRunEntityMentions.findMany({
 		where: and(
 			eq(promptRunEntityMentions.promptRunId, promptRunId),
 			eq(promptRunEntityMentions.detectorVersion, SENTIMENT_DETECTOR_VERSION),
+			isNull(promptRunEntityMentions.supersededAt),
 		),
 		orderBy: [promptRunEntityMentions.detectedAt, promptRunEntityMentions.id],
 	});
@@ -292,7 +301,15 @@ export function isAnalysisCurrent(analysis: SentimentAnalysis, expectedInputHash
 	);
 }
 
-export type ClaimOutcome = { claimed: true; attempts: number } | { claimed: false; status: SentimentAnalysisStatus };
+export type ClaimOutcome =
+	| { claimed: true; attempts: number; claim: AnalysisClaim }
+	| { claimed: false; status: SentimentAnalysisStatus };
+
+/** Ownership of one attempt: every later write is fenced on the row still carrying this generation. */
+export interface AnalysisClaim {
+	analysisId: string;
+	generation: number;
+}
 
 /**
  * Atomically claim the analysis for one provider call. Exactly one of any
@@ -300,8 +317,10 @@ export type ClaimOutcome = { claimed: true; attempts: number } | { claimed: fals
  * that is `pending`, `failed`, a finished row that is no longer current
  * (`allowFinished`: `completed`/`no_mentions`), or a `processing` claim older than the claim timeout
  * (an abandoned worker). Losers see the row's current status and make no
- * call. Runs in its own statement (autocommit) so the claim is visible to
- * other sessions before the provider boundary.
+ * call. The winner receives the incremented claim generation; a claimant
+ * whose lease was taken over later fails every fenced write. Runs in its own
+ * statement (autocommit) so the claim is visible to other sessions before
+ * the provider boundary.
  */
 export async function claimAnalysis(
 	analysisId: string,
@@ -322,53 +341,50 @@ export async function claimAnalysis(
 			status: "processing",
 			startedAt: new Date(),
 			attempts: sql`${sentimentAnalyses.attempts} + 1`,
+			claimGeneration: sql`${sentimentAnalyses.claimGeneration} + 1`,
 			provider: SENTIMENT_PROVIDER_ID,
 			model: SENTIMENT_MODEL,
 			webSearch: true,
 			updatedAt: new Date(),
 		})
 		.where(and(eq(sentimentAnalyses.id, analysisId), claimable))
-		.returning({ attempts: sentimentAnalyses.attempts });
-	if (row) return { claimed: true, attempts: row.attempts };
+		.returning({ attempts: sentimentAnalyses.attempts, generation: sentimentAnalyses.claimGeneration });
+	if (row) return { claimed: true, attempts: row.attempts, claim: { analysisId, generation: row.generation } };
 	const current = await executor.query.sentimentAnalyses.findFirst({ where: eq(sentimentAnalyses.id, analysisId) });
 	return { claimed: false, status: (current?.status ?? "pending") as SentimentAnalysisStatus };
 }
 
+/**
+ * Terminal status write for one attempt, fenced on the claim generation.
+ * Returns false — and writes nothing — when another attempt has claimed the
+ * row since, so a stale claimant can never overwrite a newer result.
+ */
 export async function markAnalysis(
-	analysisId: string,
+	claim: AnalysisClaim,
 	patch: Partial<{
 		status: SentimentAnalysisStatus;
 		errorCode: string | null;
 		errorMessage: string | null;
-		startedAt: Date | null;
 		completedAt: Date | null;
-	}> & { incrementAttempts?: boolean },
+	}>,
 	executor: Executor = db,
-): Promise<void> {
-	const { incrementAttempts, ...fields } = patch;
-	await executor
+): Promise<boolean> {
+	const rows = await executor
 		.update(sentimentAnalyses)
-		.set({
-			...fields,
-			...(incrementAttempts ? { attempts: sql`${sentimentAnalyses.attempts} + 1` } : {}),
-			updatedAt: new Date(),
-		})
-		.where(eq(sentimentAnalyses.id, analysisId));
-}
-
-const ERROR_MESSAGE_MAX = 500;
-export function boundedErrorMessage(error: unknown): string {
-	const message = error instanceof Error ? error.message : String(error);
-	return message.length > ERROR_MESSAGE_MAX ? `${message.slice(0, ERROR_MESSAGE_MAX - 1)}…` : message;
+		.set({ ...patch, updatedAt: new Date() })
+		.where(and(eq(sentimentAnalyses.id, claim.analysisId), eq(sentimentAnalyses.claimGeneration, claim.generation)))
+		.returning({ id: sentimentAnalyses.id });
+	return rows.length === 1;
 }
 
 /**
- * Persist a validated classification atomically: observations and aspect rows
- * for every candidate, then the analysis flips to `completed`. Re-running for
- * the same analysis replaces its observations (the job is idempotent).
+ * Persist a validated classification atomically: the analysis flips to
+ * `completed` — fenced on the claim generation, which also locks the row —
+ * then its observations are replaced by the new set with their aspect rows.
+ * A stale claimant gets `ClaimLostError` before any observation is touched.
  */
 export async function persistClassification(args: {
-	analysisId: string;
+	claim: AnalysisClaim;
 	promptRunId: string;
 	brandId: string;
 	mentions: StoredMention[];
@@ -376,14 +392,36 @@ export async function persistClassification(args: {
 }): Promise<void> {
 	const mentionByKey = new Map(args.mentions.map((m) => [m.key, m]));
 	await db.transaction(async (tx) => {
-		await tx.delete(sentimentObservations).where(eq(sentimentObservations.analysisId, args.analysisId));
+		const owned = await tx
+			.update(sentimentAnalyses)
+			.set({
+				status: "completed",
+				provider: args.classification.provider,
+				model: args.classification.model,
+				webSearch: args.classification.webSearch,
+				taxonomyVersion: args.classification.taxonomyVersion,
+				inputHash: args.classification.inputHash,
+				errorCode: null,
+				errorMessage: null,
+				completedAt: new Date(),
+				updatedAt: new Date(),
+			})
+			.where(
+				and(
+					eq(sentimentAnalyses.id, args.claim.analysisId),
+					eq(sentimentAnalyses.claimGeneration, args.claim.generation),
+				),
+			)
+			.returning({ id: sentimentAnalyses.id });
+		if (owned.length !== 1) throw new ClaimLostError(args.claim);
+		await tx.delete(sentimentObservations).where(eq(sentimentObservations.analysisId, args.claim.analysisId));
 		for (const entity of args.classification.entities) {
 			const mention = mentionByKey.get(entity.key);
 			if (!mention) throw new Error(`classified entity "${entity.key}" has no mention row`);
 			const [observation] = await tx
 				.insert(sentimentObservations)
 				.values({
-					analysisId: args.analysisId,
+					analysisId: args.claim.analysisId,
 					mentionId: mention.id,
 					promptRunId: args.promptRunId,
 					brandId: args.brandId,
@@ -411,21 +449,6 @@ export async function persistClassification(args: {
 				);
 			}
 		}
-		await tx
-			.update(sentimentAnalyses)
-			.set({
-				status: "completed",
-				provider: args.classification.provider,
-				model: args.classification.model,
-				webSearch: args.classification.webSearch,
-				taxonomyVersion: args.classification.taxonomyVersion,
-				inputHash: args.classification.inputHash,
-				errorCode: null,
-				errorMessage: null,
-				completedAt: new Date(),
-				updatedAt: new Date(),
-			})
-			.where(eq(sentimentAnalyses.id, args.analysisId));
 	});
 }
 

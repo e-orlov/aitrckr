@@ -225,6 +225,7 @@ export interface SentimentClassifierDeps {
 export async function classifySentiment(
 	args: { answerBody: string; candidates: SentimentCandidate[] },
 	deps: SentimentClassifierDeps = {},
+	signal?: AbortSignal,
 ): Promise<SentimentClassification> {
 	if (args.candidates.length === 0) throw new SentimentValidationError("no-candidates", "nothing to classify");
 
@@ -237,6 +238,7 @@ export async function classifySentiment(
 		prompt: buildSentimentPrompt(args),
 		schema: sentimentClassificationResultSchema,
 		webSearch: true,
+		signal,
 	});
 	if (provider.id === SENTIMENT_PROVIDER_ID && result.modelVersion !== SENTIMENT_MODEL) {
 		throw new SentimentValidationError(

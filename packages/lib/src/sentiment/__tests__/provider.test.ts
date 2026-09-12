@@ -103,4 +103,20 @@ describe("CT-SNT-002 sentiment provider lock", () => {
 		expect(result.webSearch).toBe(true);
 		expect(result.entities[0].evidence[0]).toMatchObject({ start: 0, end: 24, polarity: "positive" });
 	});
+
+	it("passes the job abort signal to the OpenRouter fetch and surfaces the abort", async () => {
+		configureEveryProvider();
+		const controller = new AbortController();
+		const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+			expect(init.signal).toBe(controller.signal);
+			return new Promise((_resolve, reject) => {
+				init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const pending = classifySentiment({ answerBody: answer, candidates }, {}, controller.signal);
+		controller.abort();
+		await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
 });

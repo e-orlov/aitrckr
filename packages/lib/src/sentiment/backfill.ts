@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { and, asc, eq, gt, or } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, or } from "drizzle-orm";
 import { db } from "../db/db";
 import { promptRunEntityMentions, promptRuns, sentimentAnalyses, sentimentDetections } from "../db/schema";
 import { sentimentInputHash } from "./classifier";
@@ -162,8 +162,10 @@ function reconcileLegacyNames(run: ScannedRun, entities: DetectableEntity[], sta
 
 /**
  * A run is current when a current-version receipt exists with the detected
- * status and the current-version mention rows are exactly the detected
- * entity set (no rows from another detector version left behind).
+ * status and count, and the current mention projection (not superseded,
+ * current detector version) is exactly the detected entity set — the same
+ * projection `loadMentions` serves. Superseded rows are history and do not
+ * count either way.
  */
 async function detectionIsCurrent(runId: string, status: string, detectedKeys: string[]): Promise<boolean> {
 	const receipt = await db.query.sentimentDetections.findFirst({
@@ -173,20 +175,14 @@ async function detectionIsCurrent(runId: string, status: string, detectedKeys: s
 		),
 	});
 	if (!receipt || receipt.status !== status || receipt.mentionCount !== detectedKeys.length) return false;
-	const existing = await db
+	const active = await db
 		.select({ key: promptRunEntityMentions.entityKey, version: promptRunEntityMentions.detectorVersion })
 		.from(promptRunEntityMentions)
-		.where(eq(promptRunEntityMentions.promptRunId, runId));
-	const currentKeys = existing
-		.filter((row) => row.version === SENTIMENT_DETECTOR_VERSION)
-		.map((row) => row.key)
-		.sort();
+		.where(and(eq(promptRunEntityMentions.promptRunId, runId), isNull(promptRunEntityMentions.supersededAt)));
+	if (active.some((row) => row.version !== SENTIMENT_DETECTOR_VERSION)) return false;
+	const currentKeys = active.map((row) => row.key).sort();
 	const wanted = [...detectedKeys].sort();
-	return (
-		existing.length === currentKeys.length &&
-		currentKeys.length === wanted.length &&
-		currentKeys.every((key, index) => key === wanted[index])
-	);
+	return currentKeys.length === wanted.length && currentKeys.every((key, index) => key === wanted[index]);
 }
 
 async function processMentionRun(run: ScannedRun, state: MentionScanState, apply: boolean): Promise<void> {

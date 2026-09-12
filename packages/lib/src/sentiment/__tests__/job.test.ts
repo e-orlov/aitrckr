@@ -3,6 +3,7 @@ import type { SentimentClassification } from "../classifier";
 import { SentimentValidationError, sentimentInputHash } from "../classifier";
 import type { DetectableEntity } from "../detector";
 import { enqueueSentimentBestEffort } from "../enqueue";
+import { ClaimLostError, SentimentJobError } from "../errors";
 import { runSentimentJob, type SentimentJobDeps } from "../job";
 import { ensureSentimentQueue, SENTIMENT_QUEUE_OPTIONS } from "../queue-setup";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
@@ -101,9 +102,14 @@ function deps(overrides: Partial<SentimentJobDeps> & { analysis?: Partial<Analys
 		loadMentions: vi.fn(async () => mentions),
 		persistDetection: vi.fn(async () => mentions),
 		ensureAnalysis: vi.fn(async () => analysis as never),
-		claimAnalysis: vi.fn(async () => ({ claimed: true as const, attempts: 1 })),
-		markAnalysis: vi.fn(async (_id: string, patch: unknown) => {
+		claimAnalysis: vi.fn(async () => ({
+			claimed: true as const,
+			attempts: 1,
+			claim: { analysisId: "a1", generation: 7 },
+		})),
+		markAnalysis: vi.fn(async (_claim: unknown, patch: unknown) => {
 			marks.push(patch);
+			return true;
 		}),
 		classify: vi.fn(async () => classification),
 		persist: vi.fn(async () => undefined),
@@ -123,11 +129,49 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
 		expect(d.persist).toHaveBeenCalledWith(
-			expect.objectContaining({ analysisId: "a1", promptRunId: RUN_ID, mentions }),
+			expect.objectContaining({ claim: { analysisId: "a1", generation: 7 }, promptRunId: RUN_ID, mentions }),
 		);
 		expect(usage).toEqual([
 			expect.objectContaining({ succeeded: true, provider: "fake", model: "fake-model", promptId: run.promptId }),
 		]);
+	});
+
+	it("forwards the job abort signal to the classifier", async () => {
+		const controller = new AbortController();
+		const { d } = deps();
+		await runSentimentJob(payload, d, { signal: controller.signal });
+		expect(d.classify).toHaveBeenCalledWith(expect.anything(), expect.anything(), controller.signal);
+	});
+
+	it("fence: a persist that finds the claim taken over ends as claim-lost and writes nothing else", async () => {
+		const { d, marks, usage } = deps({
+			persist: vi.fn(async () => {
+				throw new ClaimLostError({ analysisId: "a1", generation: 7 });
+			}),
+		});
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
+		expect(marks).toEqual([]);
+		// The paid call did happen and is attributed; only the result was discarded.
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
+	});
+
+	it("fence: a failure whose terminal write is refused ends as claim-lost instead of failing the newer attempt", async () => {
+		const { d, usage } = deps({
+			classify: vi.fn(async () => {
+				throw new Error("OpenRouter API error (500): upstream");
+			}),
+			markAnalysis: vi.fn(async () => false),
+		});
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
+		expect(usage).toEqual([expect.objectContaining({ succeeded: false })]);
+	});
+
+	it("fence: a no-mentions completion whose write is refused ends as claim-lost", async () => {
+		const { d } = deps({
+			loadDetection: vi.fn(async () => ({ status: "no_mentions", mentionCount: 0 }) as never),
+			markAnalysis: vi.fn(async () => false),
+		});
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
 	});
 
 	it("B3: a lost claim returns a non-calling outcome — no classifier call, no write, no usage event", async () => {
@@ -219,21 +263,72 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(d.claimAnalysis).not.toHaveBeenCalled();
 	});
 
-	it("marks failed with a bounded code, attributes the failed attempt to the locked provider/model, writes nothing and rethrows", async () => {
+	it("marks failed with a safe code, attributes the failed attempt to the locked provider/model, writes nothing and rethrows a safe error", async () => {
 		const { d, marks, usage } = deps({
 			classify: vi.fn(async () => {
-				throw new SentimentValidationError("evidence-not-in-answer", "x".repeat(2000));
+				throw new SentimentValidationError("evidence-not-in-answer", `entity "brand": ${"x".repeat(2000)}`);
 			}),
 		});
-		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentValidationError);
+		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
 		expect(d.persist).not.toHaveBeenCalled();
 		const failed = marks.at(-1) as { status: string; errorCode: string; errorMessage: string };
 		expect(failed.status).toBe("failed");
 		expect(failed.errorCode).toBe("evidence-not-in-answer");
-		expect(failed.errorMessage.length).toBeLessThanOrEqual(500);
+		expect(failed.errorMessage).toBe(
+			`validation evidence-not-in-answer (SentimentValidationError) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL}`,
+		);
 		expect(usage).toEqual([
 			expect.objectContaining({ succeeded: false, provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL }),
 		]);
+	});
+
+	it("sanitizes provider errors: no key, answer text or response body reaches the row or the thrown error", async () => {
+		const leaky =
+			`OpenRouter API error (429): {"error":"rate limited","key":"sk-or-should-not-leak-1234567890"} ` +
+			`while classifying "${run.answerBody}" Authorization: Bearer sk-or-should-not-leak-1234567890`;
+		const { d, marks } = deps({
+			classify: vi.fn(async () => {
+				const error = new Error(leaky);
+				(error as { cause?: unknown }).cause = { responseBody: leaky, answer: run.answerBody };
+				throw error;
+			}),
+		});
+		let thrown: unknown;
+		try {
+			await runSentimentJob(payload, d);
+		} catch (error) {
+			thrown = error;
+		}
+		const failed = marks.at(-1) as { errorCode: string; errorMessage: string };
+		const serializedRow = JSON.stringify(failed);
+		const serializedError = JSON.stringify(thrown, Object.getOwnPropertyNames(thrown as object));
+		for (const forbidden of ["sk-or-", "rate limited", "Authorization", run.answerBody ?? "", "responseBody"]) {
+			expect(serializedRow).not.toContain(forbidden);
+			expect(serializedError).not.toContain(forbidden);
+			expect(String(thrown)).not.toContain(forbidden);
+		}
+		expect(failed.errorCode).toBe("provider");
+		expect(failed.errorMessage).toBe(
+			`provider provider (Error) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL} HTTP 429`,
+		);
+		expect(thrown).toBeInstanceOf(SentimentJobError);
+		expect(thrown).toMatchObject({
+			code: "provider",
+			httpStatus: 429,
+			provider: SENTIMENT_PROVIDER_ID,
+			model: SENTIMENT_MODEL,
+		});
+		expect((thrown as Error).cause).toBeUndefined();
+	});
+
+	it("sanitizes an aborted request to the stable `aborted` code", async () => {
+		const { d, marks } = deps({
+			classify: vi.fn(async () => {
+				throw new DOMException("The operation was aborted", "AbortError");
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "aborted", kind: "aborted" });
+		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "aborted" });
 	});
 
 	it("skips invalid and stale payloads without touching the store", async () => {

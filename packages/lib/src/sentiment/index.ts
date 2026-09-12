@@ -36,7 +36,14 @@ export {
 	type SentimentSender,
 	sendSentimentJob,
 } from "./enqueue";
-export { runSentimentJob, type SentimentJobDeps, type SentimentJobOutcome } from "./job";
+export {
+	ClaimLostError,
+	type SafeSentimentError,
+	SentimentJobError,
+	safeErrorMessage,
+	sanitizeSentimentError,
+} from "./errors";
+export { runSentimentJob, type SentimentJobDeps, type SentimentJobOptions, type SentimentJobOutcome } from "./job";
 export {
 	bucketForRange,
 	categoryLabel,
@@ -62,6 +69,7 @@ export { buildSentimentPrompt, SENTIMENT_EVIDENCE_RULES, SENTIMENT_SCORE_RULES }
 export { resolveSentimentProvider, SentimentProviderError } from "./provider";
 export { ensureSentimentQueue, SENTIMENT_QUEUE_OPTIONS, type SentimentQueueAdmin } from "./queue-setup";
 export {
+	type AnalysisClaim,
 	type ClaimOutcome,
 	candidatesFromMentions,
 	claimAnalysis,
@@ -73,6 +81,8 @@ export {
 	loadDetection,
 	loadMentions,
 	loadRunForSentiment,
+	markAnalysis,
+	persistClassification,
 	persistDetection,
 	persistMentions,
 	type StoredMention,
