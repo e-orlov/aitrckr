@@ -11,6 +11,7 @@ import {
 	acceptCanaryRunId,
 	evaluateSentimentCanary,
 	inspectSentimentCanaryRun,
+	inspectSentimentCanaryRunState,
 	parseSentimentCanaryContract,
 	preflightSentimentCanary,
 	runSentimentCanary,
@@ -119,6 +120,7 @@ function storeFakes(provider: Provider, overrides: Partial<SentimentJobDeps> = {
 		loadEntities: vi.fn(async () => entities),
 		loadDetection: vi.fn(async () => ({ status: "mentions", mentionCount: 2 }) as never),
 		loadMentions: vi.fn(async () => mentions),
+		loadAnalysisState: vi.fn(async () => null),
 		ensureAnalysis: vi.fn(
 			async () =>
 				({
@@ -215,6 +217,47 @@ describe("canary contract", () => {
 		["a non-object", "contract"],
 	])("refuses %s", (_label, raw) => {
 		expect(() => parseSentimentCanaryContract(raw)).toThrow(expect.objectContaining({ code: "invalid-contract" }));
+	});
+
+	it("G2: entities[] must be unique by entityType:key — an exact duplicate or a reordered duplicate is refused before any lookup", async () => {
+		const duplicate = {
+			...contract,
+			entities: [...contract.entities, { key: WGV, entityType: "competitor" as const }],
+		};
+		const reordered = {
+			...contract,
+			entities: [{ key: WGV, entityType: "competitor" as const }, ...contract.entities],
+		};
+		for (const raw of [duplicate, reordered]) {
+			expect(() => parseSentimentCanaryContract(raw)).toThrow(expect.objectContaining({ code: "invalid-contract" }));
+		}
+		// Distinct entities are accepted; the same key under both types is two entities, not a duplicate.
+		expect(
+			parseSentimentCanaryContract({
+				...contract,
+				entities: [
+					{ key: "brand", entityType: "brand" },
+					{ key: WGV, entityType: "competitor" },
+					{ key: "c-huk", entityType: "competitor" },
+				],
+			}).entities,
+		).toHaveLength(3);
+		// A run that mentions only competitors is a valid contract.
+		expect(
+			parseSentimentCanaryContract({ ...contract, entities: [{ key: WGV, entityType: "competitor" }] }).entities,
+		).toEqual([{ key: WGV, entityType: "competitor" }]);
+		// The refusal happens at parse time: no store or provider dependency is ever consulted.
+		const provider = goodProvider();
+		const { deps } = storeFakes(provider);
+		let parsed: SentimentCanaryContract | null = null;
+		try {
+			parsed = parseSentimentCanaryContract(duplicate);
+		} catch {
+			parsed = null;
+		}
+		expect(parsed).toBeNull();
+		expect(deps.loadRun).not.toHaveBeenCalled();
+		expect(provider.runStructuredResearch).not.toHaveBeenCalled();
 	});
 
 	it("describes a stored run in contract form without any answer text", async () => {
@@ -354,6 +397,38 @@ describe("canary preflight refuses before any request", () => {
 			"contract-input-hash",
 			"contract-prompt-hash",
 		]);
+	});
+
+	it("a run that was ever attempted or classified is refused: the canary is the single authorized attempt", async () => {
+		expect(
+			await refusal({
+				loadAnalysisState: vi.fn(async () => ({ status: "completed" as const, attempts: 2, observations: 3 })),
+			}),
+		).toEqual(["run-not-pristine"]);
+		expect(
+			await refusal({
+				loadAnalysisState: vi.fn(async () => ({ status: "failed" as const, attempts: 1, observations: 0 })),
+			}),
+		).toEqual(["run-not-pristine"]);
+		// Only a never-attempted run is pristine: no row, or pending with zero attempts and zero observations.
+		const provider = goodProvider();
+		const { deps } = storeFakes(provider, {
+			loadAnalysisState: vi.fn(async () => ({ status: "pending" as const, attempts: 0, observations: 0 })),
+		});
+		expect((await runSentimentCanary({ contract, deps, ...fast })).verdict).toEqual({ status: "accept" });
+		expect(await inspectSentimentCanaryRunState(FROZEN, deps)).toEqual({
+			analysis: { status: "pending", attempts: 0, observations: 0 },
+			pristine: true,
+		});
+		expect(
+			await inspectSentimentCanaryRunState(FROZEN, {
+				loadAnalysisState: vi.fn(async () => ({ status: "failed" as const, attempts: 1, observations: 0 })),
+			}),
+		).toEqual({ analysis: { status: "failed", attempts: 1, observations: 0 }, pristine: false });
+		expect(await inspectSentimentCanaryRunState(FROZEN, { loadAnalysisState: vi.fn(async () => null) })).toEqual({
+			analysis: null,
+			pristine: true,
+		});
 	});
 
 	it("refuses a watchdog that does not outlast the request deadline", async () => {
@@ -537,16 +612,29 @@ describe("canary verdict after the one call", () => {
 		expect(codes(report)).toEqual(["provider-calls", "provider-unconfigured"]);
 	});
 
-	it("a non-classifying job outcome is rejected with its status", async () => {
-		const { deps } = storeFakes(goodProvider(), {
-			claimAnalysis: vi.fn(async () => ({ claimed: false as const, status: "processing" as const })),
-		});
+	it("a lost pristine claim is a refusal with the row's status and no provider call", async () => {
+		const provider = goodProvider();
+		const claimAnalysis = vi.fn(async () => ({ claimed: false as const, status: "processing" as const }));
+		const { deps, usage } = storeFakes(provider, { claimAnalysis });
 		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true, pristineOnly: true });
+		expect(provider.runStructuredResearch).not.toHaveBeenCalled();
+		expect(report.providerCalls).toBe(0);
+		expect(report.outcome).toEqual({ status: "claimed-elsewhere" });
+		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "run-state-drift", detail: "processing" }] });
+		expect(deps.persist).not.toHaveBeenCalled();
+		expect(usage).toEqual([]);
+	});
+
+	it("a non-classifying job outcome other than a lost claim is rejected with its status", async () => {
+		const job = vi.fn(async () => ({ status: "no-mentions" as const }));
+		const { deps } = storeFakes(goodProvider());
+		const report = await runSentimentCanary({ contract, deps, job, ...fast });
 		expect(report.verdict).toEqual({
 			status: "reject",
 			reasons: [
 				{ code: "provider-calls", detail: "0" },
-				{ code: "job-outcome", detail: "claimed-elsewhere" },
+				{ code: "job-outcome", detail: "no-mentions" },
 			],
 		});
 	});
@@ -600,21 +688,25 @@ describe("E2: the exact classifier input is re-checked at the provider boundary"
 		await refusedAtBoundary({ loadEntities: drifting(entities, aliased) }, ["input-hash-drift", "prompt-hash-drift"]);
 	});
 
-	it("candidate order changed between preflight and the call: the canonical hash still matches, the literal prompt does not", async () => {
-		await refusedAtBoundary({ loadMentions: drifting(mentions, [...mentions].reverse()) }, ["prompt-hash-drift"]);
+	it("a different storage order of the same mentions between preflight and the call is not drift: one call, accepted", async () => {
+		const provider = goodProvider();
+		const { deps } = storeFakes(provider, { loadMentions: drifting(mentions, [...mentions].reverse()) });
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(report.preflight).toEqual({ status: "passed" });
+		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
+		expect(report.verdict).toEqual({ status: "accept" });
 	});
 
 	it("the digests the job computes are exactly the ones inspect froze", () => {
 		expect(frozenDigests.classifierInputHash).toMatch(/^[0-9a-f]{64}$/);
 		expect(frozenDigests.providerPromptSha256).toMatch(/^[0-9a-f]{64}$/);
 		expect(frozenDigests.classifierInputHash).not.toBe(frozenDigests.providerPromptSha256);
-		// Reordering candidates leaves the canonical hash alone and changes the prompt digest.
+		// Storage order is not part of the input: reordered mentions give the same canonical hash and the same prompt digest.
 		const reordered = sentimentCanaryInputDigests({
 			answerBody: ANSWER,
 			candidates: candidatesFromMentions([...mentions].reverse(), entities),
 		});
-		expect(reordered.classifierInputHash).toBe(frozenDigests.classifierInputHash);
-		expect(reordered.providerPromptSha256).not.toBe(frozenDigests.providerPromptSha256);
+		expect(reordered).toEqual(frozenDigests);
 	});
 });
 

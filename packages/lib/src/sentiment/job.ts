@@ -15,6 +15,7 @@ import {
 	detectionResultFor,
 	ensureAnalysis,
 	isAnalysisCurrent,
+	type loadAnalysisState,
 	loadDetectableEntities,
 	loadDetection,
 	loadMentions,
@@ -55,6 +56,7 @@ export interface SentimentJobDeps extends SentimentClassifierDeps {
 	loadEntities?: typeof loadDetectableEntities;
 	loadDetection?: typeof loadDetection;
 	loadMentions?: typeof loadMentions;
+	loadAnalysisState?: typeof loadAnalysisState;
 	persistDetection?: typeof persistDetection;
 	ensureAnalysis?: typeof ensureAnalysis;
 	claimAnalysis?: typeof claimAnalysis;

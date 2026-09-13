@@ -1,5 +1,5 @@
 import { isWordChar, normalizeText } from "./text";
-import { BRAND_ENTITY_KEY, SENTIMENT_DETECTOR_VERSION } from "./types";
+import { BRAND_ENTITY_KEY, SENTIMENT_DETECTOR_VERSION, sortSentimentEntities } from "./types";
 
 /** What the detector knows about one entity: names, aliases and owned domains. */
 export interface DetectableEntity {
@@ -71,7 +71,7 @@ export function entityTerms(entity: DetectableEntity): string[] {
  * Deterministic, version `sent-detector-v1`: one mention per entity present in
  * the answer body, regardless of how often it appears. Entities are matched
  * on name, aliases and owned domains after the shared normalization, with
- * token boundaries; the order of the result follows the order of `entities`.
+ * token boundaries; the result is in the canonical entity order.
  */
 export function detectEntityMentions(answerBody: string, entities: DetectableEntity[]): DetectedMention[] {
 	const text = normalizeText(answerBody);
@@ -88,7 +88,7 @@ export function detectEntityMentions(answerBody: string, entities: DetectableEnt
 			matchedTerms: matched.slice(0, MAX_MATCHED_TERMS),
 		});
 	}
-	return mentions;
+	return sortSentimentEntities(mentions);
 }
 
 /** The own-brand entity as the detector sees it. */

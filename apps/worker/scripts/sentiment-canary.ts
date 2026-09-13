@@ -4,9 +4,11 @@
  *
  *   inspect <run-id>
  *       Read-only. Prints the run in contract form (ids, answer-body digest,
- *       the entity set the job would classify, the classifier-input and
- *       outbound-prompt digests, locked versions/provider/model) so the
- *       operator can freeze it as the contract file. No answer text.
+ *       the canonical entity set the job would classify, the classifier-input
+ *       and outbound-prompt digests, locked versions/provider/model) to stdout
+ *       so the operator can freeze it as the contract file; the run's current
+ *       analysis state (must be pristine before a paid attempt) goes to
+ *       stderr. No answer text.
  *
  *   run --contract <file> --contract-sha256 <64-hex> <run-id>
  *       Supervises exactly one canary attempt in a child process. The
@@ -37,6 +39,7 @@ import { parseArgs } from "node:util";
 import {
 	acceptCanaryRunId,
 	inspectSentimentCanaryRun,
+	inspectSentimentCanaryRunState,
 	parseSentimentCanaryContract,
 	runSentimentCanary,
 	SENTIMENT_CANARY_DEADLINE_MS,
@@ -185,7 +188,10 @@ async function main(): Promise<never> {
 		if (rest.length !== 1) usage("inspect takes exactly one run id");
 		const description = await inspectSentimentCanaryRun(rest[0]);
 		if (!description) refused("run-not-found");
+		// stdout is the contract, byte for byte; the run's current state goes
+		// to stderr so it can be recorded without ever entering the contract.
 		console.log(JSON.stringify(description, null, 2));
+		console.error(JSON.stringify({ runState: await inspectSentimentCanaryRunState(rest[0]) }));
 		process.exit(0);
 	}
 

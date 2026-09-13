@@ -4,6 +4,7 @@ import {
 	SENTIMENT_ASPECT_KEYS,
 	SENTIMENT_ASPECTS,
 	type SentimentCandidate,
+	sortSentimentEntities,
 } from "./types";
 
 export const SENTIMENT_SCORE_RULES = `Score each entity on 0..100 for how the ANSWER portrays it:
@@ -40,7 +41,7 @@ export function aspectTaxonomyText(): string {
  * correct sentiment that the stored answer does not express.
  */
 export function buildSentimentPrompt(args: { answerBody: string; candidates: SentimentCandidate[] }): string {
-	const entityList = args.candidates
+	const entityList = sortSentimentEntities(args.candidates)
 		.map((candidate) => {
 			const aliases = candidate.aliases.length > 0 ? ` (also known as: ${candidate.aliases.join(", ")})` : "";
 			const role = candidate.entityType === "brand" ? "the brand being tracked" : "a competitor";

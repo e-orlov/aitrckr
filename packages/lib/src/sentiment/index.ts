@@ -13,6 +13,8 @@ export {
 	acceptCanaryRunId,
 	evaluateSentimentCanary,
 	inspectSentimentCanaryRun,
+	inspectSentimentCanaryRunState,
+	isPristineCanaryRun,
 	parseSentimentCanaryContract,
 	preflightSentimentCanary,
 	runSentimentCanary,
@@ -30,6 +32,7 @@ export {
 	type SentimentCanaryRejectCode,
 	type SentimentCanaryReport,
 	type SentimentCanaryRunDescription,
+	type SentimentCanaryRunState,
 	type SentimentCanaryVerdict,
 	sentimentCanaryBodyDigest,
 	sentimentCanaryContractSchema,
@@ -97,6 +100,7 @@ export { resolveSentimentProvider, SentimentProviderError } from "./provider";
 export { ensureSentimentQueue, SENTIMENT_QUEUE_OPTIONS, type SentimentQueueAdmin } from "./queue-setup";
 export {
 	type AnalysisClaim,
+	type ClaimOptions,
 	type ClaimOutcome,
 	candidatesFromMentions,
 	claimAnalysis,
@@ -104,6 +108,7 @@ export {
 	detectionResultFor,
 	ensureAnalysis,
 	isAnalysisCurrent,
+	loadAnalysisState,
 	loadDetectableEntities,
 	loadDetection,
 	loadMentions,
@@ -112,12 +117,14 @@ export {
 	persistClassification,
 	persistDetection,
 	persistMentions,
+	type StoredAnalysisState,
 	type StoredMention,
 	type StoredRunForSentiment,
 } from "./store";
 export { extractAnswerBody, type IndexedText, normalizeIndexed, normalizeText } from "./text";
 export {
 	BRAND_ENTITY_KEY,
+	compareSentimentEntities,
 	EVIDENCE_MAX_ITEMS,
 	EVIDENCE_POLARITIES,
 	EVIDENCE_QUOTE_MAX_LENGTH,
@@ -145,4 +152,5 @@ export {
 	sentimentClassificationResultSchema,
 	sentimentJobSchema,
 	sentimentSingletonKey,
+	sortSentimentEntities,
 } from "./types";

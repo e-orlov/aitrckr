@@ -214,3 +214,26 @@ export function sentimentSingletonKey(promptRunId: string, classifierVersion: st
 }
 
 export const BRAND_ENTITY_KEY = "brand";
+
+/**
+ * The canonical order of sentiment entities everywhere they are listed —
+ * candidates, prompts, mention projections, canary contracts: the own brand
+ * first, then competitors by their immutable key (the competitor UUID) in
+ * plain code-unit order. Never storage order, insertion order, timestamps,
+ * row ids or a locale-aware collation, so every environment holding the same
+ * entities produces the same sequence.
+ */
+export function compareSentimentEntities(
+	a: { entityType: "brand" | "competitor"; key: string },
+	b: { entityType: "brand" | "competitor"; key: string },
+): number {
+	if (a.entityType !== b.entityType) return a.entityType === "brand" ? -1 : 1;
+	return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+}
+
+/** A copy of `items` in the canonical entity order. */
+export function sortSentimentEntities<T extends { entityType: "brand" | "competitor"; key: string }>(
+	items: readonly T[],
+): T[] {
+	return [...items].sort(compareSentimentEntities);
+}

@@ -39,8 +39,8 @@ describe("UT-SNT-003 deterministic mention detection", () => {
 		expect(detectEntityMentions("Schadenfreiheitsrabatt bei hukum", [huk])).toEqual([]);
 		expect(detectEntityMentions("adas.de ist keine Versicherung", [das])).toEqual([]);
 		expect(detectEntityMentions("Vergleich: D.A.S. gegen ARAG", [das, brand]).map((m) => m.key)).toEqual([
-			"c-das",
 			"brand",
+			"c-das",
 		]);
 		expect(detectEntityMentions("die R+V-Gruppe", [ruv]).map((m) => m.key)).toEqual(["c-ruv"]);
 		expect(detectEntityMentions("Württembergische Gemeinde-Versicherung empfohlen", [wgv]).map((m) => m.key)).toEqual([
@@ -65,9 +65,14 @@ describe("UT-SNT-003 deterministic mention detection", () => {
 		expect(detectEntityMentions("", all)).toEqual([]);
 	});
 
-	it("preserves the order of the supplied entities (brand first)", () => {
+	it("returns the canonical order — brand first, then competitors by key — whatever the roster or text order", () => {
 		const found = detectEntityMentions("WGV, dann R+V, dann ARAG", all);
-		expect(found.map((m) => m.key)).toEqual(["brand", "c-wgv", "c-ruv"]);
+		expect(found.map((m) => m.key)).toEqual(["brand", "c-ruv", "c-wgv"]);
+		expect(detectEntityMentions("WGV, dann R+V, dann ARAG", [...all].reverse()).map((m) => m.key)).toEqual([
+			"brand",
+			"c-ruv",
+			"c-wgv",
+		]);
 	});
 });
 

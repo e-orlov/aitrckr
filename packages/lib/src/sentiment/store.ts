@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, notExists, or, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import {
 	brands,
@@ -30,6 +30,7 @@ import {
 	type SentimentAnalysisStatus,
 	type SentimentCandidate,
 	type SentimentDetectionStatus,
+	sortSentimentEntities,
 } from "./types";
 
 type Db = typeof db;
@@ -227,7 +228,13 @@ export async function loadDetection(promptRunId: string, executor: Executor = db
 	return row ?? null;
 }
 
-/** The current mention projection of a run: current detector version and not superseded. */
+/**
+ * The current mention projection of a run (current detector version, not
+ * superseded) in the canonical entity order. Row timestamps and ids never
+ * decide the order: rows written by one backfill transaction share a
+ * timestamp and their ids are random, so any order derived from them would
+ * differ between two databases holding the same data.
+ */
 export async function loadMentions(promptRunId: string, executor: Executor = db): Promise<StoredMention[]> {
 	const rows = await executor.query.promptRunEntityMentions.findMany({
 		where: and(
@@ -235,21 +242,22 @@ export async function loadMentions(promptRunId: string, executor: Executor = db)
 			eq(promptRunEntityMentions.detectorVersion, SENTIMENT_DETECTOR_VERSION),
 			isNull(promptRunEntityMentions.supersededAt),
 		),
-		orderBy: [promptRunEntityMentions.detectedAt, promptRunEntityMentions.id],
 	});
-	return rows.map((row) => ({
-		id: row.id,
-		key: row.entityKey,
-		entityType: row.entityType as "brand" | "competitor",
-		competitorId: row.competitorId,
-		entityName: row.entityName,
-	}));
+	return sortSentimentEntities(
+		rows.map((row) => ({
+			id: row.id,
+			key: row.entityKey,
+			entityType: row.entityType as "brand" | "competitor",
+			competitorId: row.competitorId,
+			entityName: row.entityName,
+		})),
+	);
 }
 
-/** Classifier candidates for stored mentions, with the names the model may use to disambiguate. */
+/** Classifier candidates for stored mentions, in canonical order, with the names the model may use to disambiguate. */
 export function candidatesFromMentions(mentions: StoredMention[], entities: DetectableEntity[]): SentimentCandidate[] {
 	const byKey = new Map(entities.map((entity) => [entity.key, entity]));
-	return mentions.map((mention) => {
+	return sortSentimentEntities(mentions).map((mention) => {
 		const entity = byKey.get(mention.key);
 		return {
 			key: mention.key,
@@ -259,6 +267,31 @@ export function candidatesFromMentions(mentions: StoredMention[], entities: Dete
 			aliases: entity?.aliases ?? [],
 		};
 	});
+}
+
+/** What the current-version analysis of a run looks like right now, read-only; `null` when none exists. */
+export interface StoredAnalysisState {
+	status: SentimentAnalysisStatus;
+	attempts: number;
+	observations: number;
+}
+
+export async function loadAnalysisState(
+	promptRunId: string,
+	executor: Executor = db,
+): Promise<StoredAnalysisState | null> {
+	const row = await executor.query.sentimentAnalyses.findFirst({
+		where: and(
+			eq(sentimentAnalyses.promptRunId, promptRunId),
+			eq(sentimentAnalyses.classifierVersion, SENTIMENT_CLASSIFIER_VERSION),
+		),
+	});
+	if (!row) return null;
+	const [{ n }] = await executor
+		.select({ n: sql<number>`count(*)::int` })
+		.from(sentimentObservations)
+		.where(eq(sentimentObservations.analysisId, row.id));
+	return { status: row.status as SentimentAnalysisStatus, attempts: row.attempts, observations: n };
 }
 
 /** Get-or-create the current-version analysis row for a run (status `pending` on creation). */
@@ -311,30 +344,56 @@ export interface AnalysisClaim {
 	generation: number;
 }
 
+export interface ClaimOptions {
+	/** Also claim finished rows (`completed`/`no_mentions`) that are no longer current. */
+	allowFinished: boolean;
+	/**
+	 * Canary-only: claim exclusively a never-attempted row — `pending`, zero
+	 * attempts and no observation — all checked inside the one UPDATE, so of
+	 * any number of racing canaries exactly one ever reaches the provider and
+	 * a loser changes nothing (no attempt is counted for it). The worker never
+	 * uses this mode; its retry, stale-recovery and reclassification semantics
+	 * are unchanged.
+	 */
+	pristineOnly?: boolean;
+}
+
 /**
  * Atomically claim the analysis for one provider call. Exactly one of any
  * number of racing workers wins: the conditional UPDATE only matches a row
  * that is `pending`, `failed`, a finished row that is no longer current
  * (`allowFinished`: `completed`/`no_mentions`), or a `processing` claim older than the claim timeout
- * (an abandoned worker). Losers see the row's current status and make no
- * call. The winner receives the incremented claim generation; a claimant
- * whose lease was taken over later fails every fenced write. Runs in its own
- * statement (autocommit) so the claim is visible to other sessions before
- * the provider boundary.
+ * (an abandoned worker) — or, in `pristineOnly` mode, only a never-attempted
+ * row. Losers see the row's current status and make no call. The winner
+ * receives the incremented claim generation; a claimant whose lease was
+ * taken over later fails every fenced write. Runs in its own statement
+ * (autocommit) so the claim is visible to other sessions before the provider
+ * boundary.
  */
 export async function claimAnalysis(
 	analysisId: string,
-	options: { allowFinished: boolean },
+	options: ClaimOptions,
 	executor: Executor = db,
 ): Promise<ClaimOutcome> {
 	const staleBefore = new Date(Date.now() - SENTIMENT_CLAIM_TIMEOUT_SECONDS * 1000);
-	const claimable = or(
-		inArray(
-			sentimentAnalyses.status,
-			options.allowFinished ? ["pending", "failed", "completed", "no_mentions"] : ["pending", "failed"],
-		),
-		and(eq(sentimentAnalyses.status, "processing"), lt(sentimentAnalyses.startedAt, staleBefore)),
-	);
+	const claimable = options.pristineOnly
+		? and(
+				eq(sentimentAnalyses.status, "pending"),
+				eq(sentimentAnalyses.attempts, 0),
+				notExists(
+					executor
+						.select({ id: sentimentObservations.id })
+						.from(sentimentObservations)
+						.where(eq(sentimentObservations.analysisId, sentimentAnalyses.id)),
+				),
+			)
+		: or(
+				inArray(
+					sentimentAnalyses.status,
+					options.allowFinished ? ["pending", "failed", "completed", "no_mentions"] : ["pending", "failed"],
+				),
+				and(eq(sentimentAnalyses.status, "processing"), lt(sentimentAnalyses.startedAt, staleBefore)),
+			);
 	const [row] = await executor
 		.update(sentimentAnalyses)
 		.set({
