@@ -125,6 +125,18 @@ export class SentimentCanaryError extends Error {
 	}
 }
 
+/**
+ * Thrown at the persistence boundary when the provider's answer fails the
+ * post-call contract: the job core then attributes the paid call once, marks
+ * the analysis failed with the `canary-contract` code and writes nothing else.
+ */
+export class SentimentCanaryContractError extends Error {
+	constructor(readonly reasons: SentimentCanaryReason[]) {
+		super(`canary contract rejected: ${reasons.map((reason) => reason.code).join(", ")}`);
+		this.name = "SentimentCanaryContractError";
+	}
+}
+
 export type SentimentCanaryOutcome =
 	| {
 			status: SentimentJobOutcome["status"];
@@ -462,6 +474,7 @@ export async function runSentimentCanary(args: {
 
 	const controller = new AbortController();
 	let providerCalls = 0;
+	let gateReasons: SentimentCanaryReason[] | null = null;
 	const resolveBase = base.resolveProvider ?? resolveSentimentProvider;
 	const deps: SentimentJobDeps = {
 		...base,
@@ -480,6 +493,26 @@ export async function runSentimentCanary(args: {
 		persist: (persistArgs) => {
 			if (controller.signal.aborted) {
 				return Promise.reject(new DOMException("canary aborted before the write", "AbortError"));
+			}
+			// The post-call contract is decided here, with the validated answer in
+			// hand and before anything is written: a rejected answer never becomes
+			// a completed analysis or an observation row.
+			const { classification } = persistArgs;
+			const gate = evaluateSentimentCanary(
+				contract,
+				{
+					status: "classified",
+					entities: classification.entities.length,
+					entityKeys: classification.entities.map((entity) => entity.key),
+					usage: classification.usage,
+					request: classification.request,
+				},
+				{ attempts: 1, providerCalls },
+				args.limits,
+			);
+			if (gate.status === "reject") {
+				gateReasons = gate.reasons;
+				return Promise.reject(new SentimentCanaryContractError(gate.reasons));
 			}
 			return (base.persist ?? persistClassification)(persistArgs);
 		},
@@ -530,6 +563,10 @@ export async function runSentimentCanary(args: {
 		attempts: 1,
 		providerCalls,
 		outcome,
-		verdict: evaluateSentimentCanary(contract, outcome, counts, args.limits),
+		// The gate's own reasons are the verdict when it fired; otherwise the
+		// same evaluation over the final outcome is the second, independent check.
+		verdict: gateReasons
+			? { status: "reject", reasons: gateReasons }
+			: evaluateSentimentCanary(contract, outcome, counts, args.limits),
 	});
 }

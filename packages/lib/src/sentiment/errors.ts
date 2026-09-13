@@ -14,10 +14,10 @@ export class ClaimLostError extends Error {
  * response body, an answer excerpt or a credential.
  */
 export interface SafeSentimentError {
-	/** Stable internal code: a validation code, `provider`, `aborted`, `provider-unconfigured`, `claim-lost`, `persistence` or `unknown`. */
+	/** Stable internal code: a validation code, `provider`, `aborted`, `provider-unconfigured`, `claim-lost`, `persistence`, `canary-contract` or `unknown`. */
 	code: string;
 	/** Which class of failure produced it (for diagnosis without payloads). */
-	kind: "validation" | "provider" | "aborted" | "configuration" | "claim" | "store" | "unknown";
+	kind: "validation" | "provider" | "aborted" | "configuration" | "claim" | "store" | "contract" | "unknown";
 	provider: string;
 	model: string;
 	/** HTTP status the provider answered with, when the error carried one. */
@@ -61,6 +61,9 @@ export function sanitizeSentimentError(error: unknown, stage: "provider" | "pers
 	}
 	if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
 		return { ...base, code: "aborted", kind: "aborted", httpStatus: null };
+	}
+	if (error instanceof Error && error.name === "SentimentCanaryContractError") {
+		return { ...base, code: "canary-contract", kind: "contract", httpStatus: null };
 	}
 	if (stage === "persist") return { ...base, code: "persistence", kind: "store", httpStatus: null };
 	if (error instanceof Error) {

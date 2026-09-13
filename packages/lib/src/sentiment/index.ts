@@ -22,6 +22,7 @@ export {
 	SENTIMENT_CANARY_WATCHDOG_MS,
 	type SentimentCanaryContract,
 	type SentimentCanaryEntity,
+	SentimentCanaryContractError,
 	SentimentCanaryError,
 	type SentimentCanaryOutcome,
 	type SentimentCanaryReason,
