@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../providers/config";
 import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
+import { SentimentValidationError } from "./errors-validation";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import { type IndexedText, normalizeIndexed, normalizeText } from "./text";
@@ -20,15 +21,7 @@ import {
 	sentimentClassificationResultSchema,
 } from "./types";
 
-export class SentimentValidationError extends Error {
-	constructor(
-		readonly code: string,
-		message: string,
-	) {
-		super(message);
-		this.name = "SentimentValidationError";
-	}
-}
+export { SentimentValidationError } from "./errors-validation";
 
 export interface ValidatedAspect {
 	key: SentimentAspectKey;

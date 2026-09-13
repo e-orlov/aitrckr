@@ -220,11 +220,8 @@ describe("grounded evidence — RED before the corrective", () => {
 });
 
 // Type-level guard: the persisted evidence format stays {quote,start,end,polarity} whatever the provider contract does.
-export type _StoredEvidenceUnchanged = SentimentClassification["entities"][number]["evidence"][number] extends {
-	quote: string;
-	start: number;
-	end: number;
-	polarity: string;
-}
+type StoredEvidence = SentimentClassification["entities"][number]["evidence"][number];
+const storedEvidenceUnchanged: StoredEvidence extends { quote: string; start: number; end: number; polarity: string }
 	? true
-	: never;
+	: never = true;
+void storedEvidenceUnchanged;
