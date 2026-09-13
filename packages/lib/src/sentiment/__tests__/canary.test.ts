@@ -19,10 +19,11 @@ import {
 	SentimentCanaryError,
 	type SentimentCanaryReport,
 	sentimentCanaryBodyDigest,
+	sentimentCanaryInputDigests,
 } from "../canary";
 import type { DetectableEntity } from "../detector";
 import type { SentimentJobDeps } from "../job";
-import type { StoredMention, StoredRunForSentiment } from "../store";
+import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
 import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION } from "../types";
 
 const FROZEN = "bf1347c3-7161-457c-91d6-0173d601659e";
@@ -47,6 +48,10 @@ const mentions: StoredMention[] = [
 	{ id: "m1", key: "brand", entityType: "brand", competitorId: null, entityName: "ARAG" },
 	{ id: "m2", key: WGV, entityType: "competitor", competitorId: WGV, entityName: "WGV" },
 ];
+const frozenDigests = sentimentCanaryInputDigests({
+	answerBody: ANSWER,
+	candidates: candidatesFromMentions(mentions, entities),
+});
 const contract: SentimentCanaryContract = {
 	runId: FROZEN,
 	promptId: PROMPT,
@@ -56,6 +61,7 @@ const contract: SentimentCanaryContract = {
 		{ key: "brand", entityType: "brand" },
 		{ key: WGV, entityType: "competitor" },
 	],
+	...frozenDigests,
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	provider: "openrouter",
@@ -200,6 +206,8 @@ describe("canary contract", () => {
 	it.each([
 		["an unknown field", { ...contract, answerBody: ANSWER }],
 		["a missing digest", { ...contract, answerBodySha256: undefined }],
+		["a missing input hash", { ...contract, classifierInputHash: undefined }],
+		["a malformed prompt hash", { ...contract, providerPromptSha256: "nope" }],
 		["a malformed digest", { ...contract, answerBodySha256: "abc" }],
 		["no entities", { ...contract, entities: [] }],
 		["an entity of unknown type", { ...contract, entities: [{ key: "brand", entityType: "person" }] }],
@@ -218,6 +226,7 @@ describe("canary contract", () => {
 			brandId: "arag",
 			answerBodySha256: sentimentCanaryBodyDigest(ANSWER),
 			entities: contract.entities,
+			...frozenDigests,
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 			provider: "openrouter",
@@ -268,9 +277,14 @@ describe("canary preflight refuses before any request", () => {
 	});
 
 	it("body hash mismatch (the stored answer changed)", async () => {
+		// Trailing whitespace changes the raw body and the literal prompt; the canonical (normalized) input hash survives.
 		expect(await refusal({ loadRun: vi.fn(async () => ({ ...run, answerBody: `${ANSWER} ` })) })).toEqual([
 			"body-hash-mismatch",
+			"contract-prompt-hash",
 		]);
+		expect(
+			await refusal({ loadRun: vi.fn(async () => ({ ...run, answerBody: ANSWER.replace("beste", "gute") })) }),
+		).toEqual(["body-hash-mismatch", "contract-input-hash", "contract-prompt-hash"]);
 	});
 
 	it("unextractable body", async () => {
@@ -280,7 +294,11 @@ describe("canary preflight refuses before any request", () => {
 	});
 
 	it("entity set mismatch: a frozen entity is missing from the run", async () => {
-		expect(await refusal({ loadMentions: vi.fn(async () => mentions.slice(0, 1)) })).toEqual(["entity-set-mismatch"]);
+		expect(await refusal({ loadMentions: vi.fn(async () => mentions.slice(0, 1)) })).toEqual([
+			"entity-set-mismatch",
+			"contract-input-hash",
+			"contract-prompt-hash",
+		]);
 	});
 
 	it("entity set mismatch: the run carries an entity the contract does not", async () => {
@@ -297,7 +315,7 @@ describe("canary preflight refuses before any request", () => {
 					},
 				]),
 			}),
-		).toEqual(["entity-set-mismatch"]);
+		).toEqual(["entity-set-mismatch", "contract-input-hash", "contract-prompt-hash"]);
 	});
 
 	it("entity set mismatch: same key, different type", async () => {
@@ -325,6 +343,17 @@ describe("canary preflight refuses before any request", () => {
 				},
 			),
 		).toEqual(["contract-classifier-version", "contract-taxonomy-version", "contract-provider", "contract-model"]);
+	});
+
+	it("input hash or prompt hash frozen against another candidate set or prompt template", async () => {
+		expect(await refusal({}, { ...contract, classifierInputHash: "0".repeat(64) })).toEqual(["contract-input-hash"]);
+		expect(await refusal({}, { ...contract, providerPromptSha256: "f".repeat(64) })).toEqual(["contract-prompt-hash"]);
+		// A roster edit before preflight (alias added) changes both digests but not the entity set.
+		const aliased = entities.map((e) => (e.key === WGV ? { ...e, aliases: ["Württembergische"] } : e));
+		expect(await refusal({ loadEntities: vi.fn(async () => aliased) })).toEqual([
+			"contract-input-hash",
+			"contract-prompt-hash",
+		]);
 	});
 
 	it("refuses a watchdog that does not outlast the request deadline", async () => {
@@ -541,6 +570,54 @@ describe("canary verdict after the one call", () => {
 	});
 });
 
+describe("E2: the exact classifier input is re-checked at the provider boundary", () => {
+	/** Preflight sees the frozen roster/mentions; the job's own reload sees the changed ones. */
+	const drifting = <T>(first: T, later: T) => {
+		let calls = 0;
+		return vi.fn(async () => (++calls === 1 ? first : later));
+	};
+	const refusedAtBoundary = async (overrides: Partial<SentimentJobDeps>, expected: string[]) => {
+		const provider = goodProvider();
+		const { deps, usage, marks } = storeFakes(provider, overrides);
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(report.preflight).toEqual({ status: "passed" });
+		expect(provider.runStructuredResearch).not.toHaveBeenCalled();
+		expect(report.providerCalls).toBe(0);
+		expect(deps.persist).not.toHaveBeenCalled();
+		expect(usage).toEqual([]);
+		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "canary-input-drift" })]);
+		expect(report.outcome).toMatchObject({ status: "error", name: "SentimentJobError", code: "canary-input-drift" });
+		expect(codes(report)).toEqual(expected);
+	};
+
+	it("a competitor renamed between preflight and the call: no request", async () => {
+		const renamed = entities.map((e) => (e.key === WGV ? { ...e, name: "WGV Versicherung" } : e));
+		await refusedAtBoundary({ loadEntities: drifting(entities, renamed) }, ["input-hash-drift", "prompt-hash-drift"]);
+	});
+
+	it("an alias added between preflight and the call: no request", async () => {
+		const aliased = entities.map((e) => (e.key === "brand" ? { ...e, aliases: ["ARAG SE"] } : e));
+		await refusedAtBoundary({ loadEntities: drifting(entities, aliased) }, ["input-hash-drift", "prompt-hash-drift"]);
+	});
+
+	it("candidate order changed between preflight and the call: the canonical hash still matches, the literal prompt does not", async () => {
+		await refusedAtBoundary({ loadMentions: drifting(mentions, [...mentions].reverse()) }, ["prompt-hash-drift"]);
+	});
+
+	it("the digests the job computes are exactly the ones inspect froze", () => {
+		expect(frozenDigests.classifierInputHash).toMatch(/^[0-9a-f]{64}$/);
+		expect(frozenDigests.providerPromptSha256).toMatch(/^[0-9a-f]{64}$/);
+		expect(frozenDigests.classifierInputHash).not.toBe(frozenDigests.providerPromptSha256);
+		// Reordering candidates leaves the canonical hash alone and changes the prompt digest.
+		const reordered = sentimentCanaryInputDigests({
+			answerBody: ANSWER,
+			candidates: candidatesFromMentions([...mentions].reverse(), entities),
+		});
+		expect(reordered.classifierInputHash).toBe(frozenDigests.classifierInputHash);
+		expect(reordered.providerPromptSha256).not.toBe(frozenDigests.providerPromptSha256);
+	});
+});
+
 describe("E1: the post-call gate runs before persistence", () => {
 	const gated = async (provider: Provider, expected: string[]) => {
 		const { deps, usage, marks } = storeFakes(provider);
@@ -616,33 +693,45 @@ describe("E1: the post-call gate runs before persistence", () => {
 		);
 	});
 
-	it("entity keys drifting from the contract between preflight and answer", async () => {
-		// The run's mention set changes after preflight: the job classifies a different entity set.
-		const provider = goodProvider(undefined, {
-			entities: [
-				goodAnswer.entities[0],
-				{
-					key: "c-huk",
-					score: 50,
-					category: "neutral",
-					confidence: 0.5,
-					evidence: [{ quote: "WGV PBV Optimal", polarity: "neutral" }],
-					aspects: [],
-				},
-			],
-		});
+	it("a mention set that drifts after preflight is refused at the boundary before any request", async () => {
 		const drifted: StoredMention[] = [
 			mentions[0],
 			{ id: "m3", key: "c-huk", entityType: "competitor", competitorId: "c-huk", entityName: "HUK-COBURG" },
 		];
 		let loads = 0;
-		const { deps, usage, marks } = storeFakes(provider, {
+		const provider = goodProvider();
+		const { deps, usage } = storeFakes(provider, {
 			loadMentions: vi.fn(async () => (++loads === 1 ? mentions : drifted)),
 		});
 		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(provider.runStructuredResearch).not.toHaveBeenCalled();
 		expect(deps.persist).not.toHaveBeenCalled();
-		expect(codes(report)).toEqual(["entities-mismatch"]);
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
+		expect(usage).toEqual([]);
+		expect(codes(report)).toEqual(["input-hash-drift", "prompt-hash-drift"]);
+	});
+
+	it("entity keys that still differ after a validated answer are rejected before persistence", async () => {
+		// Only reachable by bypassing the classifier's own candidate check; the gate must still hold.
+		const { deps, usage, marks } = storeFakes(goodProvider(), {
+			classify: vi.fn(async () => ({
+				entities: [
+					{ key: "brand", score: 80, category: "positive" as const, confidence: 0.9, evidence: [], aspects: [] },
+					{ key: "c-huk", score: 50, category: "neutral" as const, confidence: 0.5, evidence: [], aspects: [] },
+				],
+				provider: "openrouter",
+				model: "openai/gpt-5-mini",
+				webSearch: true,
+				classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
+				taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+				inputHash: frozenDigests.classifierInputHash,
+				usage: goodUsage,
+				request: goodRequest,
+			})),
+		});
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(deps.persist).not.toHaveBeenCalled();
+		expect(codes(report)).toEqual(["provider-calls", "entities-mismatch"]);
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 })]);
 		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "canary-contract" })]);
 	});
 

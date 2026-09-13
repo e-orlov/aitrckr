@@ -14,7 +14,7 @@ export class ClaimLostError extends Error {
  * response body, an answer excerpt or a credential.
  */
 export interface SafeSentimentError {
-	/** Stable internal code: a validation code, `provider`, `aborted`, `provider-unconfigured`, `claim-lost`, `persistence`, `canary-contract` or `unknown`. */
+	/** Stable internal code: a validation code, `provider`, `aborted`, `provider-unconfigured`, `claim-lost`, `persistence`, `canary-contract`, `canary-input-drift` or `unknown`. */
 	code: string;
 	/** Which class of failure produced it (for diagnosis without payloads). */
 	kind: "validation" | "provider" | "aborted" | "configuration" | "claim" | "store" | "contract" | "unknown";
@@ -24,6 +24,8 @@ export interface SafeSentimentError {
 	httpStatus: number | null;
 	/** Constructor name of the original error — a class name, never its message. */
 	errorName: string;
+	/** False when the attempt was refused before any request left; such an attempt is not attributed as provider usage. */
+	requestSent: boolean;
 }
 
 const HTTP_STATUS = /\((\d{3})\)/;
@@ -51,7 +53,10 @@ function nameOf(error: unknown): string {
  * call succeeded.
  */
 export function sanitizeSentimentError(error: unknown, stage: "provider" | "persist" = "provider"): SafeSentimentError {
-	const base = { provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL, errorName: nameOf(error) };
+	const base = { provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL, errorName: nameOf(error), requestSent: true };
+	if (error instanceof Error && error.name === "SentimentCanaryInputDriftError") {
+		return { ...base, code: "canary-input-drift", kind: "contract", httpStatus: null, requestSent: false };
+	}
 	if (error instanceof ClaimLostError) return { ...base, code: "claim-lost", kind: "claim", httpStatus: null };
 	if (error instanceof Error && error.name === "SentimentValidationError" && "code" in error) {
 		return { ...base, code: String((error as { code: unknown }).code), kind: "validation", httpStatus: null };

@@ -6,11 +6,13 @@ import type {
 	StructuredResearchRequestSummary,
 	StructuredResearchUsage,
 } from "../providers/types";
-import { SENTIMENT_MAX_OUTPUT_TOKENS } from "./classifier";
+import { classifySentiment, SENTIMENT_MAX_OUTPUT_TOKENS, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import { runSentimentJob, type SentimentJobDeps, type SentimentJobOutcome } from "./job";
+import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import {
+	candidatesFromMentions,
 	loadDetectableEntities,
 	loadDetection,
 	loadMentions,
@@ -23,6 +25,7 @@ import {
 	SENTIMENT_MODEL,
 	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_TAXONOMY_VERSION,
+	type SentimentCandidate,
 } from "./types";
 
 /** Provider request deadline for the canary: the fetch is aborted after this. */
@@ -57,6 +60,10 @@ export const sentimentCanaryContractSchema = z.strictObject({
 	/** SHA-256 (hex) of the extracted answer body exactly as the classifier receives it. */
 	answerBodySha256: z.string().regex(/^[0-9a-f]{64}$/),
 	entities: z.array(z.strictObject({ key: z.string().min(1), entityType: z.enum(["brand", "competitor"]) })).min(1),
+	/** `sentimentInputHash` over the body and the exact candidates (keys, types, names, aliases) the job would send. */
+	classifierInputHash: z.string().regex(/^[0-9a-f]{64}$/),
+	/** SHA-256 (hex) of the exact prompt string the provider would receive, candidate order included. */
+	providerPromptSha256: z.string().regex(/^[0-9a-f]{64}$/),
 	classifierVersion: z.string().min(1),
 	taxonomyVersion: z.string().min(1),
 	provider: z.string().min(1),
@@ -79,6 +86,10 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"body-hash-mismatch",
 	"entity-unknown",
 	"entity-set-mismatch",
+	"contract-input-hash",
+	"contract-prompt-hash",
+	"input-hash-drift",
+	"prompt-hash-drift",
 	"attempts",
 	"provider-calls",
 	"job-outcome",
@@ -213,18 +224,35 @@ function sameEntitySet(expected: readonly SentimentCanaryEntity[], actual: reado
  * resolves them: the current detection receipt when one exists, otherwise a
  * deterministic scan — without writing anything.
  */
-async function resolveCanaryEntities(
+async function resolveCanaryInput(
 	run: { id: string; answerBody: string },
 	roster: DetectableEntity[],
 	deps: SentimentJobDeps,
-): Promise<SentimentCanaryEntity[]> {
+): Promise<{ entities: SentimentCanaryEntity[]; candidates: SentimentCandidate[] }> {
 	const receipt = await (deps.loadDetection ?? loadDetection)(run.id);
-	const mentions: Pick<StoredMention, "key" | "entityType">[] = receipt
+	const mentions: Omit<StoredMention, "id">[] = receipt
 		? receipt.status === "mentions"
 			? await (deps.loadMentions ?? loadMentions)(run.id)
 			: []
 		: detectEntityMentions(run.answerBody, roster);
-	return mentions.map((mention) => ({ key: mention.key, entityType: mention.entityType }));
+	return {
+		entities: mentions.map((mention) => ({ key: mention.key, entityType: mention.entityType })),
+		candidates: candidatesFromMentions(
+			mentions.map((mention) => ({ id: "", ...mention })),
+			roster,
+		),
+	};
+}
+
+/** The two digests that pin the exact classifier input: the canonical hash and the literal outbound prompt. */
+export function sentimentCanaryInputDigests(args: { answerBody: string; candidates: SentimentCandidate[] }): {
+	classifierInputHash: string;
+	providerPromptSha256: string;
+} {
+	return {
+		classifierInputHash: sentimentInputHash(args.answerBody, args.candidates),
+		providerPromptSha256: createHash("sha256").update(buildSentimentPrompt(args), "utf8").digest("hex"),
+	};
 }
 
 export interface SentimentCanaryRunDescription {
@@ -233,6 +261,8 @@ export interface SentimentCanaryRunDescription {
 	brandId: string;
 	answerBodySha256: string | null;
 	entities: SentimentCanaryEntity[];
+	classifierInputHash: string | null;
+	providerPromptSha256: string | null;
 	classifierVersion: string;
 	taxonomyVersion: string;
 	provider: string;
@@ -250,16 +280,19 @@ export async function inspectSentimentCanaryRun(
 	const run = await (deps.loadRun ?? loadRunForSentiment)(runId);
 	if (!run) return null;
 	const roster = await (deps.loadEntities ?? loadDetectableEntities)(run.brandId, "historical");
-	const entities =
-		run.answerBody === null
-			? []
-			: await resolveCanaryEntities({ id: run.id, answerBody: run.answerBody }, roster, deps);
+	const input =
+		run.answerBody === null ? null : await resolveCanaryInput({ id: run.id, answerBody: run.answerBody }, roster, deps);
+	const digests =
+		run.answerBody === null || input === null || input.candidates.length === 0
+			? { classifierInputHash: null, providerPromptSha256: null }
+			: sentimentCanaryInputDigests({ answerBody: run.answerBody, candidates: input.candidates });
 	return {
 		runId: run.id,
 		promptId: run.promptId,
 		brandId: run.brandId,
 		answerBodySha256: run.answerBody === null ? null : sentimentCanaryBodyDigest(run.answerBody),
-		entities,
+		entities: input?.entities ?? [],
+		...digests,
 		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 		provider: SENTIMENT_PROVIDER_ID,
@@ -296,9 +329,28 @@ export async function preflightSentimentCanary(
 	const roster = await (deps.loadEntities ?? loadDetectableEntities)(run.brandId, "historical");
 	const known = new Set(roster.map((entity) => `${entity.entityType}:${entity.key}`));
 	if (!contract.entities.every((entity) => known.has(entityToken(entity)))) reasons.push({ code: "entity-unknown" });
-	const actual = await resolveCanaryEntities({ id: run.id, answerBody: run.answerBody }, roster, deps);
-	if (!sameEntitySet(contract.entities, actual)) reasons.push({ code: "entity-set-mismatch" });
+	const actual = await resolveCanaryInput({ id: run.id, answerBody: run.answerBody }, roster, deps);
+	if (!sameEntitySet(contract.entities, actual.entities)) reasons.push({ code: "entity-set-mismatch" });
+	if (actual.candidates.length > 0) {
+		const digests = sentimentCanaryInputDigests({ answerBody: run.answerBody, candidates: actual.candidates });
+		if (digests.classifierInputHash !== contract.classifierInputHash) reasons.push({ code: "contract-input-hash" });
+		if (digests.providerPromptSha256 !== contract.providerPromptSha256) reasons.push({ code: "contract-prompt-hash" });
+	}
 	return reasons;
+}
+
+/**
+ * Thrown at the classifier boundary when the input the job is about to send
+ * no longer matches the frozen digests (a name, alias or order changed after
+ * preflight). No request has left: the job marks the attempt failed and
+ * records no usage.
+ */
+export class SentimentCanaryInputDriftError extends Error {
+	readonly requestSent = false;
+	constructor(readonly reasons: SentimentCanaryReason[]) {
+		super(`canary input drifted: ${reasons.map((reason) => reason.code).join(", ")}`);
+		this.name = "SentimentCanaryInputDriftError";
+	}
 }
 
 function isValidAmount(value: number | null | undefined): value is number {
@@ -475,6 +527,7 @@ export async function runSentimentCanary(args: {
 	const controller = new AbortController();
 	let providerCalls = 0;
 	let gateReasons: SentimentCanaryReason[] | null = null;
+	const classifyBase = base.classify ?? classifySentiment;
 	const resolveBase = base.resolveProvider ?? resolveSentimentProvider;
 	const deps: SentimentJobDeps = {
 		...base,
@@ -489,6 +542,20 @@ export async function runSentimentCanary(args: {
 					return research(options);
 				},
 			};
+		},
+		classify: (classifyArgs, classifyDeps, signal) => {
+			// Second look at the exact input, after the job reloaded roster and
+			// mentions and immediately before the provider boundary: this is what
+			// closes the window between preflight and the call.
+			const digests = sentimentCanaryInputDigests(classifyArgs);
+			const drift: SentimentCanaryReason[] = [];
+			if (digests.classifierInputHash !== contract.classifierInputHash) drift.push({ code: "input-hash-drift" });
+			if (digests.providerPromptSha256 !== contract.providerPromptSha256) drift.push({ code: "prompt-hash-drift" });
+			if (drift.length > 0) {
+				gateReasons = drift;
+				return Promise.reject(new SentimentCanaryInputDriftError(drift));
+			}
+			return classifyBase(classifyArgs, classifyDeps, signal);
 		},
 		persist: (persistArgs) => {
 			if (controller.signal.aborted) {

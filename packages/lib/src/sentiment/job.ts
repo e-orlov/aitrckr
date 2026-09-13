@@ -121,7 +121,9 @@ async function classifyAndPersist(
 		// response body, the answer or a header and is dropped here.
 		const safe = sanitizeSentimentError(error);
 		const owned = await failAttempt(claim, safe, deps);
-		await recordUsage({ ...usage, provider: safe.provider, model: safe.model, succeeded: false });
+		if (safe.requestSent) {
+			await recordUsage({ ...usage, provider: safe.provider, model: safe.model, succeeded: false });
+		}
 		if (!owned) return { status: "claim-lost", generation: claim.generation };
 		throw new SentimentJobError(safe);
 	}

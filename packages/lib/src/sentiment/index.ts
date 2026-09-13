@@ -21,9 +21,10 @@ export {
 	SENTIMENT_CANARY_REJECT_CODES,
 	SENTIMENT_CANARY_WATCHDOG_MS,
 	type SentimentCanaryContract,
-	type SentimentCanaryEntity,
 	SentimentCanaryContractError,
+	type SentimentCanaryEntity,
 	SentimentCanaryError,
+	SentimentCanaryInputDriftError,
 	type SentimentCanaryOutcome,
 	type SentimentCanaryReason,
 	type SentimentCanaryRejectCode,
@@ -32,6 +33,7 @@ export {
 	type SentimentCanaryVerdict,
 	sentimentCanaryBodyDigest,
 	sentimentCanaryContractSchema,
+	sentimentCanaryInputDigests,
 } from "./canary";
 export {
 	classifySentiment,
