@@ -9,6 +9,7 @@ import type {
 	ScrapeResult,
 	StructuredResearchOptions,
 	StructuredResearchResult,
+	StructuredResearchUsage,
 } from "../types";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
@@ -118,6 +119,29 @@ function extractCitationsFromOpenRouterResponse(data: any): Citation[] {
 	return citations;
 }
 
+const finiteOrNull = (value: unknown): number | null =>
+	typeof value === "number" && Number.isFinite(value) ? value : null;
+
+/**
+ * The numeric usage fields OpenRouter reports on every response (usage
+ * accounting is always on): token counts, the total charged `cost`, the
+ * reasoning-token detail and the web-search server-tool counter. Nothing
+ * else from the payload is retained.
+ */
+export function parseOpenRouterUsage(usage: unknown): StructuredResearchUsage | undefined {
+	if (!usage || typeof usage !== "object") return undefined;
+	const u = usage as Record<string, unknown>;
+	const details = (u.completion_tokens_details ?? u.output_tokens_details) as Record<string, unknown> | undefined;
+	const serverTools = u.server_tool_use as Record<string, unknown> | undefined;
+	return {
+		inputTokens: finiteOrNull(u.prompt_tokens ?? u.input_tokens),
+		outputTokens: finiteOrNull(u.completion_tokens ?? u.output_tokens),
+		reasoningTokens: finiteOrNull(details?.reasoning_tokens),
+		costUsd: finiteOrNull(u.cost),
+		webSearchRequests: finiteOrNull(serverTools?.web_search_requests),
+	};
+}
+
 export const openrouter: Provider = {
 	id: "openrouter",
 	name: "OpenRouter",
@@ -133,6 +157,7 @@ export const openrouter: Provider = {
 		schema,
 		webSearch = true,
 		signal,
+		maxOutputTokens,
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
 		// Raw fetch (no AI SDK) so we can attach OpenRouter's server-tool fields
 		// — the AI SDK's OpenAI-compat path doesn't pass them through.
@@ -144,6 +169,7 @@ export const openrouter: Provider = {
 				type: "json_schema",
 				json_schema: { name: "research_output", strict: true, schema: jsonSchema },
 			},
+			...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
 			...(webSearch ? webSearchRequestFields() : {}),
 		};
 		const res = await fetch(OPENROUTER_API_URL, {
@@ -167,6 +193,7 @@ export const openrouter: Provider = {
 			// (e.g. "openai/gpt-5-mini" vs "openai/gpt-5-mini-2025-08-07") —
 			// matches what openai-api and anthropic-api do.
 			modelVersion: DEFAULT_RESEARCH_MODEL,
+			usage: parseOpenRouterUsage(data?.usage),
 		};
 	},
 

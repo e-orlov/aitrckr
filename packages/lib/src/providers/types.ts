@@ -31,12 +31,33 @@ export interface StructuredResearchOptions<T> {
 	webSearch?: boolean;
 	/** Cancels the underlying request (job shutdown/expiry); providers forward it to their HTTP call. */
 	signal?: AbortSignal;
+	/**
+	 * Hard cap on generated tokens for this call. Only sent when supplied, so
+	 * callers that never set it keep their provider's default behaviour.
+	 */
+	maxOutputTokens?: number;
+}
+
+/**
+ * Safe, numeric-only usage metadata of one structured call. Never carries the
+ * prompt, the answer, headers, credentials or the raw provider payload; a
+ * field the provider did not report is `null`.
+ */
+export interface StructuredResearchUsage {
+	inputTokens: number | null;
+	outputTokens: number | null;
+	reasoningTokens: number | null;
+	/** Total amount charged for the call in USD, as reported by the provider. */
+	costUsd: number | null;
+	/** Server-side web searches the provider performed for the call. */
+	webSearchRequests: number | null;
 }
 
 export interface StructuredResearchResult<T> {
 	object: T;
 	/** Resolved model id (after any `:online` suffixing etc.). */
 	modelVersion?: string;
+	usage?: StructuredResearchUsage;
 }
 
 /**

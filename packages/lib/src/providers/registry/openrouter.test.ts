@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { WEB_QUERIES_UNAVAILABLE } from "../../constants";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../config";
-import { openrouter } from "./openrouter";
+import { openrouter, parseOpenRouterUsage } from "./openrouter";
 
 function stubFetch(
 	overrides: Record<string, unknown> = {},
@@ -250,6 +250,71 @@ describe("openrouter runStructuredResearch", () => {
 		expectWebSearchContract(body);
 		expect(body).not.toHaveProperty("max_tokens");
 		expect(result).toEqual({ object: structured, modelVersion: "openai/gpt-5-mini" });
+	});
+
+	it("adds max_tokens only when a caller supplies maxOutputTokens; the default request is unchanged", async () => {
+		const capped = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
+		await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: true, maxOutputTokens: 8000 });
+		const cappedBody = sentRequest(capped).body;
+		expect(cappedBody.max_tokens).toBe(8000);
+		expect(cappedBody.model).toBe("openai/gpt-5-mini");
+		expectWebSearchContract(cappedBody);
+
+		const plain = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
+		await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: true });
+		expect(sentRequest(plain).body).not.toHaveProperty("max_tokens");
+	});
+
+	it("returns only safe numeric usage — tokens, reasoning tokens, charged cost, web-search count", async () => {
+		const fetchMock = stubFetch({
+			choices: [{ message: { content: JSON.stringify(structured) } }],
+			usage: {
+				prompt_tokens: 6410,
+				completion_tokens: 812,
+				total_tokens: 7222,
+				cost: 0.0234,
+				cost_details: { upstream_inference_cost: 0.02 },
+				prompt_tokens_details: { cached_tokens: 0 },
+				completion_tokens_details: { reasoning_tokens: 300 },
+				server_tool_use: { web_search_requests: 1 },
+				is_byok: false,
+				api_key: "sk-or-must-not-leak",
+			},
+			id: "gen-secret-id",
+		});
+		const result = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: true });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.usage).toEqual({
+			inputTokens: 6410,
+			outputTokens: 812,
+			reasoningTokens: 300,
+			costUsd: 0.0234,
+			webSearchRequests: 1,
+		});
+		expect(JSON.stringify(result)).not.toMatch(/sk-or-|gen-secret-id|is_byok|upstream/);
+	});
+
+	it("parses the input/output token variant and reports unknown fields as null", async () => {
+		stubFetch({
+			choices: [{ message: { content: JSON.stringify(structured) } }],
+			usage: { input_tokens: 10, output_tokens: 5, output_tokens_details: { reasoning_tokens: 2 } },
+		});
+		const result = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: false });
+		expect(result.usage).toEqual({
+			inputTokens: 10,
+			outputTokens: 5,
+			reasoningTokens: 2,
+			costUsd: null,
+			webSearchRequests: null,
+		});
+		expect(parseOpenRouterUsage(undefined)).toBeUndefined();
+		expect(parseOpenRouterUsage({ cost: "0.5", prompt_tokens: Number.NaN })).toEqual({
+			inputTokens: null,
+			outputTokens: null,
+			reasoningTokens: null,
+			costUsd: null,
+			webSearchRequests: null,
+		});
 	});
 
 	it("defaults to web search when the option is omitted", async () => {
