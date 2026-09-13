@@ -185,6 +185,85 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
 	});
 
+	it("C4: a persistence failure after a paid answer attributes the call once with the charged cost, fails the analysis with the persistence code and writes nothing else", async () => {
+		const dbError = new Error(`insert or update on table "sentiment_observations" violates foreign key constraint`);
+		const { d, marks, usage } = deps({
+			classify: vi.fn(async () => ({
+				...classification,
+				usage: {
+					inputTokens: 7000,
+					outputTokens: 900,
+					reasoningTokens: 400,
+					costUsd: 0.0312,
+					webSearchRequests: 1,
+					webSearchRequestsConflict: false,
+				},
+			})),
+			persist: vi.fn(async () => {
+				throw dbError;
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({
+			name: "SentimentJobError",
+			code: "persistence",
+			kind: "store",
+			httpStatus: null,
+		});
+		expect(d.classify).toHaveBeenCalledTimes(1);
+		expect(usage).toEqual([
+			expect.objectContaining({ succeeded: true, actualCostUsd: 0.0312, provider: "fake", model: "fake-model" }),
+		]);
+		expect(marks).toEqual([
+			{
+				status: "failed",
+				errorCode: "persistence",
+				errorMessage: `store persistence (Error) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL}`,
+			},
+		]);
+	});
+
+	it("C4: a failing usage write does not replace the persistence error and is attempted only once", async () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const recordUsage = vi.fn(async () => {
+			throw new Error("usage_events insert failed");
+		});
+		const { d, marks } = deps({
+			recordUsage,
+			persist: vi.fn(async () => {
+				throw new Error("deadlock detected");
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "persistence", kind: "store" });
+		expect(recordUsage).toHaveBeenCalledTimes(1);
+		expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ succeeded: true }));
+		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "persistence" })]);
+		expect(error).toHaveBeenCalledWith("sentiment usage attribution failed:", "Error");
+		error.mockRestore();
+	});
+
+	it("C4: a persistence failure whose terminal write is refused still attributes the paid call once and ends claim-lost", async () => {
+		const { d, usage } = deps({
+			persist: vi.fn(async () => {
+				throw new Error("connection terminated unexpectedly");
+			}),
+			markAnalysis: vi.fn(async () => false),
+		});
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
+	});
+
+	it("C4: an abort raised at the persistence boundary after a paid answer is attributed as paid and marked aborted", async () => {
+		const { d, marks, usage } = deps({
+			classify: vi.fn(async () => ({ ...classification, usage: { ...classification.usage, costUsd: 0.02 } as never })),
+			persist: vi.fn(async () => {
+				throw new DOMException("cancelled before writing", "AbortError");
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "aborted", kind: "aborted" });
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.02 })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "aborted" })]);
+	});
+
 	it("fence: a failure whose terminal write is refused ends as claim-lost instead of failing the newer attempt", async () => {
 		const { d, usage } = deps({
 			classify: vi.fn(async () => {

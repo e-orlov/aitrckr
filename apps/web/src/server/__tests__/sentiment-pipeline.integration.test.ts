@@ -47,6 +47,7 @@ const RUN_DELETE = "5e970004-0000-4000-8000-000000000204";
 const RUN_ALIAS = "5e970004-0000-4000-8000-000000000205";
 const RUN_SOURCES = "5e970004-0000-4000-8000-000000000206";
 const RUN_OLD_TAXONOMY = "5e970004-0000-4000-8000-000000000207";
+const RUN_PERSIST_FAIL = "5e970004-0000-4000-8000-000000000208";
 const ALIAS_ANSWER = "Only the alias Alphaline shows up in this answer, nothing else does.";
 const ANSWER = "Alpha handles claims fast and fairly. Newco is also mentioned. Sent Pipe is fine.";
 
@@ -919,6 +920,91 @@ describe("IT-SNT-007 bounded evidence at high cardinality (B5)", () => {
 				"",
 			].join("\n"),
 		);
+	});
+});
+
+describe("IT-SNT-018 usage attribution when the write fails after a paid answer (C4)", () => {
+	it("one provider call, a real write failure: one success usage event with the charged cost, analysis failed, no observation rows, recoverable", {
+		timeout: 120_000,
+	}, async () => {
+		await insertRun(RUN_PERSIST_FAIL, PROMPT, { choices: [{ message: { content: ANSWER } }] }, 3);
+		await runMentionBackfill({ apply: true, brandId: BRAND });
+		const { persistClassification } = await import("@workspace/lib/sentiment");
+		const eventsBefore = await count("usage_events");
+		const failedBefore = await count(
+			"usage_events",
+			"brand_id = $1 AND event_type = 'sentiment_classification_failed'",
+		);
+		let calls = 0;
+		const provider = fakeProvider({ onCall: () => calls++, costUsd: 0.0456 });
+		// A mention row disappears between the provider's answer and the write: the
+		// observation insert violates the FK on `mention_id` inside the real transaction.
+		const persist: typeof persistClassification = async (args) => {
+			await client.query("DELETE FROM prompt_run_entity_mentions WHERE prompt_run_id = $1 AND entity_key = $2", [
+				RUN_PERSIST_FAIL,
+				ALPHA,
+			]);
+			return persistClassification(args);
+		};
+		let thrown: unknown;
+		try {
+			await runSentimentJob(
+				{ ...payload, promptRunId: RUN_PERSIST_FAIL },
+				{ resolveProvider: () => provider, persist },
+			);
+		} catch (error) {
+			thrown = error;
+		}
+		expect(calls).toBe(1);
+		expect(thrown).toMatchObject({ name: "SentimentJobError", code: "persistence", kind: "store", httpStatus: null });
+		const thrownText = JSON.stringify(thrown, Object.getOwnPropertyNames(thrown as object)) + String(thrown);
+		for (const forbidden of ["violates", "foreign key", "23503", "mention_id", ANSWER])
+			expect(thrownText).not.toContain(forbidden);
+
+		// Exactly one new usage event: the paid success, with the cost the provider reported.
+		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
+			failedBefore,
+		);
+		const [event] = (
+			await client.query<{ event_type: string; estimated_cost_usd: string; provider: string; model: string }>(
+				"SELECT event_type, estimated_cost_usd, provider, model FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 1",
+				[BRAND],
+			)
+		).rows;
+		expect(event).toEqual({
+			event_type: "sentiment_classification",
+			estimated_cost_usd: "0.045600",
+			provider: "fake-openrouter",
+			model: SENTIMENT_MODEL,
+		});
+
+		// The analysis is ours and failed with the persistence code; the rolled-back write left nothing behind.
+		const [analysis] = (
+			await client.query<{ status: string; error_code: string; error_message: string; attempts: number }>(
+				"SELECT status, error_code, error_message, attempts FROM sentiment_analyses WHERE prompt_run_id = $1",
+				[RUN_PERSIST_FAIL],
+			)
+		).rows;
+		expect(analysis).toMatchObject({ status: "failed", error_code: "persistence", attempts: 1 });
+		expect(analysis.error_message).toMatch(/^store persistence \(\w+\) via openrouter\/openai\/gpt-5-mini$/);
+		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(0);
+		expect(
+			await count(
+				"sentiment_aspect_observations",
+				"observation_id IN (SELECT id FROM sentiment_observations WHERE prompt_run_id = $1)",
+				[RUN_PERSIST_FAIL],
+			),
+		).toBe(0);
+
+		// Once the mention rows are repaired, the next attempt completes normally and is attributed again.
+		await runMentionBackfill({ apply: true, brandId: BRAND });
+		expect(
+			await runSentimentJob({ ...payload, promptRunId: RUN_PERSIST_FAIL }, { resolveProvider: () => provider }),
+		).toMatchObject({ status: "classified", entities: 3 });
+		expect(calls).toBe(2);
+		expect(await count("usage_events")).toBe(eventsBefore + 2);
+		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(3);
 	});
 });
 

@@ -125,6 +125,26 @@ async function classifyAndPersist(
 		if (!owned) return { status: "claim-lost", generation: claim.generation };
 		throw new SentimentJobError(safe);
 	}
+	// From here on the provider has answered and charged for the call. Whatever
+	// happens next, that call is attributed exactly once, as the paid success it
+	// was, with the cost the provider reported — and a failure to attribute it
+	// never replaces the error that made the attempt fail.
+	let attributed = false;
+	const attributePaidCall = async () => {
+		if (attributed) return;
+		attributed = true;
+		try {
+			await recordUsage({
+				...usage,
+				provider: classification.provider,
+				model: classification.model,
+				succeeded: true,
+				actualCostUsd: classification.usage?.costUsd ?? null,
+			});
+		} catch (error) {
+			console.error("sentiment usage attribution failed:", error instanceof Error ? error.name : typeof error);
+		}
+	};
 	try {
 		await (deps.persist ?? persistClassification)({
 			claim,
@@ -134,27 +154,18 @@ async function classifyAndPersist(
 			classification,
 		});
 	} catch (error) {
-		if (error instanceof ClaimLostError) {
-			await recordUsage({
-				...usage,
-				provider: classification.provider,
-				model: classification.model,
-				succeeded: true,
-				actualCostUsd: classification.usage?.costUsd ?? null,
-			});
-			return { status: "claim-lost", generation: claim.generation };
-		}
-		const safe = sanitizeSentimentError(error);
-		await failAttempt(claim, safe, deps);
+		await attributePaidCall();
+		if (error instanceof ClaimLostError) return { status: "claim-lost", generation: claim.generation };
+		// The transaction rolled back: no observation exists and the analysis
+		// is still ours; it ends as failed with the persistence code (or the
+		// abort code when the caller cancelled between answer and write),
+		// never as a provider failure.
+		const safe = sanitizeSentimentError(error, "persist");
+		const owned = await failAttempt(claim, safe, deps);
+		if (!owned) return { status: "claim-lost", generation: claim.generation };
 		throw new SentimentJobError(safe);
 	}
-	await recordUsage({
-		...usage,
-		provider: classification.provider,
-		model: classification.model,
-		succeeded: true,
-		actualCostUsd: classification.usage?.costUsd ?? null,
-	});
+	await attributePaidCall();
 	return {
 		status: "classified",
 		entities: classification.entities.length,
