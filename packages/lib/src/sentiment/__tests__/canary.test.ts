@@ -11,6 +11,7 @@ import {
 	acceptCanaryRunId,
 	evaluateSentimentCanary,
 	inspectSentimentCanaryRun,
+	inspectSentimentCanaryRunState,
 	parseSentimentCanaryContract,
 	preflightSentimentCanary,
 	runSentimentCanary,
@@ -119,6 +120,7 @@ function storeFakes(provider: Provider, overrides: Partial<SentimentJobDeps> = {
 		loadEntities: vi.fn(async () => entities),
 		loadDetection: vi.fn(async () => ({ status: "mentions", mentionCount: 2 }) as never),
 		loadMentions: vi.fn(async () => mentions),
+		loadAnalysisState: vi.fn(async () => null),
 		ensureAnalysis: vi.fn(
 			async () =>
 				({
@@ -354,6 +356,38 @@ describe("canary preflight refuses before any request", () => {
 			"contract-input-hash",
 			"contract-prompt-hash",
 		]);
+	});
+
+	it("a run that already carries a completed analysis or observations is refused: the canary must be its first classification", async () => {
+		expect(
+			await refusal({
+				loadAnalysisState: vi.fn(async () => ({ status: "completed" as const, attempts: 2, observations: 3 })),
+			}),
+		).toEqual(["run-already-classified"]);
+		expect(
+			await refusal({
+				loadAnalysisState: vi.fn(async () => ({ status: "failed" as const, attempts: 1, observations: 1 })),
+			}),
+		).toEqual(["run-already-classified"]);
+		// A previous failed attempt without observations is still pristine input for the canary.
+		const provider = goodProvider();
+		const { deps } = storeFakes(provider, {
+			loadAnalysisState: vi.fn(async () => ({ status: "failed" as const, attempts: 1, observations: 0 })),
+		});
+		expect((await runSentimentCanary({ contract, deps, ...fast })).verdict).toEqual({ status: "accept" });
+		expect(await inspectSentimentCanaryRunState(FROZEN, deps)).toEqual({
+			analysis: { status: "failed", attempts: 1, observations: 0 },
+			pristine: true,
+		});
+		expect(
+			await inspectSentimentCanaryRunState(FROZEN, {
+				loadAnalysisState: vi.fn(async () => ({ status: "completed" as const, attempts: 1, observations: 2 })),
+			}),
+		).toEqual({ analysis: { status: "completed", attempts: 1, observations: 2 }, pristine: false });
+		expect(await inspectSentimentCanaryRunState(FROZEN, { loadAnalysisState: vi.fn(async () => null) })).toEqual({
+			analysis: null,
+			pristine: true,
+		});
 	});
 
 	it("refuses a watchdog that does not outlast the request deadline", async () => {

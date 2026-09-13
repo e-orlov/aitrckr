@@ -13,11 +13,13 @@ import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import {
 	candidatesFromMentions,
+	loadAnalysisState,
 	loadDetectableEntities,
 	loadDetection,
 	loadMentions,
 	loadRunForSentiment,
 	persistClassification,
+	type StoredAnalysisState,
 	type StoredMention,
 } from "./store";
 import {
@@ -89,6 +91,7 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"entity-set-mismatch",
 	"contract-input-hash",
 	"contract-prompt-hash",
+	"run-already-classified",
 	"input-hash-drift",
 	"prompt-hash-drift",
 	"attempts",
@@ -261,6 +264,12 @@ export function sentimentCanaryInputDigests(args: { answerBody: string; candidat
 	};
 }
 
+/** Read-only state of the frozen run that must hold before a paid attempt; reported beside the contract, never inside it. */
+export interface SentimentCanaryRunState {
+	analysis: StoredAnalysisState | null;
+	pristine: boolean;
+}
+
 export interface SentimentCanaryRunDescription {
 	runId: string;
 	promptId: string;
@@ -273,6 +282,15 @@ export interface SentimentCanaryRunDescription {
 	taxonomyVersion: string;
 	provider: string;
 	model: string;
+}
+
+/** Read-only: whether the run has never been classified (no completed analysis, no observation). */
+export async function inspectSentimentCanaryRunState(
+	runId: string,
+	deps: SentimentJobDeps = {},
+): Promise<SentimentCanaryRunState> {
+	const analysis = await (deps.loadAnalysisState ?? loadAnalysisState)(runId);
+	return { analysis, pristine: !analysis || (analysis.status !== "completed" && analysis.observations === 0) };
 }
 
 /**
@@ -325,6 +343,14 @@ export async function preflightSentimentCanary(
 
 	const run = await (deps.loadRun ?? loadRunForSentiment)(contract.runId);
 	if (!run) return [...reasons, { code: "run-not-found" }];
+	// The canary must be the first classification of its run: a completed
+	// analysis or any observation (for example from an acceptance fixture)
+	// means the run is not the pristine one that was frozen — refuse rather
+	// than skip silently or expect a manual reset.
+	const analysis = await (deps.loadAnalysisState ?? loadAnalysisState)(run.id);
+	if (analysis && (analysis.status === "completed" || analysis.observations > 0)) {
+		reasons.push({ code: "run-already-classified", detail: analysis.status });
+	}
 	if (run.promptId.toLowerCase() !== contract.promptId) reasons.push({ code: "prompt-mismatch" });
 	if (run.brandId !== contract.brandId) reasons.push({ code: "brand-mismatch" });
 	if (run.answerBody === null) return [...reasons, { code: "body-unextractable" }];

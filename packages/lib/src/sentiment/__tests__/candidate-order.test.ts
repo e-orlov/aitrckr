@@ -77,6 +77,7 @@ function depsFor(mentions: StoredMention[], entities: DetectableEntity[] = roste
 		loadEntities: vi.fn(async () => entities),
 		loadDetection: vi.fn(async () => ({ status: "mentions", mentionCount: mentions.length }) as never),
 		loadMentions: vi.fn(async () => mentions),
+		loadAnalysisState: vi.fn(async () => null),
 	};
 }
 

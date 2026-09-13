@@ -269,6 +269,31 @@ export function candidatesFromMentions(mentions: StoredMention[], entities: Dete
 	});
 }
 
+/** What the current-version analysis of a run looks like right now, read-only; `null` when none exists. */
+export interface StoredAnalysisState {
+	status: SentimentAnalysisStatus;
+	attempts: number;
+	observations: number;
+}
+
+export async function loadAnalysisState(
+	promptRunId: string,
+	executor: Executor = db,
+): Promise<StoredAnalysisState | null> {
+	const row = await executor.query.sentimentAnalyses.findFirst({
+		where: and(
+			eq(sentimentAnalyses.promptRunId, promptRunId),
+			eq(sentimentAnalyses.classifierVersion, SENTIMENT_CLASSIFIER_VERSION),
+		),
+	});
+	if (!row) return null;
+	const [{ n }] = await executor
+		.select({ n: sql<number>`count(*)::int` })
+		.from(sentimentObservations)
+		.where(eq(sentimentObservations.analysisId, row.id));
+	return { status: row.status as SentimentAnalysisStatus, attempts: row.attempts, observations: n };
+}
+
 /** Get-or-create the current-version analysis row for a run (status `pending` on creation). */
 export async function ensureAnalysis(
 	args: { promptRunId: string; brandId: string },
