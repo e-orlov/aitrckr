@@ -399,32 +399,32 @@ describe("canary preflight refuses before any request", () => {
 		]);
 	});
 
-	it("a run that already carries a completed analysis or observations is refused: the canary must be its first classification", async () => {
+	it("a run that was ever attempted or classified is refused: the canary is the single authorized attempt", async () => {
 		expect(
 			await refusal({
 				loadAnalysisState: vi.fn(async () => ({ status: "completed" as const, attempts: 2, observations: 3 })),
 			}),
-		).toEqual(["run-already-classified"]);
+		).toEqual(["run-not-pristine"]);
 		expect(
 			await refusal({
-				loadAnalysisState: vi.fn(async () => ({ status: "failed" as const, attempts: 1, observations: 1 })),
+				loadAnalysisState: vi.fn(async () => ({ status: "failed" as const, attempts: 1, observations: 0 })),
 			}),
-		).toEqual(["run-already-classified"]);
-		// A previous failed attempt without observations is still pristine input for the canary.
+		).toEqual(["run-not-pristine"]);
+		// Only a never-attempted run is pristine: no row, or pending with zero attempts and zero observations.
 		const provider = goodProvider();
 		const { deps } = storeFakes(provider, {
-			loadAnalysisState: vi.fn(async () => ({ status: "failed" as const, attempts: 1, observations: 0 })),
+			loadAnalysisState: vi.fn(async () => ({ status: "pending" as const, attempts: 0, observations: 0 })),
 		});
 		expect((await runSentimentCanary({ contract, deps, ...fast })).verdict).toEqual({ status: "accept" });
 		expect(await inspectSentimentCanaryRunState(FROZEN, deps)).toEqual({
-			analysis: { status: "failed", attempts: 1, observations: 0 },
+			analysis: { status: "pending", attempts: 0, observations: 0 },
 			pristine: true,
 		});
 		expect(
 			await inspectSentimentCanaryRunState(FROZEN, {
-				loadAnalysisState: vi.fn(async () => ({ status: "completed" as const, attempts: 1, observations: 2 })),
+				loadAnalysisState: vi.fn(async () => ({ status: "failed" as const, attempts: 1, observations: 0 })),
 			}),
-		).toEqual({ analysis: { status: "completed", attempts: 1, observations: 2 }, pristine: false });
+		).toEqual({ analysis: { status: "failed", attempts: 1, observations: 0 }, pristine: false });
 		expect(await inspectSentimentCanaryRunState(FROZEN, { loadAnalysisState: vi.fn(async () => null) })).toEqual({
 			analysis: null,
 			pristine: true,

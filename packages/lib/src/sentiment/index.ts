@@ -14,6 +14,7 @@ export {
 	evaluateSentimentCanary,
 	inspectSentimentCanaryRun,
 	inspectSentimentCanaryRunState,
+	isPristineCanaryRun,
 	parseSentimentCanaryContract,
 	preflightSentimentCanary,
 	runSentimentCanary,

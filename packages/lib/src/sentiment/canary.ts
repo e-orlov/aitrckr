@@ -62,7 +62,13 @@ export const sentimentCanaryContractSchema = z.strictObject({
 	brandId: z.string().min(1),
 	/** SHA-256 (hex) of the extracted answer body exactly as the classifier receives it. */
 	answerBodySha256: z.string().regex(/^[0-9a-f]{64}$/),
-	entities: z.array(z.strictObject({ key: z.string().min(1), entityType: z.enum(["brand", "competitor"]) })).min(1),
+	entities: z
+		.array(z.strictObject({ key: z.string().min(1), entityType: z.enum(["brand", "competitor"]) }))
+		.min(1)
+		.refine(
+			(entities) => new Set(entities.map((entity) => `${entity.entityType}:${entity.key}`)).size === entities.length,
+			{ message: "entities must be unique by entityType:key" },
+		),
 	/** `sentimentInputHash` over the body and the exact candidates (keys, types, names, aliases) the job would send. */
 	classifierInputHash: z.string().regex(/^[0-9a-f]{64}$/),
 	/** SHA-256 (hex) of the exact prompt string the provider would receive, candidate order included. */
@@ -91,7 +97,7 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"entity-set-mismatch",
 	"contract-input-hash",
 	"contract-prompt-hash",
-	"run-already-classified",
+	"run-not-pristine",
 	"input-hash-drift",
 	"prompt-hash-drift",
 	"attempts",
@@ -284,13 +290,25 @@ export interface SentimentCanaryRunDescription {
 	model: string;
 }
 
-/** Read-only: whether the run has never been classified (no completed analysis, no observation). */
+/**
+ * A run is pristine only when it has never been attempted: no analysis row
+ * at all, or a pending row with zero attempts and zero observations. Any
+ * prior attempt — pending after a claim, processing, failed (even without
+ * observations), completed, no_mentions — or any observation means the one
+ * authorized canary call has already been spent or the run was touched by
+ * something else; a further call needs a new authorization, not a retry.
+ */
+export function isPristineCanaryRun(analysis: StoredAnalysisState | null): boolean {
+	return analysis === null || (analysis.status === "pending" && analysis.attempts === 0 && analysis.observations === 0);
+}
+
+/** Read-only: the run's current analysis state and whether it is still pristine. */
 export async function inspectSentimentCanaryRunState(
 	runId: string,
 	deps: SentimentJobDeps = {},
 ): Promise<SentimentCanaryRunState> {
 	const analysis = await (deps.loadAnalysisState ?? loadAnalysisState)(runId);
-	return { analysis, pristine: !analysis || (analysis.status !== "completed" && analysis.observations === 0) };
+	return { analysis, pristine: isPristineCanaryRun(analysis) };
 }
 
 /**
@@ -342,17 +360,16 @@ function contractVersionReasons(contract: SentimentCanaryContract): SentimentCan
 }
 
 /**
- * The canary must be the first classification of its run: a completed
- * analysis or any observation (for example from an acceptance fixture) means
- * the run is not the pristine one that was frozen — refuse rather than skip
- * silently or expect a manual reset.
+ * The canary is the single authorized attempt for its run: anything but a
+ * never-attempted run (see `isPristineCanaryRun`) refuses before the provider
+ * boundary. The detail carries only the structural state — status, attempts,
+ * observations — never text from the run or the provider.
  */
 async function pristineRunReasons(runId: string, deps: SentimentJobDeps): Promise<SentimentCanaryReason[]> {
 	const analysis = await (deps.loadAnalysisState ?? loadAnalysisState)(runId);
-	if (analysis && (analysis.status === "completed" || analysis.observations > 0)) {
-		return [{ code: "run-already-classified", detail: analysis.status }];
-	}
-	return [];
+	if (isPristineCanaryRun(analysis)) return [];
+	const state = analysis as StoredAnalysisState;
+	return [{ code: "run-not-pristine", detail: `${state.status}/${state.attempts}/${state.observations}` }];
 }
 
 export async function preflightSentimentCanary(
