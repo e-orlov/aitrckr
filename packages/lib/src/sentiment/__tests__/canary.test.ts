@@ -219,6 +219,47 @@ describe("canary contract", () => {
 		expect(() => parseSentimentCanaryContract(raw)).toThrow(expect.objectContaining({ code: "invalid-contract" }));
 	});
 
+	it("G2: entities[] must be unique by entityType:key — an exact duplicate or a reordered duplicate is refused before any lookup", async () => {
+		const duplicate = {
+			...contract,
+			entities: [...contract.entities, { key: WGV, entityType: "competitor" as const }],
+		};
+		const reordered = {
+			...contract,
+			entities: [{ key: WGV, entityType: "competitor" as const }, ...contract.entities],
+		};
+		for (const raw of [duplicate, reordered]) {
+			expect(() => parseSentimentCanaryContract(raw)).toThrow(expect.objectContaining({ code: "invalid-contract" }));
+		}
+		// Distinct entities are accepted; the same key under both types is two entities, not a duplicate.
+		expect(
+			parseSentimentCanaryContract({
+				...contract,
+				entities: [
+					{ key: "brand", entityType: "brand" },
+					{ key: WGV, entityType: "competitor" },
+					{ key: "c-huk", entityType: "competitor" },
+				],
+			}).entities,
+		).toHaveLength(3);
+		// A run that mentions only competitors is a valid contract.
+		expect(
+			parseSentimentCanaryContract({ ...contract, entities: [{ key: WGV, entityType: "competitor" }] }).entities,
+		).toEqual([{ key: WGV, entityType: "competitor" }]);
+		// The refusal happens at parse time: no store or provider dependency is ever consulted.
+		const provider = goodProvider();
+		const { deps } = storeFakes(provider);
+		let parsed: SentimentCanaryContract | null = null;
+		try {
+			parsed = parseSentimentCanaryContract(duplicate);
+		} catch {
+			parsed = null;
+		}
+		expect(parsed).toBeNull();
+		expect(deps.loadRun).not.toHaveBeenCalled();
+		expect(provider.runStructuredResearch).not.toHaveBeenCalled();
+	});
+
 	it("describes a stored run in contract form without any answer text", async () => {
 		const { deps } = storeFakes(goodProvider());
 		const description = await inspectSentimentCanaryRun(FROZEN, deps);
