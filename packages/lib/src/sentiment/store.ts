@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, notExists, or, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import {
 	brands,
@@ -344,30 +344,56 @@ export interface AnalysisClaim {
 	generation: number;
 }
 
+export interface ClaimOptions {
+	/** Also claim finished rows (`completed`/`no_mentions`) that are no longer current. */
+	allowFinished: boolean;
+	/**
+	 * Canary-only: claim exclusively a never-attempted row — `pending`, zero
+	 * attempts and no observation — all checked inside the one UPDATE, so of
+	 * any number of racing canaries exactly one ever reaches the provider and
+	 * a loser changes nothing (no attempt is counted for it). The worker never
+	 * uses this mode; its retry, stale-recovery and reclassification semantics
+	 * are unchanged.
+	 */
+	pristineOnly?: boolean;
+}
+
 /**
  * Atomically claim the analysis for one provider call. Exactly one of any
  * number of racing workers wins: the conditional UPDATE only matches a row
  * that is `pending`, `failed`, a finished row that is no longer current
  * (`allowFinished`: `completed`/`no_mentions`), or a `processing` claim older than the claim timeout
- * (an abandoned worker). Losers see the row's current status and make no
- * call. The winner receives the incremented claim generation; a claimant
- * whose lease was taken over later fails every fenced write. Runs in its own
- * statement (autocommit) so the claim is visible to other sessions before
- * the provider boundary.
+ * (an abandoned worker) — or, in `pristineOnly` mode, only a never-attempted
+ * row. Losers see the row's current status and make no call. The winner
+ * receives the incremented claim generation; a claimant whose lease was
+ * taken over later fails every fenced write. Runs in its own statement
+ * (autocommit) so the claim is visible to other sessions before the provider
+ * boundary.
  */
 export async function claimAnalysis(
 	analysisId: string,
-	options: { allowFinished: boolean },
+	options: ClaimOptions,
 	executor: Executor = db,
 ): Promise<ClaimOutcome> {
 	const staleBefore = new Date(Date.now() - SENTIMENT_CLAIM_TIMEOUT_SECONDS * 1000);
-	const claimable = or(
-		inArray(
-			sentimentAnalyses.status,
-			options.allowFinished ? ["pending", "failed", "completed", "no_mentions"] : ["pending", "failed"],
-		),
-		and(eq(sentimentAnalyses.status, "processing"), lt(sentimentAnalyses.startedAt, staleBefore)),
-	);
+	const claimable = options.pristineOnly
+		? and(
+				eq(sentimentAnalyses.status, "pending"),
+				eq(sentimentAnalyses.attempts, 0),
+				notExists(
+					executor
+						.select({ id: sentimentObservations.id })
+						.from(sentimentObservations)
+						.where(eq(sentimentObservations.analysisId, sentimentAnalyses.id)),
+				),
+			)
+		: or(
+				inArray(
+					sentimentAnalyses.status,
+					options.allowFinished ? ["pending", "failed", "completed", "no_mentions"] : ["pending", "failed"],
+				),
+				and(eq(sentimentAnalyses.status, "processing"), lt(sentimentAnalyses.startedAt, staleBefore)),
+			);
 	const [row] = await executor
 		.update(sentimentAnalyses)
 		.set({

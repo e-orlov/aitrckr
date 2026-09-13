@@ -612,16 +612,29 @@ describe("canary verdict after the one call", () => {
 		expect(codes(report)).toEqual(["provider-calls", "provider-unconfigured"]);
 	});
 
-	it("a non-classifying job outcome is rejected with its status", async () => {
-		const { deps } = storeFakes(goodProvider(), {
-			claimAnalysis: vi.fn(async () => ({ claimed: false as const, status: "processing" as const })),
-		});
+	it("a lost pristine claim is a refusal with the row's status and no provider call", async () => {
+		const provider = goodProvider();
+		const claimAnalysis = vi.fn(async () => ({ claimed: false as const, status: "processing" as const }));
+		const { deps, usage } = storeFakes(provider, { claimAnalysis });
 		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true, pristineOnly: true });
+		expect(provider.runStructuredResearch).not.toHaveBeenCalled();
+		expect(report.providerCalls).toBe(0);
+		expect(report.outcome).toEqual({ status: "claimed-elsewhere" });
+		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "run-state-drift", detail: "processing" }] });
+		expect(deps.persist).not.toHaveBeenCalled();
+		expect(usage).toEqual([]);
+	});
+
+	it("a non-classifying job outcome other than a lost claim is rejected with its status", async () => {
+		const job = vi.fn(async () => ({ status: "no-mentions" as const }));
+		const { deps } = storeFakes(goodProvider());
+		const report = await runSentimentCanary({ contract, deps, job, ...fast });
 		expect(report.verdict).toEqual({
 			status: "reject",
 			reasons: [
 				{ code: "provider-calls", detail: "0" },
-				{ code: "job-outcome", detail: "claimed-elsewhere" },
+				{ code: "job-outcome", detail: "no-mentions" },
 			],
 		});
 	});

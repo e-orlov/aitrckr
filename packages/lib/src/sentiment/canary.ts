@@ -13,6 +13,7 @@ import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import {
 	candidatesFromMentions,
+	claimAnalysis,
 	loadAnalysisState,
 	loadDetectableEntities,
 	loadDetection,
@@ -98,6 +99,7 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"contract-input-hash",
 	"contract-prompt-hash",
 	"run-not-pristine",
+	"run-state-drift",
 	"input-hash-drift",
 	"prompt-hash-drift",
 	"attempts",
@@ -589,6 +591,7 @@ export async function runSentimentCanary(args: {
 	let providerCalls = 0;
 	let gateReasons: SentimentCanaryReason[] | null = null;
 	const classifyBase = base.classify ?? classifySentiment;
+	const claimBase = base.claimAnalysis ?? claimAnalysis;
 	const resolveBase = base.resolveProvider ?? resolveSentimentProvider;
 	const deps: SentimentJobDeps = {
 		...base,
@@ -603,6 +606,14 @@ export async function runSentimentCanary(args: {
 					return research(options);
 				},
 			};
+		},
+		claimAnalysis: async (analysisId, options) => {
+			// Preflight was only a read; the right to make the one call is this
+			// atomic pristine-only claim. Losing it — another invocation claimed
+			// in between — is a refusal with no write of our own.
+			const outcome = await claimBase(analysisId, { ...options, pristineOnly: true });
+			if (!outcome.claimed) gateReasons = [{ code: "run-state-drift", detail: outcome.status }];
+			return outcome;
 		},
 		classify: (classifyArgs, classifyDeps, signal) => {
 			// Second look at the exact input, after the job reloaded roster and

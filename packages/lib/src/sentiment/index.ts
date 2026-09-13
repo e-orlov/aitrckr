@@ -100,6 +100,7 @@ export { resolveSentimentProvider, SentimentProviderError } from "./provider";
 export { ensureSentimentQueue, SENTIMENT_QUEUE_OPTIONS, type SentimentQueueAdmin } from "./queue-setup";
 export {
 	type AnalysisClaim,
+	type ClaimOptions,
 	type ClaimOutcome,
 	candidatesFromMentions,
 	claimAnalysis,
