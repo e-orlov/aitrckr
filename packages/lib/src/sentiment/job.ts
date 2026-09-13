@@ -1,4 +1,4 @@
-import type { StructuredResearchUsage } from "../providers/types";
+import type { StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
 import { classifySentiment, type SentimentClassifierDeps, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import {
@@ -35,7 +35,14 @@ import {
 } from "./types";
 
 export type SentimentJobOutcome =
-	| { status: "classified"; entities: number; usage?: StructuredResearchUsage }
+	| {
+			status: "classified";
+			entities: number;
+			/** Entity keys the classification covered: the brand key or competitor ids, never names or text. */
+			entityKeys: string[];
+			usage?: StructuredResearchUsage;
+			request?: StructuredResearchRequestSummary;
+	  }
 	| { status: "already-completed" }
 	| { status: "claimed-elsewhere"; analysisStatus: string }
 	/** The attempt ran but a later attempt took the row over; nothing of this attempt was written. */
@@ -148,7 +155,13 @@ async function classifyAndPersist(
 		succeeded: true,
 		actualCostUsd: classification.usage?.costUsd ?? null,
 	});
-	return { status: "classified", entities: classification.entities.length, usage: classification.usage };
+	return {
+		status: "classified",
+		entities: classification.entities.length,
+		entityKeys: classification.entities.map((entity) => entity.key),
+		usage: classification.usage,
+		request: classification.request,
+	};
 }
 
 /**

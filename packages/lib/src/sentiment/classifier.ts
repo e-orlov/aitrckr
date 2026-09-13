@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../providers/config";
-import type { Provider, StructuredResearchUsage } from "../providers/types";
+import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import { type IndexedText, normalizeIndexed, normalizeText } from "./text";
@@ -57,6 +57,8 @@ export interface SentimentClassification {
 	inputHash: string;
 	/** Safe numeric usage of the call (tokens, charged cost, web searches); undefined when the provider reported none. */
 	usage?: StructuredResearchUsage;
+	/** What the provider was asked to do (model, web search, tool budget, output cap); undefined when it did not report it. */
+	request?: StructuredResearchRequestSummary;
 }
 
 /**
@@ -267,5 +269,6 @@ export async function classifySentiment(
 		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 		inputHash: sentimentInputHash(args.answerBody, args.candidates),
 		usage: result.usage,
+		request: result.request,
 	};
 }

@@ -162,6 +162,12 @@ describe("CT-SNT-002 sentiment provider lock", () => {
 			webSearchRequests: 1,
 			webSearchRequestsConflict: false,
 		});
+		expect(result.request).toEqual({
+			model: SENTIMENT_MODEL,
+			webSearch: true,
+			maxToolCalls: 1,
+			maxOutputTokens: 8000,
+		});
 		// The classification carries only the bounded verbatim excerpts by contract, never the raw
 		// payload, its ids, provider field names, the prompt, headers or credentials.
 		const serialized = JSON.stringify(result);

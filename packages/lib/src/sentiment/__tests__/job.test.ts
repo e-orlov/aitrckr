@@ -124,7 +124,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("claims, classifies, persists atomically and records one success usage event", async () => {
 		const { d, usage } = deps();
 		const outcome = await runSentimentJob(payload, d);
-		expect(outcome).toEqual({ status: "classified", entities: 2 });
+		expect(outcome).toEqual({ status: "classified", entities: 2, entityKeys: ["brand", "c-huk"] });
 		expect(d.claimAnalysis).toHaveBeenCalledTimes(1);
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
@@ -148,13 +148,16 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 					webSearchRequests: 1,
 					webSearchRequestsConflict: false,
 				},
+				request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
 			})),
 		});
 		const outcome = await runSentimentJob(payload, withUsage.d);
 		expect(outcome).toMatchObject({
 			status: "classified",
 			entities: 2,
+			entityKeys: ["brand", "c-huk"],
 			usage: { costUsd: 0.0312, webSearchRequests: 1 },
+			request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
 		});
 		expect(withUsage.usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0312 })]);
 
@@ -225,7 +228,11 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("B2: an unscanned run is detected once, receipt and rows written together, before classifying", async () => {
 		const persistDetection = vi.fn(async () => mentions);
 		const { d } = deps({ loadDetection: vi.fn(async () => null), persistDetection });
-		expect(await runSentimentJob(payload, d)).toEqual({ status: "classified", entities: 2 });
+		expect(await runSentimentJob(payload, d)).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+		});
 		expect(persistDetection).toHaveBeenCalledTimes(1);
 		expect(persistDetection).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -267,7 +274,11 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("B8: a completed analysis with a stale input hash (new entity after a roster edit) is reclassified", async () => {
 		const staleHash = sentimentInputHash(run.answerBody ?? "", candidatesFromMentions(mentions.slice(0, 1), entities));
 		const { d } = deps({ analysis: { status: "completed", inputHash: staleHash } });
-		expect(await runSentimentJob(payload, d)).toEqual({ status: "classified", entities: 2 });
+		expect(await runSentimentJob(payload, d)).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+		});
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
 	});
@@ -276,9 +287,17 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		const taxonomy = deps({
 			analysis: { status: "completed", inputHash: currentHash, taxonomyVersion: "sent-aspects-v0" },
 		});
-		expect(await runSentimentJob(payload, taxonomy.d)).toEqual({ status: "classified", entities: 2 });
+		expect(await runSentimentJob(payload, taxonomy.d)).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+		});
 		const hashless = deps({ analysis: { status: "completed", inputHash: null } });
-		expect(await runSentimentJob(payload, hashless.d)).toEqual({ status: "classified", entities: 2 });
+		expect(await runSentimentJob(payload, hashless.d)).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+		});
 	});
 
 	it("a no_mentions analysis whose receipt still says no mentions is left alone", async () => {

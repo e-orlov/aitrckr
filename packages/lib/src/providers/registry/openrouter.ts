@@ -8,6 +8,7 @@ import type {
 	ProviderOptions,
 	ScrapeResult,
 	StructuredResearchOptions,
+	StructuredResearchRequestSummary,
 	StructuredResearchResult,
 	StructuredResearchUsage,
 } from "../types";
@@ -147,10 +148,9 @@ function firstPresent(u: Record<string, unknown>, keys: readonly string[]): unkn
  * live responses). Both are read; when both carry a valid count and the
  * counts differ, neither is trusted and the conflict is reported.
  */
-function webSearchRequests(u: Record<string, unknown>): Pick<
-	StructuredResearchUsage,
-	"webSearchRequests" | "webSearchRequestsConflict"
-> {
+function webSearchRequests(
+	u: Record<string, unknown>,
+): Pick<StructuredResearchUsage, "webSearchRequests" | "webSearchRequestsConflict"> {
 	const reported = [record(u.server_tool_use), record(u.server_tool_use_details)]
 		.map((parent) => countOrNull(parent?.web_search_requests))
 		.filter((count): count is number => count !== null);
@@ -178,6 +178,16 @@ export function parseOpenRouterUsage(usage: unknown): StructuredResearchUsage | 
 		reasoningTokens: countOrNull(details?.reasoning_tokens),
 		costUsd: amountOrNull(u.cost),
 		...webSearchRequests(u),
+	};
+}
+
+/** The verifiable part of a request body, read back from what is about to be sent. */
+function summarizeRequest(body: Record<string, unknown>): StructuredResearchRequestSummary {
+	return {
+		model: String(body.model),
+		webSearch: Array.isArray(body.tools) && body.tools.length > 0,
+		maxToolCalls: typeof body.max_tool_calls === "number" ? body.max_tool_calls : null,
+		maxOutputTokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
 	};
 }
 
@@ -233,6 +243,7 @@ export const openrouter: Provider = {
 			// matches what openai-api and anthropic-api do.
 			modelVersion: DEFAULT_RESEARCH_MODEL,
 			usage: parseOpenRouterUsage(data?.usage),
+			request: summarizeRequest(body),
 		};
 	},
 

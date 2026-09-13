@@ -372,7 +372,7 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 			"UPDATE sentiment_analyses SET status = 'processing', started_at = now() - interval '16 minutes' WHERE prompt_run_id = $1",
 			[RUN_MENTIONS],
 		);
-		expect(await runSentimentJob(payload, { resolveProvider: () => provider })).toEqual({
+		expect(await runSentimentJob(payload, { resolveProvider: () => provider })).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
@@ -440,7 +440,7 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 		).rows;
 		expect(event).toEqual({ provider: "openrouter", model: SENTIMENT_MODEL, web_search_enabled: true });
 		// Recover for the following tests.
-		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toEqual({
+		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
@@ -568,7 +568,9 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 		const inventory = await runSentimentEnqueue({ enqueue: false, brandId: BRAND });
 		expect(inventory.counts).toMatchObject({ completed: 0, eligible: 1, eligibleStale: 1 });
 		let calls = 0;
-		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider({ onCall: () => calls++ }) })).toEqual({
+		expect(
+			await runSentimentJob(payload, { resolveProvider: () => fakeProvider({ onCall: () => calls++ }) }),
+		).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
@@ -613,7 +615,7 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			eligible: 1,
 			eligibleStale: 1,
 		});
-		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toEqual({
+		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toMatchObject({
 			status: "classified",
 			entities: 3,
 		});
@@ -637,7 +639,7 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			timezone: "UTC",
 		});
 		expect(overview.entities.find((e) => e.key === ALPHA)?.classified).toBe(0);
-		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toEqual({
+		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toMatchObject({
 			status: "classified",
 			entities: 3,
 		});
@@ -673,7 +675,7 @@ describe("IT-SNT-014 superseded mention lifecycle", () => {
 		} as unknown as Provider;
 		expect(
 			await runSentimentJob({ ...payload, promptRunId: RUN_ALIAS }, { resolveProvider: () => aliasProvider }),
-		).toEqual({ status: "classified", entities: 1 });
+		).toMatchObject({ status: "classified", entities: 1 });
 		const overviewBefore = await loadSentimentOverview({
 			brandId: BRAND,
 			lookback: "1m",
@@ -932,7 +934,7 @@ describe("IT-SNT-012 prompt deletion with a full sentiment graph (B6)", () => {
 		await ensureAnalysis({ promptRunId: RUN_DELETE, brandId: BRAND });
 		expect(
 			await runSentimentJob({ ...payload, promptRunId: RUN_DELETE }, { resolveProvider: () => fakeProvider() }),
-		).toEqual({ status: "classified", entities: 3 });
+		).toMatchObject({ status: "classified", entities: 3 });
 		expect(await count("sentiment_detections", "prompt_run_id = $1", [RUN_DELETE])).toBe(1);
 		expect(await count("prompt_run_entity_mentions", "prompt_run_id = $1", [RUN_DELETE])).toBe(3);
 		expect(await count("sentiment_analyses", "prompt_run_id = $1", [RUN_DELETE])).toBe(1);

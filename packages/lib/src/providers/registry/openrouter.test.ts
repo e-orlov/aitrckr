@@ -249,20 +249,42 @@ describe("openrouter runStructuredResearch", () => {
 		});
 		expectWebSearchContract(body);
 		expect(body).not.toHaveProperty("max_tokens");
-		expect(result).toEqual({ object: structured, modelVersion: "openai/gpt-5-mini" });
+		expect(result).toEqual({
+			object: structured,
+			modelVersion: "openai/gpt-5-mini",
+			request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: null },
+		});
 	});
 
 	it("adds max_tokens only when a caller supplies maxOutputTokens; the default request is unchanged", async () => {
 		const capped = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
-		await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: true, maxOutputTokens: 8000 });
+		const cappedResult = await openrouter.runStructuredResearch!({
+			prompt: "research",
+			schema,
+			webSearch: true,
+			maxOutputTokens: 8000,
+		});
 		const cappedBody = sentRequest(capped).body;
 		expect(cappedBody.max_tokens).toBe(8000);
 		expect(cappedBody.model).toBe("openai/gpt-5-mini");
 		expectWebSearchContract(cappedBody);
+		// The summary is read back from the body that was sent, so it can be verified without the body.
+		expect(cappedResult.request).toEqual({
+			model: "openai/gpt-5-mini",
+			webSearch: true,
+			maxToolCalls: 1,
+			maxOutputTokens: 8000,
+		});
 
 		const plain = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
-		await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: true });
+		const plainResult = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: false });
 		expect(sentRequest(plain).body).not.toHaveProperty("max_tokens");
+		expect(plainResult.request).toEqual({
+			model: "openai/gpt-5-mini",
+			webSearch: false,
+			maxToolCalls: null,
+			maxOutputTokens: null,
+		});
 	});
 
 	it("returns only safe numeric usage — tokens, reasoning tokens, charged cost, web-search count", async () => {

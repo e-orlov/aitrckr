@@ -59,11 +59,26 @@ export interface StructuredResearchUsage {
 	webSearchRequestsConflict: boolean;
 }
 
+/**
+ * What the provider was actually asked to do on one structured call, as
+ * numbers and flags only — the fields a caller must be able to verify
+ * without seeing the request body.
+ */
+export interface StructuredResearchRequestSummary {
+	model: string;
+	webSearch: boolean;
+	/** Server-tool call budget sent with the request; `null` when no tool was sent. */
+	maxToolCalls: number | null;
+	/** `max_tokens` sent with the request; `null` when the provider default applied. */
+	maxOutputTokens: number | null;
+}
+
 export interface StructuredResearchResult<T> {
 	object: T;
 	/** Resolved model id (after any `:online` suffixing etc.). */
 	modelVersion?: string;
 	usage?: StructuredResearchUsage;
+	request?: StructuredResearchRequestSummary;
 }
 
 /**
