@@ -368,6 +368,278 @@ export const sourceDomainClassifications = pgTable(
 export type SourceDomainClassificationRecord = typeof sourceDomainClassifications.$inferSelect;
 export type NewSourceDomainClassificationRecord = typeof sourceDomainClassifications.$inferInsert;
 
+// ============================================================================
+// Sentiment (SENT-01)
+// ============================================================================
+//
+// Everything below hangs off a prompt run and is deleted with it (ON DELETE
+// CASCADE), so the existing prompt/run deletion sequence — including the one
+// an older application image executes — never trips over sentiment rows.
+// Competitor references stay restrictive: a competitor with sentiment history
+// cannot be hard-deleted (its identity is permanent since SENT-R0).
+
+/**
+ * Run-level receipt that a versioned detector scanned this run. This — not
+ * the presence of mention rows — is what says whether a run was visited:
+ * `mentions` and `no_mentions` are completed scans of an extractable answer,
+ * `unextractable` records that the stored output had no answer text. A run
+ * without a current-version receipt has not been scanned.
+ */
+export const sentimentDetections = pgTable(
+	"sentiment_detections",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		promptRunId: uuid("prompt_run_id")
+			.references(() => promptRuns.id, { onDelete: "cascade" })
+			.notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		detectorVersion: text("detector_version").notNull(),
+		status: text("status").notNull(),
+		mentionCount: integer("mention_count").notNull().default(0),
+		detectedAt: timestamp("detected_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		runVersionUnique: uniqueIndex("sentiment_detections_run_version_idx").on(table.promptRunId, table.detectorVersion),
+		brandVersionStatusIdx: index("sentiment_detections_brand_version_status_idx").on(
+			table.brandId,
+			table.detectorVersion,
+			table.status,
+		),
+		statusCheck: check(
+			"sentiment_detections_status_check",
+			sql`${table.status} IN ('mentions', 'no_mentions', 'unextractable')`,
+		),
+		mentionCountCheck: check(
+			"sentiment_detections_mention_count_check",
+			sql`${table.mentionCount} >= 0 AND ((${table.status} = 'mentions') = (${table.mentionCount} > 0))`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * Deterministic entity mentions: one row per stored prompt run and entity
+ * (own brand or a competitor by id) found in the answer body by a versioned
+ * detector. This — not `prompt_runs.competitors_mentioned`, which stores
+ * names and is kept for the older pages — is the stable mention denominator
+ * for sentiment. `entity_key` is `brand` or the competitor uuid so the
+ * uniqueness holds although `competitor_id` is nullable.
+ *
+ * Lifecycle: a row is *current* while `superseded_at` is null and its
+ * detector version is the current one. When a newer detector pass no longer
+ * finds the entity, a row that observations still reference is superseded
+ * (kept for the audit trail, invisible to the current projection) instead of
+ * deleted; a later pass that finds the entity again reactivates the same row.
+ */
+export const promptRunEntityMentions = pgTable(
+	"prompt_run_entity_mentions",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		promptRunId: uuid("prompt_run_id")
+			.references(() => promptRuns.id, { onDelete: "cascade" })
+			.notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		entityType: text("entity_type").notNull(),
+		competitorId: uuid("competitor_id").references(() => competitors.id),
+		entityKey: text("entity_key").notNull(),
+		entityName: text("entity_name").notNull(),
+		detectorVersion: text("detector_version").notNull(),
+		matchedTerms: text("matched_terms").array().notNull().default([]),
+		detectedAt: timestamp("detected_at", { withTimezone: true }).defaultNow().notNull(),
+		supersededAt: timestamp("superseded_at", { withTimezone: true }),
+	},
+	(table) => ({
+		runEntityUnique: uniqueIndex("prompt_run_entity_mentions_run_entity_idx").on(table.promptRunId, table.entityKey),
+		brandEntityIdx: index("prompt_run_entity_mentions_brand_entity_idx").on(table.brandId, table.entityKey),
+		entityTypeCheck: check(
+			"prompt_run_entity_mentions_entity_type_check",
+			sql`${table.entityType} IN ('brand', 'competitor')`,
+		),
+		entityIdentityCheck: check(
+			"prompt_run_entity_mentions_entity_identity_check",
+			sql`(${table.entityType} = 'brand' AND ${table.competitorId} IS NULL AND ${table.entityKey} = 'brand') OR (${table.entityType} = 'competitor' AND ${table.competitorId} IS NOT NULL AND ${table.entityKey} = ${table.competitorId}::text)`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * One classifier pass over one prompt run for one classifier version. The
+ * lifecycle is what makes retries and the backfill idempotent: a row is
+ * created `pending` when the job is queued, is claimed `processing` by
+ * exactly one worker (a conditional update on the status), and ends
+ * `completed`, `no_mentions` (no provider call was needed) or `failed`.
+ * `input_hash` is the canonical classifier input the completed result
+ * belongs to; a mismatch means the run is eligible again. `claim_generation`
+ * increments on every successful claim and fences every later write: a
+ * claimant may only complete, fail or replace observations while its
+ * generation is still the row's, so an attempt that outlived its lease can
+ * never overwrite a newer attempt. Provider/model are attempt attribution and
+ * audit metadata only and are never shown on the page.
+ */
+export const sentimentAnalyses = pgTable(
+	"sentiment_analyses",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		promptRunId: uuid("prompt_run_id")
+			.references(() => promptRuns.id, { onDelete: "cascade" })
+			.notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		classifierVersion: text("classifier_version").notNull(),
+		taxonomyVersion: text("taxonomy_version").notNull(),
+		inputHash: text("input_hash"),
+		status: text("status").notNull().default("pending"),
+		provider: text("provider"),
+		model: text("model"),
+		webSearch: boolean("web_search"),
+		errorCode: text("error_code"),
+		errorMessage: text("error_message"),
+		attempts: integer("attempts").notNull().default(0),
+		claimGeneration: integer("claim_generation").notNull().default(0),
+		startedAt: timestamp("started_at", { withTimezone: true }),
+		completedAt: timestamp("completed_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.$onUpdate(() => new Date())
+			.notNull(),
+	},
+	(table) => ({
+		runVersionUnique: uniqueIndex("sentiment_analyses_run_version_idx").on(table.promptRunId, table.classifierVersion),
+		brandStatusIdx: index("sentiment_analyses_brand_status_idx").on(
+			table.brandId,
+			table.classifierVersion,
+			table.status,
+		),
+		statusCheck: check(
+			"sentiment_analyses_status_check",
+			sql`${table.status} IN ('pending', 'processing', 'completed', 'no_mentions', 'failed')`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * Entity-level sentiment for one mention within one analysis. Score and
+ * category are stored together and cross-checked so an inconsistent pair can
+ * never be persisted: Positive 51–100, Negative 0–49, Neutral and Mixed
+ * exactly 50. Evidence is a bounded list of exact excerpts of the stored
+ * answer with raw-body offsets and a polarity per excerpt.
+ */
+export const sentimentObservations = pgTable(
+	"sentiment_observations",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		analysisId: uuid("analysis_id")
+			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
+			.notNull(),
+		mentionId: uuid("mention_id")
+			.references(() => promptRunEntityMentions.id, { onDelete: "cascade" })
+			.notNull(),
+		promptRunId: uuid("prompt_run_id")
+			.references(() => promptRuns.id, { onDelete: "cascade" })
+			.notNull(),
+		brandId: text("brand_id")
+			.references(() => brands.id)
+			.notNull(),
+		entityType: text("entity_type").notNull(),
+		competitorId: uuid("competitor_id").references(() => competitors.id),
+		entityKey: text("entity_key").notNull(),
+		score: smallint("score").notNull(),
+		category: text("category").notNull(),
+		confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
+		evidence: jsonb("evidence").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		analysisEntityUnique: uniqueIndex("sentiment_observations_analysis_entity_idx").on(
+			table.analysisId,
+			table.entityKey,
+		),
+		brandEntityRunIdx: index("sentiment_observations_brand_entity_run_idx").on(
+			table.brandId,
+			table.entityKey,
+			table.promptRunId,
+		),
+		brandEntityScoreIdx: index("sentiment_observations_brand_entity_score_idx").on(
+			table.brandId,
+			table.entityKey,
+			table.score,
+		),
+		scoreCheck: check("sentiment_observations_score_check", sql`${table.score} >= 0 AND ${table.score} <= 100`),
+		categoryCheck: check(
+			"sentiment_observations_category_check",
+			sql`(${table.category} = 'positive' AND ${table.score} >= 51) OR (${table.category} = 'negative' AND ${table.score} <= 49) OR (${table.category} IN ('neutral', 'mixed') AND ${table.score} = 50)`,
+		),
+		confidenceCheck: check(
+			"sentiment_observations_confidence_check",
+			sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+		),
+		entityIdentityCheck: check(
+			"sentiment_observations_entity_identity_check",
+			sql`(${table.entityType} = 'brand' AND ${table.competitorId} IS NULL AND ${table.entityKey} = 'brand') OR (${table.entityType} = 'competitor' AND ${table.competitorId} IS NOT NULL AND ${table.entityKey} = ${table.competitorId}::text)`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * Aspect-level sentiment (price, coverage, service, other) under one entity
+ * observation, keyed by the versioned taxonomy so a later taxonomy cannot
+ * silently rewrite what an older row meant.
+ */
+export const sentimentAspectObservations = pgTable(
+	"sentiment_aspect_observations",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		observationId: uuid("observation_id")
+			.references(() => sentimentObservations.id, { onDelete: "cascade" })
+			.notNull(),
+		taxonomyVersion: text("taxonomy_version").notNull(),
+		aspectKey: text("aspect_key").notNull(),
+		aspectLabel: text("aspect_label").notNull(),
+		score: smallint("score").notNull(),
+		category: text("category").notNull(),
+		confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
+		evidence: jsonb("evidence").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		observationAspectUnique: uniqueIndex("sentiment_aspect_observations_observation_aspect_idx").on(
+			table.observationId,
+			table.taxonomyVersion,
+			table.aspectKey,
+		),
+		aspectScoreIdx: index("sentiment_aspect_observations_aspect_score_idx").on(
+			table.taxonomyVersion,
+			table.aspectKey,
+			table.score,
+		),
+		aspectKeyCheck: check(
+			"sentiment_aspect_observations_aspect_key_check",
+			sql`${table.aspectKey} IN ('price', 'coverage', 'service', 'other')`,
+		),
+		scoreCheck: check("sentiment_aspect_observations_score_check", sql`${table.score} >= 0 AND ${table.score} <= 100`),
+		categoryCheck: check(
+			"sentiment_aspect_observations_category_check",
+			sql`(${table.category} = 'positive' AND ${table.score} >= 51) OR (${table.category} = 'negative' AND ${table.score} <= 49) OR (${table.category} IN ('neutral', 'mixed') AND ${table.score} = 50)`,
+		),
+		confidenceCheck: check(
+			"sentiment_aspect_observations_confidence_check",
+			sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+		),
+	}),
+).enableRLS();
+
+export type SentimentDetection = typeof sentimentDetections.$inferSelect;
+export type PromptRunEntityMention = typeof promptRunEntityMentions.$inferSelect;
+export type NewPromptRunEntityMention = typeof promptRunEntityMentions.$inferInsert;
+export type SentimentAnalysis = typeof sentimentAnalyses.$inferSelect;
+export type SentimentObservation = typeof sentimentObservations.$inferSelect;
+export type SentimentAspectObservation = typeof sentimentAspectObservations.$inferSelect;
+
 // Encrypted overrides for credential environment variables, keyed by the env-var
 // name they stand in for. Separate table, strictest access.
 export const secrets = pgTable("secrets", {

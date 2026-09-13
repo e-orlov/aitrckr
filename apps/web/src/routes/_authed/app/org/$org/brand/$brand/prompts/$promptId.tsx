@@ -7,7 +7,7 @@ import { Separator } from "@workspace/ui/components/separator";
 import { Skeleton } from "@workspace/ui/components/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@workspace/ui/components/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@workspace/ui/components/tooltip";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type CitationData, CitationsDisplay } from "@/components/citations-display";
 import {
 	InfoTip,
@@ -22,7 +22,7 @@ import { ProgressBarChart } from "@/components/progress-bar-chart";
 import { ResponseMarkdown } from "@/components/response-markdown";
 import { SiteIcon } from "@/components/site-icon";
 import { useBrand } from "@/hooks/use-brands";
-import { usePromptRunsOnly } from "@/hooks/use-prompt-runs-only";
+import { usePromptRun, usePromptRunsOnly } from "@/hooks/use-prompt-runs-only";
 import { usePromptStats } from "@/hooks/use-prompt-stats";
 import { useQueryFanout } from "@/hooks/use-query-fanout";
 import { useBrandParams } from "@/hooks/use-route-params";
@@ -60,8 +60,11 @@ export const Route = createFileRoute("/_authed/app/org/$org/brand/$brand/prompts
 	staticData: { crumb: "Prompt History" },
 	// `tab` is part of the route's search schema so links can target a specific
 	// tab (e.g. View Details → web-queries). Absent means the default tab.
-	validateSearch: (search: Record<string, unknown>): { tab?: PromptDetailTab } => ({
+	// `run` targets one stored response (used by the Sentiment evidence links);
+	// it is validated as a loose uuid and ignored when absent.
+	validateSearch: (search: Record<string, unknown>): { tab?: PromptDetailTab; run?: string } => ({
 		tab: PROMPT_DETAIL_TABS.includes(search.tab as PromptDetailTab) ? (search.tab as PromptDetailTab) : undefined,
+		run: typeof search.run === "string" && RUN_ID_PATTERN.test(search.run) ? search.run.toLowerCase() : undefined,
 	}),
 	head: pageHead({ title: "Prompt Details", description: "Detailed analysis of a tracked prompt's performance." }),
 	component: PromptHistoryPage,
@@ -183,9 +186,12 @@ function PromptHeader({
 	);
 }
 
+const RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function PromptHistoryPage() {
 	const { promptId } = Route.useParams();
 	const { brandId } = Route.useRouteContext();
+	const focusedRunId = Route.useSearch({ select: (s) => s.run });
 
 	const lookback = useLookbackPeriod();
 	const days = getDaysFromLookback(lookback);
@@ -217,6 +223,10 @@ function PromptHistoryPage() {
 	} = usePromptStats(shouldFetchStats ? promptId : "", { days });
 
 	const shouldFetchRuns = visitedTabs.has("responses");
+	const { run: focusedRun, isError: isFocusedRunError } = usePromptRun(
+		shouldFetchRuns && focusedRunId ? promptId : undefined,
+		focusedRunId,
+	);
 	const {
 		runs,
 		pagination,
@@ -347,6 +357,8 @@ function PromptHistoryPage() {
 				{activeTab === "responses" && (
 					<ResponsesTab
 						runs={runs}
+						focusedRun={focusedRun}
+						focusedRunMissing={Boolean(focusedRunId) && isFocusedRunError}
 						pagination={pagination}
 						isLoading={isRunsLoading}
 						currentPage={currentPage}
@@ -572,6 +584,8 @@ function CitationsTab({
 
 function ResponsesTab({
 	runs,
+	focusedRun,
+	focusedRunMissing,
 	pagination,
 	isLoading,
 	currentPage,
@@ -580,6 +594,9 @@ function ResponsesTab({
 	domainFor,
 }: {
 	runs: any[];
+	/** The deep-linked response, rendered pinned above the page even when it is outside it. */
+	focusedRun?: any | null;
+	focusedRunMissing?: boolean;
 	pagination: any;
 	isLoading: boolean;
 	currentPage: number;
@@ -591,6 +608,14 @@ function ResponsesTab({
 
 	const formatRawOutput = (rawOutput: any) =>
 		typeof rawOutput === "string" ? rawOutput : JSON.stringify(rawOutput, null, 2);
+	const focusedRef = useRef<HTMLDivElement | null>(null);
+	useEffect(() => {
+		if (!focusedRun || !focusedRef.current) return;
+		const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+		focusedRef.current.scrollIntoView({ block: "start", behavior: reducedMotion ? "auto" : "smooth" });
+	}, [focusedRun]);
+	const listed = focusedRun ? runs.filter((run: any) => run.id !== focusedRun.id) : runs;
+	const ordered = focusedRun ? [focusedRun, ...listed] : listed;
 
 	if (isLoading && runs.length === 0) {
 		return (
@@ -633,8 +658,29 @@ function ResponsesTab({
 		<div className="space-y-4">
 			<h3 className="text-base font-medium">Individual Prompt Runs</h3>
 
-			{runs.map((run: any) => (
-				<Card key={run.id}>
+			{focusedRunMissing && (
+				<div
+					className="text-muted-foreground rounded-md border border-dashed px-3 py-2 text-sm"
+					role="status"
+					data-testid="focused-run-missing"
+				>
+					The linked response could not be found for this prompt.
+				</div>
+			)}
+
+			{ordered.map((run: any) => (
+				<Card
+					key={run.id}
+					ref={focusedRun && run.id === focusedRun.id ? focusedRef : undefined}
+					data-run-id={run.id}
+					data-testid={focusedRun && run.id === focusedRun.id ? "focused-run" : undefined}
+					className={
+						focusedRun && run.id === focusedRun.id ? "ring-2 ring-ring ring-offset-2 ring-offset-background" : undefined
+					}
+				>
+					{focusedRun && run.id === focusedRun.id && (
+						<div className="text-muted-foreground px-6 pt-4 text-xs">Linked response</div>
+					)}
 					<CardHeader className="pb-0 gap-y-0">
 						<div className="grid grid-cols-3 gap-x-4 text-sm">
 							<div>

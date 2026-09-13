@@ -3,6 +3,7 @@ import { getDeployment } from "@workspace/deployment";
 import { getProvider, parseScrapeTargets, validateScrapeTargets } from "@workspace/lib/providers";
 import { ensurePromptQueue } from "@workspace/lib/run-policy";
 import { startCredentialRefresh } from "@workspace/lib/secrets";
+import { ensureSentimentQueue } from "@workspace/lib/sentiment";
 import { ensureSourceClassificationQueue } from "@workspace/lib/source-classification";
 import boss from "./boss";
 import { registerHandlers } from "./handlers";
@@ -58,6 +59,7 @@ async function main() {
 	// Exclusive policy is what makes the singleton-key dedupe real; the helper
 	// fails fast if an existing queue carries a different (immutable) policy.
 	await ensureSourceClassificationQueue(boss);
+	await ensureSentimentQueue(boss);
 	await boss.createQueue("schedule-maintenance", {
 		retryLimit: 3,
 		retryDelay: 300, // 5 minutes between retries

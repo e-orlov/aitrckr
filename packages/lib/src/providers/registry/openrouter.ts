@@ -132,6 +132,7 @@ export const openrouter: Provider = {
 		prompt,
 		schema,
 		webSearch = true,
+		signal,
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
 		// Raw fetch (no AI SDK) so we can attach OpenRouter's server-tool fields
 		// — the AI SDK's OpenAI-compat path doesn't pass them through.
@@ -149,6 +150,7 @@ export const openrouter: Provider = {
 			method: "POST",
 			headers: openrouterHeaders(),
 			body: JSON.stringify(body),
+			signal,
 		});
 		if (!res.ok) {
 			throw new Error(`OpenRouter API error (${res.status}): ${await res.text()}`);

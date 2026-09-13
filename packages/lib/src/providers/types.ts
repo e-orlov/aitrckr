@@ -29,6 +29,8 @@ export interface StructuredResearchOptions<T> {
 	 * supplied entirely in the prompt — no tools, no agent loop.
 	 */
 	webSearch?: boolean;
+	/** Cancels the underlying request (job shutdown/expiry); providers forward it to their HTTP call. */
+	signal?: AbortSignal;
 }
 
 export interface StructuredResearchResult<T> {
