@@ -33,6 +33,8 @@ const { explainSentimentEvidence, loadRunSources, loadSentimentEvidence, loadSen
 );
 const { loadMentions } = await import("@workspace/lib/sentiment");
 type Provider = import("@workspace/lib/providers/types").Provider;
+type StructuredResearchUsage = import("@workspace/lib/providers/types").StructuredResearchUsage;
+type StructuredResearchRequestSummary = import("@workspace/lib/providers/types").StructuredResearchRequestSummary;
 
 const ORG = "default";
 const BRAND = "sent-pipe-brand";
@@ -48,6 +50,7 @@ const RUN_ALIAS = "5e970004-0000-4000-8000-000000000205";
 const RUN_SOURCES = "5e970004-0000-4000-8000-000000000206";
 const RUN_OLD_TAXONOMY = "5e970004-0000-4000-8000-000000000207";
 const RUN_PERSIST_FAIL = "5e970004-0000-4000-8000-000000000208";
+const RUN_CANARY = "5e970004-0000-4000-8000-000000000209";
 const ALIAS_ANSWER = "Only the alias Alphaline shows up in this answer, nothing else does.";
 const ANSWER = "Alpha handles claims fast and fairly. Newco is also mentioned. Sent Pipe is fine.";
 
@@ -62,7 +65,15 @@ const count = async (table: string, where = "brand_id = $1", params: unknown[] =
 	(await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table} WHERE ${where}`, params)).rows[0].n;
 
 /** A provider double answering every candidate key it is asked about, optionally holding at the provider boundary. */
-function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void; costUsd?: number } = {}): Provider {
+function fakeProvider(
+	options: {
+		hold?: Promise<void>;
+		onCall?: () => void;
+		costUsd?: number;
+		usage?: StructuredResearchUsage;
+		request?: StructuredResearchRequestSummary;
+	} = {},
+): Provider {
 	return {
 		id: "fake-openrouter",
 		name: "Fake",
@@ -106,8 +117,10 @@ function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void; cost
 			return {
 				object: object as T,
 				modelVersion: SENTIMENT_MODEL,
+				request: options.request,
 				usage:
-					options.costUsd === undefined
+					options.usage ??
+					(options.costUsd === undefined
 						? undefined
 						: {
 								inputTokens: 7000,
@@ -116,7 +129,7 @@ function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void; cost
 								costUsd: options.costUsd,
 								webSearchRequests: 1,
 								webSearchRequestsConflict: false,
-							},
+							}),
 			};
 		},
 	} as unknown as Provider;
@@ -1005,6 +1018,123 @@ describe("IT-SNT-018 usage attribution when the write fails after a paid answer 
 		expect(calls).toBe(2);
 		expect(await count("usage_events")).toBe(eventsBefore + 2);
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(3);
+	});
+});
+
+describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
+	const lockedRequest: StructuredResearchRequestSummary = {
+		model: SENTIMENT_MODEL,
+		webSearch: true,
+		maxToolCalls: 1,
+		maxOutputTokens: 8000,
+	};
+	const usageOf = (over: Partial<StructuredResearchUsage>): StructuredResearchUsage => ({
+		inputTokens: 7000,
+		outputTokens: 900,
+		reasoningTokens: 400,
+		costUsd: 0.02,
+		webSearchRequests: 1,
+		webSearchRequestsConflict: false,
+		...over,
+	});
+	const analysisRow = async () =>
+		(
+			await client.query<{ status: string; error_code: string | null; attempts: number }>(
+				"SELECT status, error_code, attempts FROM sentiment_analyses WHERE prompt_run_id = $1",
+				[RUN_CANARY],
+			)
+		).rows[0];
+	const observations = () => count("sentiment_observations", "prompt_run_id = $1", [RUN_CANARY]);
+	const aspects = () =>
+		count(
+			"sentiment_aspect_observations",
+			"observation_id IN (SELECT id FROM sentiment_observations WHERE prompt_run_id = $1)",
+			[RUN_CANARY],
+		);
+	const newestEvent = async () =>
+		(
+			await client.query<{ event_type: string; estimated_cost_usd: string | null }>(
+				"SELECT event_type, estimated_cost_usd FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 1",
+				[BRAND],
+			)
+		).rows[0];
+
+	it("a rejected answer never becomes a completed analysis: cost above the threshold, then a conflicting search count, then an accepted call", {
+		timeout: 120_000,
+	}, async () => {
+		const { inspectSentimentCanaryRun, parseSentimentCanaryContract, runSentimentCanary } = await import(
+			"@workspace/lib/sentiment"
+		);
+		await insertRun(RUN_CANARY, PROMPT, { choices: [{ message: { content: ANSWER } }] }, 2);
+		await runMentionBackfill({ apply: true, brandId: BRAND });
+		const description = await inspectSentimentCanaryRun(RUN_CANARY);
+		expect(description?.entities.map((e) => e.key).sort()).toEqual(["brand", ALPHA, NEWCO].sort());
+		const contract = parseSentimentCanaryContract(description);
+		const fast = { deadlineMs: 5_000, watchdogMs: 10_000 };
+
+		// 1. Cost above the post-call threshold.
+		let calls = 0;
+		const eventsBefore = await count("usage_events");
+		const failedBefore = await count(
+			"usage_events",
+			"brand_id = $1 AND event_type = 'sentiment_classification_failed'",
+		);
+		const expensive = fakeProvider({
+			onCall: () => calls++,
+			usage: usageOf({ costUsd: 0.1001 }),
+			request: lockedRequest,
+		});
+		const rejected = await runSentimentCanary({ contract, deps: { resolveProvider: () => expensive }, ...fast });
+		expect(calls).toBe(1);
+		expect(rejected.providerCalls).toBe(1);
+		expect(rejected.verdict).toEqual({ status: "reject", reasons: [{ code: "cost-exceeded" }] });
+		expect(rejected.outcome).toMatchObject({ status: "error", code: "canary-contract" });
+		expect(await analysisRow()).toEqual({ status: "failed", error_code: "canary-contract", attempts: 1 });
+		expect(await observations()).toBe(0);
+		expect(await aspects()).toBe(0);
+		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
+			failedBefore,
+		);
+		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.100100" });
+
+		// 2. Conflicting web-search counters: rejected the same way, cost still attributed.
+		const conflicting = fakeProvider({
+			onCall: () => calls++,
+			usage: usageOf({ webSearchRequests: null, webSearchRequestsConflict: true, costUsd: 0.02 }),
+			request: lockedRequest,
+		});
+		const conflict = await runSentimentCanary({ contract, deps: { resolveProvider: () => conflicting }, ...fast });
+		expect(calls).toBe(2);
+		expect(conflict.providerCalls).toBe(1);
+		expect(conflict.verdict).toEqual({ status: "reject", reasons: [{ code: "web-search-count-conflict" }] });
+		expect(await analysisRow()).toEqual({ status: "failed", error_code: "canary-contract", attempts: 2 });
+		expect(await observations()).toBe(0);
+		expect(await count("usage_events")).toBe(eventsBefore + 2);
+		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.020000" });
+
+		// 3. Unknown (unreported) count: same outcome with the cost the provider did report.
+		const unknown = fakeProvider({
+			onCall: () => calls++,
+			usage: usageOf({ webSearchRequests: null, costUsd: 0.03 }),
+			request: lockedRequest,
+		});
+		const unreported = await runSentimentCanary({ contract, deps: { resolveProvider: () => unknown }, ...fast });
+		expect(unreported.verdict).toEqual({ status: "reject", reasons: [{ code: "web-search-count-unknown" }] });
+		expect(await observations()).toBe(0);
+		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.030000" });
+
+		// 4. A conforming answer is the only thing that persists.
+		const good = fakeProvider({ onCall: () => calls++, usage: usageOf({}), request: lockedRequest });
+		const accepted = await runSentimentCanary({ contract, deps: { resolveProvider: () => good }, ...fast });
+		expect(accepted.verdict).toEqual({ status: "accept" });
+		expect(calls).toBe(4);
+		expect(await analysisRow()).toEqual({ status: "completed", error_code: null, attempts: 4 });
+		expect(await observations()).toBe(3);
+		expect(await count("usage_events")).toBe(eventsBefore + 4);
+		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
+			failedBefore,
+		);
 	});
 });
 
