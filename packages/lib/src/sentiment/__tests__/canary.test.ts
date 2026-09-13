@@ -541,6 +541,119 @@ describe("canary verdict after the one call", () => {
 	});
 });
 
+describe("E1: the post-call gate runs before persistence", () => {
+	const gated = async (provider: Provider, expected: string[]) => {
+		const { deps, usage, marks } = storeFakes(provider);
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
+		expect(report.providerCalls).toBe(1);
+		expect(codes(report)).toEqual(expected);
+		// The provider answered and was paid: exactly one success attribution with the reported cost, no failed event.
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
+		// Nothing was written: the analysis fails with the contract code, observations are never touched.
+		expect(deps.persist).not.toHaveBeenCalled();
+		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "canary-contract" })]);
+		expect(report.outcome).toMatchObject({ status: "error", name: "SentimentJobError", code: "canary-contract" });
+		return { report, usage };
+	};
+
+	it("cost above the threshold: rejected without persisting, the paid call attributed once with its cost", async () => {
+		const { usage } = await gated(goodProvider({ usage: { ...goodUsage, costUsd: 0.1001 }, request: goodRequest }), [
+			"cost-exceeded",
+		]);
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.1001 })]);
+	});
+
+	it("usage missing", async () => {
+		const { usage } = await gated(goodProvider({ usage: undefined, request: goodRequest }), ["usage-missing"]);
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: null })]);
+	});
+
+	it("web-search count unknown, conflicting, zero and more than one", async () => {
+		await gated(goodProvider({ usage: { ...goodUsage, webSearchRequests: null }, request: goodRequest }), [
+			"web-search-count-unknown",
+		]);
+		await gated(
+			goodProvider({
+				usage: { ...goodUsage, webSearchRequests: null, webSearchRequestsConflict: true },
+				request: goodRequest,
+			}),
+			["web-search-count-conflict"],
+		);
+		await gated(goodProvider({ usage: { ...goodUsage, webSearchRequests: 0 }, request: goodRequest }), [
+			"web-search-count",
+		]);
+		await gated(goodProvider({ usage: { ...goodUsage, webSearchRequests: 2 }, request: goodRequest }), [
+			"web-search-count",
+		]);
+	});
+
+	it("cost missing or invalid", async () => {
+		await gated(goodProvider({ usage: { ...goodUsage, costUsd: null }, request: goodRequest }), ["cost-missing"]);
+		await gated(goodProvider({ usage: { ...goodUsage, costUsd: -1 }, request: goodRequest }), ["cost-missing"]);
+	});
+
+	it("output tokens missing, invalid or above the cap", async () => {
+		await gated(goodProvider({ usage: { ...goodUsage, outputTokens: null }, request: goodRequest }), [
+			"output-tokens-missing",
+		]);
+		await gated(goodProvider({ usage: { ...goodUsage, outputTokens: -5 }, request: goodRequest }), [
+			"output-tokens-missing",
+		]);
+		await gated(goodProvider({ usage: { ...goodUsage, outputTokens: 8001 }, request: goodRequest }), [
+			"output-tokens-exceeded",
+		]);
+	});
+
+	it("request summary missing or drifted", async () => {
+		await gated(goodProvider({ usage: goodUsage, request: undefined }), ["request-unverified"]);
+		await gated(
+			goodProvider({
+				usage: goodUsage,
+				request: { model: "openai/gpt-5.6-luna", webSearch: false, maxToolCalls: 2, maxOutputTokens: 4000 },
+			}),
+			["request-model", "request-web-search", "request-max-tool-calls", "request-max-tokens"],
+		);
+	});
+
+	it("entity keys drifting from the contract between preflight and answer", async () => {
+		// The run's mention set changes after preflight: the job classifies a different entity set.
+		const provider = goodProvider(undefined, {
+			entities: [
+				goodAnswer.entities[0],
+				{
+					key: "c-huk",
+					score: 50,
+					category: "neutral",
+					confidence: 0.5,
+					evidence: [{ quote: "WGV PBV Optimal", polarity: "neutral" }],
+					aspects: [],
+				},
+			],
+		});
+		const drifted: StoredMention[] = [
+			mentions[0],
+			{ id: "m3", key: "c-huk", entityType: "competitor", competitorId: "c-huk", entityName: "HUK-COBURG" },
+		];
+		let loads = 0;
+		const { deps, usage, marks } = storeFakes(provider, {
+			loadMentions: vi.fn(async () => (++loads === 1 ? mentions : drifted)),
+		});
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(deps.persist).not.toHaveBeenCalled();
+		expect(codes(report)).toEqual(["entities-mismatch"]);
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "canary-contract" })]);
+	});
+
+	it("accept path persists exactly once", async () => {
+		const { deps } = storeFakes(goodProvider());
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(report.verdict).toEqual({ status: "accept" });
+		expect(deps.persist).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("canary deadline and watchdog share one abort signal", () => {
 	it("a hanging provider request is aborted by the request deadline through the real job core", async () => {
 		const provider = {
