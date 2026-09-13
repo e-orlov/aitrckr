@@ -454,9 +454,11 @@ export async function persistClassification(args: {
 
 /**
  * Billing-grade attribution for one classifier attempt, success or failure.
- * A failed attempt is still attributed to the locked provider/model — the
- * request went out — without any credential or response detail. Never
- * throws: attribution must not break the job.
+ * A successful call records the cost the provider actually charged when it
+ * reported one, otherwise the tunable estimate; a failed attempt is still
+ * attributed to the locked provider/model — the request went out — without
+ * any credential or response detail. Never throws: attribution must not
+ * break the job.
  */
 export async function recordSentimentUsageEvent(args: {
 	organizationId: string;
@@ -465,9 +467,18 @@ export async function recordSentimentUsageEvent(args: {
 	provider: string;
 	model: string | null;
 	succeeded: boolean;
+	/** Charged cost in USD reported by the provider for a successful call. */
+	actualCostUsd?: number | null;
 }): Promise<void> {
 	try {
-		const cost = estimateRunCostUsd(args.provider, true);
+		const actual =
+			args.succeeded &&
+			typeof args.actualCostUsd === "number" &&
+			Number.isFinite(args.actualCostUsd) &&
+			args.actualCostUsd >= 0
+				? args.actualCostUsd
+				: null;
+		const cost = actual ?? estimateRunCostUsd(args.provider, true);
 		await db.insert(usageEvents).values({
 			organizationId: args.organizationId,
 			brandId: args.brandId,

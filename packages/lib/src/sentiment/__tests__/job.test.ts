@@ -136,6 +136,26 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		]);
 	});
 
+	it("writes the provider's charged cost to the success usage event and falls back when usage is missing", async () => {
+		const withUsage = deps({
+			classify: vi.fn(async () => ({
+				...classification,
+				usage: { inputTokens: 7000, outputTokens: 900, reasoningTokens: 400, costUsd: 0.0312, webSearchRequests: 1 },
+			})),
+		});
+		const outcome = await runSentimentJob(payload, withUsage.d);
+		expect(outcome).toMatchObject({
+			status: "classified",
+			entities: 2,
+			usage: { costUsd: 0.0312, webSearchRequests: 1 },
+		});
+		expect(withUsage.usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0312 })]);
+
+		const withoutUsage = deps();
+		await runSentimentJob(payload, withoutUsage.d);
+		expect(withoutUsage.usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: null })]);
+	});
+
 	it("forwards the job abort signal to the classifier", async () => {
 		const controller = new AbortController();
 		const { d } = deps();
@@ -353,9 +373,13 @@ describe("IT-SNT-002 queue policy and singleton dedupe", () => {
 		const createQueue = vi.fn(async () => undefined);
 		await ensureSentimentQueue({ createQueue, getQueue: async () => ({ policy: "exclusive" }) });
 		expect(createQueue).toHaveBeenCalledWith(SENTIMENT_QUEUE, SENTIMENT_QUEUE_OPTIONS);
-		expect(SENTIMENT_QUEUE_OPTIONS).toMatchObject({ policy: "exclusive", retryLimit: 3, retryBackoff: true });
-		expect(SENTIMENT_QUEUE_OPTIONS.expireInSeconds).toBeGreaterThan(60);
-		expect(SENTIMENT_QUEUE_OPTIONS.expireInSeconds).toBeLessThanOrEqual(3600);
+		expect(SENTIMENT_QUEUE_OPTIONS).toMatchObject({
+			policy: "exclusive",
+			retryLimit: 3,
+			retryDelay: 60,
+			retryBackoff: true,
+			expireInSeconds: 900,
+		});
 	});
 
 	it("fails fast when the existing queue carries another policy", async () => {

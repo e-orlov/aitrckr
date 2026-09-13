@@ -1,3 +1,4 @@
+import type { StructuredResearchUsage } from "../providers/types";
 import { classifySentiment, type SentimentClassifierDeps, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import {
@@ -34,7 +35,7 @@ import {
 } from "./types";
 
 export type SentimentJobOutcome =
-	| { status: "classified"; entities: number }
+	| { status: "classified"; entities: number; usage?: StructuredResearchUsage }
 	| { status: "already-completed" }
 	| { status: "claimed-elsewhere"; analysisStatus: string }
 	/** The attempt ran but a later attempt took the row over; nothing of this attempt was written. */
@@ -127,15 +128,27 @@ async function classifyAndPersist(
 		});
 	} catch (error) {
 		if (error instanceof ClaimLostError) {
-			await recordUsage({ ...usage, provider: classification.provider, model: classification.model, succeeded: true });
+			await recordUsage({
+				...usage,
+				provider: classification.provider,
+				model: classification.model,
+				succeeded: true,
+				actualCostUsd: classification.usage?.costUsd ?? null,
+			});
 			return { status: "claim-lost", generation: claim.generation };
 		}
 		const safe = sanitizeSentimentError(error);
 		await failAttempt(claim, safe, deps);
 		throw new SentimentJobError(safe);
 	}
-	await recordUsage({ ...usage, provider: classification.provider, model: classification.model, succeeded: true });
-	return { status: "classified", entities: classification.entities.length };
+	await recordUsage({
+		...usage,
+		provider: classification.provider,
+		model: classification.model,
+		succeeded: true,
+		actualCostUsd: classification.usage?.costUsd ?? null,
+	});
+	return { status: "classified", entities: classification.entities.length, usage: classification.usage };
 }
 
 /**

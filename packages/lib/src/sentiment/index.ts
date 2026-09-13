@@ -10,8 +10,17 @@ export {
 	type SentimentEnqueueResult,
 } from "./backfill";
 export {
+	acceptCanaryRunId,
+	runSentimentCanary,
+	SENTIMENT_CANARY_DEADLINE_MS,
+	SENTIMENT_CANARY_WATCHDOG_MS,
+	SentimentCanaryError,
+	type SentimentCanaryReport,
+} from "./canary";
+export {
 	classifySentiment,
 	locateEvidence,
+	SENTIMENT_MAX_OUTPUT_TOKENS,
 	type SentimentClassification,
 	type SentimentClassifierDeps,
 	SentimentValidationError,

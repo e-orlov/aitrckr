@@ -61,7 +61,7 @@ const count = async (table: string, where = "brand_id = $1", params: unknown[] =
 	(await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table} WHERE ${where}`, params)).rows[0].n;
 
 /** A provider double answering every candidate key it is asked about, optionally holding at the provider boundary. */
-function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void } = {}): Provider {
+function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void; costUsd?: number } = {}): Provider {
 	return {
 		id: "fake-openrouter",
 		name: "Fake",
@@ -102,7 +102,20 @@ function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void } = {
 							: [],
 				})),
 			});
-			return { object: object as T, modelVersion: SENTIMENT_MODEL };
+			return {
+				object: object as T,
+				modelVersion: SENTIMENT_MODEL,
+				usage:
+					options.costUsd === undefined
+						? undefined
+						: {
+								inputTokens: 7000,
+								outputTokens: 900,
+								reasoningTokens: 400,
+								costUsd: options.costUsd,
+								webSearchRequests: 1,
+							},
+			};
 		},
 	} as unknown as Provider;
 }
@@ -273,7 +286,7 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 		});
 		// Safety valve: a second winner would deadlock on the barrier; release after 5 s so the assertions fail instead.
 		const valve = setTimeout(release, 5000);
-		const provider = fakeProvider({ hold: barrier, onCall: () => calls++ });
+		const provider = fakeProvider({ hold: barrier, onCall: () => calls++, costUsd: 0.0312 });
 		const outcomes = await Promise.all(
 			Array.from({ length: N }, () =>
 				runSentimentJob(payload, { resolveProvider: () => provider }).then((outcome) => {
@@ -315,6 +328,18 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 			),
 		).toBe(1);
 		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification'", [BRAND])).toBe(1);
+		// The provider's charged cost is what the success event records.
+		const [chargedEvent] = (
+			await client.query<{ estimated_cost_usd: string; provider: string; model: string }>(
+				"SELECT estimated_cost_usd, provider, model FROM usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification'",
+				[BRAND],
+			)
+		).rows;
+		expect(chargedEvent).toEqual({
+			estimated_cost_usd: "0.031200",
+			provider: "fake-openrouter",
+			model: SENTIMENT_MODEL,
+		});
 		expect(
 			await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'", [BRAND]),
 		).toBe(0);
@@ -547,6 +572,14 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			entities: 2,
 		});
 		expect(calls).toBe(1);
+		// No usage reported by the provider → the tunable estimate (null for an unknown provider id), never a fabricated cost.
+		const events = (
+			await client.query<{ estimated_cost_usd: string | null }>(
+				"SELECT estimated_cost_usd FROM usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification' ORDER BY created_at DESC LIMIT 1",
+				[BRAND],
+			)
+		).rows;
+		expect(events[0].estimated_cost_usd).toBeNull();
 		expect(await count("sentiment_analyses", "prompt_run_id = $1", [RUN_MENTIONS])).toBe(1);
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_MENTIONS])).toBe(2);
 		expect((await runSentimentEnqueue({ enqueue: false, brandId: BRAND })).counts).toMatchObject({
