@@ -133,10 +133,12 @@ describe("evidence anchor segmenter", () => {
 		const anchors = segmentAnswer(answer);
 		expectInvariants(answer, anchors);
 		for (const anchor of anchors) {
-			// Every anchor starts and ends on a complete code point.
-			expect(anchor.text.charCodeAt(0)).not.toBeGreaterThanOrEqual(0xdc00 && 0xdc00);
-			expect([...anchor.text].join("")).toBe(anchor.text);
-			expect(/^[\ud800-\udbff]?[\udc00-\udfff]$/u.test(anchor.text.slice(-1)) && anchor.text.length === 1).toBe(false);
+			// Every anchor starts and ends on a complete code point: no lone low surrogate at the start,
+			// no lone high surrogate at the end.
+			const first = anchor.text.charCodeAt(0);
+			const last = anchor.text.charCodeAt(anchor.text.length - 1);
+			expect(first >= 0xdc00 && first <= 0xdfff).toBe(false);
+			expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
 		}
 	});
 
