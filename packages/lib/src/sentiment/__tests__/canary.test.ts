@@ -6,7 +6,7 @@
  * runs against fakes — no network.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Provider, StructuredResearchUsage } from "../../providers/types";
+import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../../providers/types";
 import {
 	acceptCanaryRunId,
 	evaluateSentimentCanary,
@@ -97,7 +97,12 @@ const goodUsage: StructuredResearchUsage = {
 	webSearchRequests: 1,
 	webSearchRequestsConflict: false,
 };
-const goodRequest = { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 };
+const goodRequest: StructuredResearchRequestSummary = {
+	model: "openai/gpt-5-mini",
+	webSearch: true,
+	maxToolCalls: 1,
+	maxOutputTokens: 8000,
+};
 
 /** Real job core over fakes: only the provider is swapped. */
 function storeFakes(provider: Provider, overrides: Partial<SentimentJobDeps> = {}) {
@@ -283,7 +288,13 @@ describe("canary preflight refuses before any request", () => {
 			await refusal({
 				loadMentions: vi.fn(async () => [
 					...mentions,
-					{ id: "m3", key: "c-huk", entityType: "competitor", competitorId: "c-huk", entityName: "HUK-COBURG" },
+					{
+						id: "m3",
+						key: "c-huk",
+						entityType: "competitor" as const,
+						competitorId: "c-huk",
+						entityName: "HUK-COBURG",
+					},
 				]),
 			}),
 		).toEqual(["entity-set-mismatch"]);
