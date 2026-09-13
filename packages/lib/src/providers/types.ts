@@ -31,12 +31,54 @@ export interface StructuredResearchOptions<T> {
 	webSearch?: boolean;
 	/** Cancels the underlying request (job shutdown/expiry); providers forward it to their HTTP call. */
 	signal?: AbortSignal;
+	/**
+	 * Hard cap on generated tokens for this call. Only sent when supplied, so
+	 * callers that never set it keep their provider's default behaviour.
+	 */
+	maxOutputTokens?: number;
+}
+
+/**
+ * Safe, numeric-only usage metadata of one structured call. Never carries the
+ * prompt, the answer, headers, credentials or the raw provider payload; a
+ * field the provider did not report is `null`.
+ */
+export interface StructuredResearchUsage {
+	inputTokens: number | null;
+	outputTokens: number | null;
+	reasoningTokens: number | null;
+	/** Total amount charged for the call in USD, as reported by the provider. */
+	costUsd: number | null;
+	/**
+	 * Server-side web searches the provider performed for the call. `null` when
+	 * not reported, or when the provider reported it in more than one place
+	 * with different values — see `webSearchRequestsConflict`.
+	 */
+	webSearchRequests: number | null;
+	/** The provider reported contradicting web-search counts; none of them is trusted. */
+	webSearchRequestsConflict: boolean;
+}
+
+/**
+ * What the provider was actually asked to do on one structured call, as
+ * numbers and flags only — the fields a caller must be able to verify
+ * without seeing the request body.
+ */
+export interface StructuredResearchRequestSummary {
+	model: string;
+	webSearch: boolean;
+	/** Server-tool call budget sent with the request; `null` when no tool was sent. */
+	maxToolCalls: number | null;
+	/** `max_tokens` sent with the request; `null` when the provider default applied. */
+	maxOutputTokens: number | null;
 }
 
 export interface StructuredResearchResult<T> {
 	object: T;
 	/** Resolved model id (after any `:online` suffixing etc.). */
 	modelVersion?: string;
+	usage?: StructuredResearchUsage;
+	request?: StructuredResearchRequestSummary;
 }
 
 /**

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { WEB_QUERIES_UNAVAILABLE } from "../../constants";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../config";
-import { openrouter } from "./openrouter";
+import { openrouter, parseOpenRouterUsage } from "./openrouter";
 
 function stubFetch(
 	overrides: Record<string, unknown> = {},
@@ -249,7 +249,108 @@ describe("openrouter runStructuredResearch", () => {
 		});
 		expectWebSearchContract(body);
 		expect(body).not.toHaveProperty("max_tokens");
-		expect(result).toEqual({ object: structured, modelVersion: "openai/gpt-5-mini" });
+		expect(result).toEqual({
+			object: structured,
+			modelVersion: "openai/gpt-5-mini",
+			request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: null },
+		});
+	});
+
+	it("adds max_tokens only when a caller supplies maxOutputTokens; the default request is unchanged", async () => {
+		const capped = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
+		const cappedResult = await openrouter.runStructuredResearch!({
+			prompt: "research",
+			schema,
+			webSearch: true,
+			maxOutputTokens: 8000,
+		});
+		const cappedBody = sentRequest(capped).body;
+		expect(cappedBody.max_tokens).toBe(8000);
+		expect(cappedBody.model).toBe("openai/gpt-5-mini");
+		expectWebSearchContract(cappedBody);
+		// The summary is read back from the body that was sent, so it can be verified without the body.
+		expect(cappedResult.request).toEqual({
+			model: "openai/gpt-5-mini",
+			webSearch: true,
+			maxToolCalls: 1,
+			maxOutputTokens: 8000,
+		});
+
+		const plain = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
+		const plainResult = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: false });
+		expect(sentRequest(plain).body).not.toHaveProperty("max_tokens");
+		expect(plainResult.request).toEqual({
+			model: "openai/gpt-5-mini",
+			webSearch: false,
+			maxToolCalls: null,
+			maxOutputTokens: null,
+		});
+	});
+
+	it("returns only safe numeric usage — tokens, reasoning tokens, charged cost, web-search count", async () => {
+		const fetchMock = stubFetch({
+			choices: [{ message: { content: JSON.stringify(structured) } }],
+			usage: {
+				prompt_tokens: 6410,
+				completion_tokens: 812,
+				total_tokens: 7222,
+				cost: 0.0234,
+				cost_details: { upstream_inference_cost: 0.02 },
+				prompt_tokens_details: { cached_tokens: 0 },
+				completion_tokens_details: { reasoning_tokens: 300 },
+				server_tool_use: { web_search_requests: 1 },
+				is_byok: false,
+				api_key: "sk-or-must-not-leak",
+			},
+			id: "gen-secret-id",
+		});
+		const result = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: true });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.usage).toEqual({
+			inputTokens: 6410,
+			outputTokens: 812,
+			reasoningTokens: 300,
+			costUsd: 0.0234,
+			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
+		});
+		expect(JSON.stringify(result)).not.toMatch(/sk-or-|gen-secret-id|is_byok|upstream/);
+	});
+
+	it("parses the Responses-style variant in full and reports absent fields as null", async () => {
+		stubFetch({
+			choices: [{ message: { content: JSON.stringify(structured) } }],
+			usage: {
+				input_tokens: 10,
+				output_tokens: 5,
+				output_tokens_details: { reasoning_tokens: 2 },
+				cost: 0.004,
+				server_tool_use: { web_search_requests: 1 },
+				total_tokens: 15,
+				cost_details: { upstream_inference_cost: 0.003 },
+			},
+		});
+		const result = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: false });
+		expect(result.usage).toEqual({
+			inputTokens: 10,
+			outputTokens: 5,
+			reasoningTokens: 2,
+			costUsd: 0.004,
+			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
+		});
+		expect(JSON.stringify(result)).not.toMatch(/total_tokens|upstream/);
+		expect(parseOpenRouterUsage({ input_tokens: 10, output_tokens: 5 })).toEqual({
+			inputTokens: 10,
+			outputTokens: 5,
+			reasoningTokens: null,
+			costUsd: null,
+			webSearchRequests: null,
+			webSearchRequestsConflict: false,
+		});
+		expect(parseOpenRouterUsage(undefined)).toBeUndefined();
+		expect(parseOpenRouterUsage(null)).toBeUndefined();
+		expect(parseOpenRouterUsage("usage")).toBeUndefined();
 	});
 
 	it("defaults to web search when the option is omitted", async () => {
@@ -290,5 +391,159 @@ describe("openrouter runStructuredResearch", () => {
 				return true;
 			},
 		);
+	});
+});
+
+describe("parseOpenRouterUsage web-search counter", () => {
+	const empty = {
+		inputTokens: null,
+		outputTokens: null,
+		reasoningTokens: null,
+		costUsd: null,
+	};
+
+	it("reads the documented `server_tool_use` parent", () => {
+		expect(parseOpenRouterUsage({ server_tool_use: { web_search_requests: 1 } })).toEqual({
+			...empty,
+			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
+		});
+	});
+
+	it("reads the observed `server_tool_use_details` parent", () => {
+		expect(parseOpenRouterUsage({ server_tool_use_details: { web_search_requests: 1 } })).toEqual({
+			...empty,
+			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
+		});
+	});
+
+	it("accepts both parents when they agree", () => {
+		expect(
+			parseOpenRouterUsage({
+				server_tool_use: { web_search_requests: 2 },
+				server_tool_use_details: { web_search_requests: 2 },
+			}),
+		).toEqual({ ...empty, webSearchRequests: 2, webSearchRequestsConflict: false });
+	});
+
+	it("trusts neither parent when they disagree and flags the conflict", () => {
+		expect(
+			parseOpenRouterUsage({
+				server_tool_use: { web_search_requests: 1 },
+				server_tool_use_details: { web_search_requests: 3 },
+			}),
+		).toEqual({ ...empty, webSearchRequests: null, webSearchRequestsConflict: true });
+	});
+
+	it("uses the valid parent when the other is malformed, without a conflict", () => {
+		expect(
+			parseOpenRouterUsage({
+				server_tool_use: { web_search_requests: "1" },
+				server_tool_use_details: { web_search_requests: 1 },
+			}),
+		).toEqual({ ...empty, webSearchRequests: 1, webSearchRequestsConflict: false });
+		expect(parseOpenRouterUsage({ server_tool_use: "native", server_tool_use_details: null })).toEqual({
+			...empty,
+			webSearchRequests: null,
+			webSearchRequestsConflict: false,
+		});
+	});
+});
+
+describe("parseOpenRouterUsage numeric validation", () => {
+	const nothing = {
+		inputTokens: null,
+		outputTokens: null,
+		reasoningTokens: null,
+		costUsd: null,
+		webSearchRequests: null,
+		webSearchRequestsConflict: false,
+	};
+
+	it.each([
+		["strings", "12"],
+		["NaN", Number.NaN],
+		["Infinity", Number.POSITIVE_INFINITY],
+		["-Infinity", Number.NEGATIVE_INFINITY],
+		["negative", -1],
+		["fractional", 1.5],
+		["boolean", true],
+		["object", { value: 1 }],
+		["null", null],
+	])("reports a %s count as null everywhere", (_label, value) => {
+		expect(
+			parseOpenRouterUsage({
+				prompt_tokens: value,
+				completion_tokens: value,
+				completion_tokens_details: { reasoning_tokens: value },
+				server_tool_use: { web_search_requests: value },
+			}),
+		).toEqual(nothing);
+	});
+
+	it.each([
+		["string", "0.5"],
+		["NaN", Number.NaN],
+		["Infinity", Number.POSITIVE_INFINITY],
+		["negative", -0.01],
+		["boolean", false],
+	])("reports a %s cost as null", (_label, value) => {
+		expect(parseOpenRouterUsage({ cost: value })).toEqual(nothing);
+	});
+
+	it("accepts a fractional non-negative cost and integer counts including zero", () => {
+		expect(
+			parseOpenRouterUsage({
+				prompt_tokens: 0,
+				completion_tokens: 8000,
+				completion_tokens_details: { reasoning_tokens: 0 },
+				cost: 0,
+				server_tool_use: { web_search_requests: 0 },
+			}),
+		).toEqual({
+			inputTokens: 0,
+			outputTokens: 8000,
+			reasoningTokens: 0,
+			costUsd: 0,
+			webSearchRequests: 0,
+			webSearchRequestsConflict: false,
+		});
+		expect(parseOpenRouterUsage({ cost: 0.0312 })?.costUsd).toBe(0.0312);
+	});
+
+	it("does not fall back to the alternative token key when the documented key is present but invalid", () => {
+		expect(parseOpenRouterUsage({ prompt_tokens: "7", input_tokens: 7 })?.inputTokens).toBeNull();
+		expect(parseOpenRouterUsage({ completion_tokens: -1, output_tokens: 9 })?.outputTokens).toBeNull();
+		expect(
+			parseOpenRouterUsage({
+				completion_tokens_details: { reasoning_tokens: 1.5 },
+				output_tokens_details: { reasoning_tokens: 2 },
+			})?.reasoningTokens,
+		).toBeNull();
+	});
+
+	it("retains no other field, id, credential or nested detail of the payload", () => {
+		const usage = parseOpenRouterUsage({
+			prompt_tokens: 1,
+			completion_tokens: 2,
+			cost: 0.1,
+			cost_details: { upstream_inference_cost: 0.09 },
+			prompt_tokens_details: { cached_tokens: 1 },
+			total_tokens: 3,
+			is_byok: true,
+			api_key: "sk-or-must-not-leak",
+			request_id: "req-1",
+			server_tool_use: { web_search_requests: 1, other_tool: 4 },
+		});
+		expect(Object.keys(usage ?? {}).sort()).toEqual([
+			"costUsd",
+			"inputTokens",
+			"outputTokens",
+			"reasoningTokens",
+			"webSearchRequests",
+			"webSearchRequestsConflict",
+		]);
+		expect(JSON.stringify(usage)).not.toMatch(/sk-or-|req-1|byok|upstream|cached|other_tool|total/);
 	});
 });

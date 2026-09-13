@@ -1,3 +1,4 @@
+import type { StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
 import { classifySentiment, type SentimentClassifierDeps, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import {
@@ -34,7 +35,14 @@ import {
 } from "./types";
 
 export type SentimentJobOutcome =
-	| { status: "classified"; entities: number }
+	| {
+			status: "classified";
+			entities: number;
+			/** Entity keys the classification covered: the brand key or competitor ids, never names or text. */
+			entityKeys: string[];
+			usage?: StructuredResearchUsage;
+			request?: StructuredResearchRequestSummary;
+	  }
 	| { status: "already-completed" }
 	| { status: "claimed-elsewhere"; analysisStatus: string }
 	/** The attempt ran but a later attempt took the row over; nothing of this attempt was written. */
@@ -113,10 +121,32 @@ async function classifyAndPersist(
 		// response body, the answer or a header and is dropped here.
 		const safe = sanitizeSentimentError(error);
 		const owned = await failAttempt(claim, safe, deps);
-		await recordUsage({ ...usage, provider: safe.provider, model: safe.model, succeeded: false });
+		if (safe.requestSent) {
+			await recordUsage({ ...usage, provider: safe.provider, model: safe.model, succeeded: false });
+		}
 		if (!owned) return { status: "claim-lost", generation: claim.generation };
 		throw new SentimentJobError(safe);
 	}
+	// From here on the provider has answered and charged for the call. Whatever
+	// happens next, that call is attributed exactly once, as the paid success it
+	// was, with the cost the provider reported — and a failure to attribute it
+	// never replaces the error that made the attempt fail.
+	let attributed = false;
+	const attributePaidCall = async () => {
+		if (attributed) return;
+		attributed = true;
+		try {
+			await recordUsage({
+				...usage,
+				provider: classification.provider,
+				model: classification.model,
+				succeeded: true,
+				actualCostUsd: classification.usage?.costUsd ?? null,
+			});
+		} catch (error) {
+			console.error("sentiment usage attribution failed:", error instanceof Error ? error.name : typeof error);
+		}
+	};
 	try {
 		await (deps.persist ?? persistClassification)({
 			claim,
@@ -126,16 +156,25 @@ async function classifyAndPersist(
 			classification,
 		});
 	} catch (error) {
-		if (error instanceof ClaimLostError) {
-			await recordUsage({ ...usage, provider: classification.provider, model: classification.model, succeeded: true });
-			return { status: "claim-lost", generation: claim.generation };
-		}
-		const safe = sanitizeSentimentError(error);
-		await failAttempt(claim, safe, deps);
+		await attributePaidCall();
+		if (error instanceof ClaimLostError) return { status: "claim-lost", generation: claim.generation };
+		// The transaction rolled back: no observation exists and the analysis
+		// is still ours; it ends as failed with the persistence code (or the
+		// abort code when the caller cancelled between answer and write),
+		// never as a provider failure.
+		const safe = sanitizeSentimentError(error, "persist");
+		const owned = await failAttempt(claim, safe, deps);
+		if (!owned) return { status: "claim-lost", generation: claim.generation };
 		throw new SentimentJobError(safe);
 	}
-	await recordUsage({ ...usage, provider: classification.provider, model: classification.model, succeeded: true });
-	return { status: "classified", entities: classification.entities.length };
+	await attributePaidCall();
+	return {
+		status: "classified",
+		entities: classification.entities.length,
+		entityKeys: classification.entities.map((entity) => entity.key),
+		usage: classification.usage,
+		request: classification.request,
+	};
 }
 
 /**

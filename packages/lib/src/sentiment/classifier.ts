@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { Provider } from "../providers/types";
+import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../providers/config";
+import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import { type IndexedText, normalizeIndexed, normalizeText } from "./text";
@@ -54,7 +55,18 @@ export interface SentimentClassification {
 	classifierVersion: string;
 	taxonomyVersion: string;
 	inputHash: string;
+	/** Safe numeric usage of the call (tokens, charged cost, web searches); undefined when the provider reported none. */
+	usage?: StructuredResearchUsage;
+	/** What the provider was asked to do (model, web search, tool budget, output cap); undefined when it did not report it. */
+	request?: StructuredResearchRequestSummary;
 }
+
+/**
+ * Hard output cap for every sentiment call: the provider table's OpenRouter
+ * limit. Bounds the completion (and reasoning) tokens one classification can
+ * be billed for; the structured answer needs a small fraction of it.
+ */
+export const SENTIMENT_MAX_OUTPUT_TOKENS = API_PROVIDER_MAX_OUTPUT_TOKENS.openrouter;
 
 /**
  * The exact classifier input in canonical form: the normalized answer body
@@ -239,6 +251,7 @@ export async function classifySentiment(
 		schema: sentimentClassificationResultSchema,
 		webSearch: true,
 		signal,
+		maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,
 	});
 	if (provider.id === SENTIMENT_PROVIDER_ID && result.modelVersion !== SENTIMENT_MODEL) {
 		throw new SentimentValidationError(
@@ -255,5 +268,7 @@ export async function classifySentiment(
 		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 		inputHash: sentimentInputHash(args.answerBody, args.candidates),
+		usage: result.usage,
+		request: result.request,
 	};
 }

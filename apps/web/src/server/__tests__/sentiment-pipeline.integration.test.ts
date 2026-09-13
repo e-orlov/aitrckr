@@ -33,6 +33,8 @@ const { explainSentimentEvidence, loadRunSources, loadSentimentEvidence, loadSen
 );
 const { loadMentions } = await import("@workspace/lib/sentiment");
 type Provider = import("@workspace/lib/providers/types").Provider;
+type StructuredResearchUsage = import("@workspace/lib/providers/types").StructuredResearchUsage;
+type StructuredResearchRequestSummary = import("@workspace/lib/providers/types").StructuredResearchRequestSummary;
 
 const ORG = "default";
 const BRAND = "sent-pipe-brand";
@@ -47,6 +49,8 @@ const RUN_DELETE = "5e970004-0000-4000-8000-000000000204";
 const RUN_ALIAS = "5e970004-0000-4000-8000-000000000205";
 const RUN_SOURCES = "5e970004-0000-4000-8000-000000000206";
 const RUN_OLD_TAXONOMY = "5e970004-0000-4000-8000-000000000207";
+const RUN_PERSIST_FAIL = "5e970004-0000-4000-8000-000000000208";
+const RUN_CANARY = "5e970004-0000-4000-8000-000000000209";
 const ALIAS_ANSWER = "Only the alias Alphaline shows up in this answer, nothing else does.";
 const ANSWER = "Alpha handles claims fast and fairly. Newco is also mentioned. Sent Pipe is fine.";
 
@@ -61,7 +65,15 @@ const count = async (table: string, where = "brand_id = $1", params: unknown[] =
 	(await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table} WHERE ${where}`, params)).rows[0].n;
 
 /** A provider double answering every candidate key it is asked about, optionally holding at the provider boundary. */
-function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void } = {}): Provider {
+function fakeProvider(
+	options: {
+		hold?: Promise<void>;
+		onCall?: () => void;
+		costUsd?: number;
+		usage?: StructuredResearchUsage;
+		request?: StructuredResearchRequestSummary;
+	} = {},
+): Provider {
 	return {
 		id: "fake-openrouter",
 		name: "Fake",
@@ -102,7 +114,23 @@ function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void } = {
 							: [],
 				})),
 			});
-			return { object: object as T, modelVersion: SENTIMENT_MODEL };
+			return {
+				object: object as T,
+				modelVersion: SENTIMENT_MODEL,
+				request: options.request,
+				usage:
+					options.usage ??
+					(options.costUsd === undefined
+						? undefined
+						: {
+								inputTokens: 7000,
+								outputTokens: 900,
+								reasoningTokens: 400,
+								costUsd: options.costUsd,
+								webSearchRequests: 1,
+								webSearchRequestsConflict: false,
+							}),
+			};
 		},
 	} as unknown as Provider;
 }
@@ -273,7 +301,7 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 		});
 		// Safety valve: a second winner would deadlock on the barrier; release after 5 s so the assertions fail instead.
 		const valve = setTimeout(release, 5000);
-		const provider = fakeProvider({ hold: barrier, onCall: () => calls++ });
+		const provider = fakeProvider({ hold: barrier, onCall: () => calls++, costUsd: 0.0312 });
 		const outcomes = await Promise.all(
 			Array.from({ length: N }, () =>
 				runSentimentJob(payload, { resolveProvider: () => provider }).then((outcome) => {
@@ -315,6 +343,18 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 			),
 		).toBe(1);
 		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification'", [BRAND])).toBe(1);
+		// The provider's charged cost is what the success event records.
+		const [chargedEvent] = (
+			await client.query<{ estimated_cost_usd: string; provider: string; model: string }>(
+				"SELECT estimated_cost_usd, provider, model FROM usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification'",
+				[BRAND],
+			)
+		).rows;
+		expect(chargedEvent).toEqual({
+			estimated_cost_usd: "0.031200",
+			provider: "fake-openrouter",
+			model: SENTIMENT_MODEL,
+		});
 		expect(
 			await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'", [BRAND]),
 		).toBe(0);
@@ -346,7 +386,7 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 			"UPDATE sentiment_analyses SET status = 'processing', started_at = now() - interval '16 minutes' WHERE prompt_run_id = $1",
 			[RUN_MENTIONS],
 		);
-		expect(await runSentimentJob(payload, { resolveProvider: () => provider })).toEqual({
+		expect(await runSentimentJob(payload, { resolveProvider: () => provider })).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
@@ -414,7 +454,7 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 		).rows;
 		expect(event).toEqual({ provider: "openrouter", model: SENTIMENT_MODEL, web_search_enabled: true });
 		// Recover for the following tests.
-		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toEqual({
+		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
@@ -542,11 +582,21 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 		const inventory = await runSentimentEnqueue({ enqueue: false, brandId: BRAND });
 		expect(inventory.counts).toMatchObject({ completed: 0, eligible: 1, eligibleStale: 1 });
 		let calls = 0;
-		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider({ onCall: () => calls++ }) })).toEqual({
+		expect(
+			await runSentimentJob(payload, { resolveProvider: () => fakeProvider({ onCall: () => calls++ }) }),
+		).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
 		expect(calls).toBe(1);
+		// No usage reported by the provider → the tunable estimate (null for an unknown provider id), never a fabricated cost.
+		const events = (
+			await client.query<{ estimated_cost_usd: string | null }>(
+				"SELECT estimated_cost_usd FROM usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification' ORDER BY created_at DESC LIMIT 1",
+				[BRAND],
+			)
+		).rows;
+		expect(events[0].estimated_cost_usd).toBeNull();
 		expect(await count("sentiment_analyses", "prompt_run_id = $1", [RUN_MENTIONS])).toBe(1);
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_MENTIONS])).toBe(2);
 		expect((await runSentimentEnqueue({ enqueue: false, brandId: BRAND })).counts).toMatchObject({
@@ -579,7 +629,7 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			eligible: 1,
 			eligibleStale: 1,
 		});
-		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toEqual({
+		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toMatchObject({
 			status: "classified",
 			entities: 3,
 		});
@@ -603,7 +653,7 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			timezone: "UTC",
 		});
 		expect(overview.entities.find((e) => e.key === ALPHA)?.classified).toBe(0);
-		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toEqual({
+		expect(await runSentimentJob(payload, { resolveProvider: () => fakeProvider() })).toMatchObject({
 			status: "classified",
 			entities: 3,
 		});
@@ -639,7 +689,7 @@ describe("IT-SNT-014 superseded mention lifecycle", () => {
 		} as unknown as Provider;
 		expect(
 			await runSentimentJob({ ...payload, promptRunId: RUN_ALIAS }, { resolveProvider: () => aliasProvider }),
-		).toEqual({ status: "classified", entities: 1 });
+		).toMatchObject({ status: "classified", entities: 1 });
 		const overviewBefore = await loadSentimentOverview({
 			brandId: BRAND,
 			lookback: "1m",
@@ -886,6 +936,208 @@ describe("IT-SNT-007 bounded evidence at high cardinality (B5)", () => {
 	});
 });
 
+describe("IT-SNT-018 usage attribution when the write fails after a paid answer (C4)", () => {
+	it("one provider call, a real write failure: one success usage event with the charged cost, analysis failed, no observation rows, recoverable", {
+		timeout: 120_000,
+	}, async () => {
+		await insertRun(RUN_PERSIST_FAIL, PROMPT, { choices: [{ message: { content: ANSWER } }] }, 3);
+		await runMentionBackfill({ apply: true, brandId: BRAND });
+		const { persistClassification } = await import("@workspace/lib/sentiment");
+		const eventsBefore = await count("usage_events");
+		const failedBefore = await count(
+			"usage_events",
+			"brand_id = $1 AND event_type = 'sentiment_classification_failed'",
+		);
+		let calls = 0;
+		const provider = fakeProvider({ onCall: () => calls++, costUsd: 0.0456 });
+		// A mention row disappears between the provider's answer and the write: the
+		// observation insert violates the FK on `mention_id` inside the real transaction.
+		const persist: typeof persistClassification = async (args) => {
+			await client.query("DELETE FROM prompt_run_entity_mentions WHERE prompt_run_id = $1 AND entity_key = $2", [
+				RUN_PERSIST_FAIL,
+				ALPHA,
+			]);
+			return persistClassification(args);
+		};
+		let thrown: unknown;
+		try {
+			await runSentimentJob(
+				{ ...payload, promptRunId: RUN_PERSIST_FAIL },
+				{ resolveProvider: () => provider, persist },
+			);
+		} catch (error) {
+			thrown = error;
+		}
+		expect(calls).toBe(1);
+		expect(thrown).toMatchObject({ name: "SentimentJobError", code: "persistence", kind: "store", httpStatus: null });
+		const thrownText = JSON.stringify(thrown, Object.getOwnPropertyNames(thrown as object)) + String(thrown);
+		for (const forbidden of ["violates", "foreign key", "23503", "mention_id", ANSWER])
+			expect(thrownText).not.toContain(forbidden);
+
+		// Exactly one new usage event: the paid success, with the cost the provider reported.
+		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
+			failedBefore,
+		);
+		const [event] = (
+			await client.query<{ event_type: string; estimated_cost_usd: string; provider: string; model: string }>(
+				"SELECT event_type, estimated_cost_usd, provider, model FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 1",
+				[BRAND],
+			)
+		).rows;
+		expect(event).toEqual({
+			event_type: "sentiment_classification",
+			estimated_cost_usd: "0.045600",
+			provider: "fake-openrouter",
+			model: SENTIMENT_MODEL,
+		});
+
+		// The analysis is ours and failed with the persistence code; the rolled-back write left nothing behind.
+		const [analysis] = (
+			await client.query<{ status: string; error_code: string; error_message: string; attempts: number }>(
+				"SELECT status, error_code, error_message, attempts FROM sentiment_analyses WHERE prompt_run_id = $1",
+				[RUN_PERSIST_FAIL],
+			)
+		).rows;
+		expect(analysis).toMatchObject({ status: "failed", error_code: "persistence", attempts: 1 });
+		expect(analysis.error_message).toMatch(/^store persistence \(\w+\) via openrouter\/openai\/gpt-5-mini$/);
+		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(0);
+		expect(
+			await count(
+				"sentiment_aspect_observations",
+				"observation_id IN (SELECT id FROM sentiment_observations WHERE prompt_run_id = $1)",
+				[RUN_PERSIST_FAIL],
+			),
+		).toBe(0);
+
+		// Once the mention rows are repaired, the next attempt completes normally and is attributed again.
+		await runMentionBackfill({ apply: true, brandId: BRAND });
+		expect(
+			await runSentimentJob({ ...payload, promptRunId: RUN_PERSIST_FAIL }, { resolveProvider: () => provider }),
+		).toMatchObject({ status: "classified", entities: 3 });
+		expect(calls).toBe(2);
+		expect(await count("usage_events")).toBe(eventsBefore + 2);
+		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(3);
+	});
+});
+
+describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
+	const lockedRequest: StructuredResearchRequestSummary = {
+		model: SENTIMENT_MODEL,
+		webSearch: true,
+		maxToolCalls: 1,
+		maxOutputTokens: 8000,
+	};
+	const usageOf = (over: Partial<StructuredResearchUsage>): StructuredResearchUsage => ({
+		inputTokens: 7000,
+		outputTokens: 900,
+		reasoningTokens: 400,
+		costUsd: 0.02,
+		webSearchRequests: 1,
+		webSearchRequestsConflict: false,
+		...over,
+	});
+	const analysisRow = async () =>
+		(
+			await client.query<{ status: string; error_code: string | null; attempts: number }>(
+				"SELECT status, error_code, attempts FROM sentiment_analyses WHERE prompt_run_id = $1",
+				[RUN_CANARY],
+			)
+		).rows[0];
+	const observations = () => count("sentiment_observations", "prompt_run_id = $1", [RUN_CANARY]);
+	const aspects = () =>
+		count(
+			"sentiment_aspect_observations",
+			"observation_id IN (SELECT id FROM sentiment_observations WHERE prompt_run_id = $1)",
+			[RUN_CANARY],
+		);
+	const newestEvent = async () =>
+		(
+			await client.query<{ event_type: string; estimated_cost_usd: string | null }>(
+				"SELECT event_type, estimated_cost_usd FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 1",
+				[BRAND],
+			)
+		).rows[0];
+
+	it("a rejected answer never becomes a completed analysis: cost above the threshold, then a conflicting search count, then an accepted call", {
+		timeout: 120_000,
+	}, async () => {
+		const { inspectSentimentCanaryRun, parseSentimentCanaryContract, runSentimentCanary } = await import(
+			"@workspace/lib/sentiment"
+		);
+		await insertRun(RUN_CANARY, PROMPT, { choices: [{ message: { content: ANSWER } }] }, 2);
+		await runMentionBackfill({ apply: true, brandId: BRAND });
+		const description = await inspectSentimentCanaryRun(RUN_CANARY);
+		expect(description?.entities.map((e) => e.key).sort()).toEqual(["brand", ALPHA, NEWCO].sort());
+		const contract = parseSentimentCanaryContract(description);
+		const fast = { deadlineMs: 5_000, watchdogMs: 10_000 };
+
+		// 1. Cost above the post-call threshold.
+		let calls = 0;
+		const eventsBefore = await count("usage_events");
+		const failedBefore = await count(
+			"usage_events",
+			"brand_id = $1 AND event_type = 'sentiment_classification_failed'",
+		);
+		const expensive = fakeProvider({
+			onCall: () => calls++,
+			usage: usageOf({ costUsd: 0.1001 }),
+			request: lockedRequest,
+		});
+		const rejected = await runSentimentCanary({ contract, deps: { resolveProvider: () => expensive }, ...fast });
+		expect(calls).toBe(1);
+		expect(rejected.providerCalls).toBe(1);
+		expect(rejected.verdict).toEqual({ status: "reject", reasons: [{ code: "cost-exceeded" }] });
+		expect(rejected.outcome).toMatchObject({ status: "error", code: "canary-contract" });
+		expect(await analysisRow()).toEqual({ status: "failed", error_code: "canary-contract", attempts: 1 });
+		expect(await observations()).toBe(0);
+		expect(await aspects()).toBe(0);
+		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
+			failedBefore,
+		);
+		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.100100" });
+
+		// 2. Conflicting web-search counters: rejected the same way, cost still attributed.
+		const conflicting = fakeProvider({
+			onCall: () => calls++,
+			usage: usageOf({ webSearchRequests: null, webSearchRequestsConflict: true, costUsd: 0.02 }),
+			request: lockedRequest,
+		});
+		const conflict = await runSentimentCanary({ contract, deps: { resolveProvider: () => conflicting }, ...fast });
+		expect(calls).toBe(2);
+		expect(conflict.providerCalls).toBe(1);
+		expect(conflict.verdict).toEqual({ status: "reject", reasons: [{ code: "web-search-count-conflict" }] });
+		expect(await analysisRow()).toEqual({ status: "failed", error_code: "canary-contract", attempts: 2 });
+		expect(await observations()).toBe(0);
+		expect(await count("usage_events")).toBe(eventsBefore + 2);
+		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.020000" });
+
+		// 3. Unknown (unreported) count: same outcome with the cost the provider did report.
+		const unknown = fakeProvider({
+			onCall: () => calls++,
+			usage: usageOf({ webSearchRequests: null, costUsd: 0.03 }),
+			request: lockedRequest,
+		});
+		const unreported = await runSentimentCanary({ contract, deps: { resolveProvider: () => unknown }, ...fast });
+		expect(unreported.verdict).toEqual({ status: "reject", reasons: [{ code: "web-search-count-unknown" }] });
+		expect(await observations()).toBe(0);
+		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.030000" });
+
+		// 4. A conforming answer is the only thing that persists.
+		const good = fakeProvider({ onCall: () => calls++, usage: usageOf({}), request: lockedRequest });
+		const accepted = await runSentimentCanary({ contract, deps: { resolveProvider: () => good }, ...fast });
+		expect(accepted.verdict).toEqual({ status: "accept" });
+		expect(calls).toBe(4);
+		expect(await analysisRow()).toEqual({ status: "completed", error_code: null, attempts: 4 });
+		expect(await observations()).toBe(3);
+		expect(await count("usage_events")).toBe(eventsBefore + 4);
+		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
+			failedBefore,
+		);
+	});
+});
+
 describe("IT-SNT-012 prompt deletion with a full sentiment graph (B6)", () => {
 	it("the existing deletion sequence succeeds and leaves no orphan sentiment rows", { timeout: 120_000 }, async () => {
 		await insertRun(RUN_DELETE, PROMPT_DELETE, { choices: [{ message: { content: ANSWER } }] }, 5);
@@ -898,7 +1150,7 @@ describe("IT-SNT-012 prompt deletion with a full sentiment graph (B6)", () => {
 		await ensureAnalysis({ promptRunId: RUN_DELETE, brandId: BRAND });
 		expect(
 			await runSentimentJob({ ...payload, promptRunId: RUN_DELETE }, { resolveProvider: () => fakeProvider() }),
-		).toEqual({ status: "classified", entities: 3 });
+		).toMatchObject({ status: "classified", entities: 3 });
 		expect(await count("sentiment_detections", "prompt_run_id = $1", [RUN_DELETE])).toBe(1);
 		expect(await count("prompt_run_entity_mentions", "prompt_run_id = $1", [RUN_DELETE])).toBe(3);
 		expect(await count("sentiment_analyses", "prompt_run_id = $1", [RUN_DELETE])).toBe(1);

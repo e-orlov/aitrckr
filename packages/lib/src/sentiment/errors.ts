@@ -14,16 +14,18 @@ export class ClaimLostError extends Error {
  * response body, an answer excerpt or a credential.
  */
 export interface SafeSentimentError {
-	/** Stable internal code: a validation code, `provider`, `aborted`, `provider-unconfigured`, `claim-lost` or `unknown`. */
+	/** Stable internal code: a validation code, `provider`, `aborted`, `provider-unconfigured`, `claim-lost`, `persistence`, `canary-contract`, `canary-input-drift` or `unknown`. */
 	code: string;
 	/** Which class of failure produced it (for diagnosis without payloads). */
-	kind: "validation" | "provider" | "aborted" | "configuration" | "claim" | "unknown";
+	kind: "validation" | "provider" | "aborted" | "configuration" | "claim" | "store" | "contract" | "unknown";
 	provider: string;
 	model: string;
 	/** HTTP status the provider answered with, when the error carried one. */
 	httpStatus: number | null;
 	/** Constructor name of the original error — a class name, never its message. */
 	errorName: string;
+	/** False when the attempt was refused before any request left; such an attempt is not attributed as provider usage. */
+	requestSent: boolean;
 }
 
 const HTTP_STATUS = /\((\d{3})\)/;
@@ -44,10 +46,17 @@ function nameOf(error: unknown): string {
  * Reduce any thrown value to its safe summary. Validation errors keep their
  * code (the codes are fixed identifiers, never excerpt text); provider errors
  * keep only the HTTP status parsed out of the message; everything else
- * collapses to its class name.
+ * collapses to its class name. `stage` says where the attempt failed: an
+ * unclassified error at the provider boundary is a provider failure, the
+ * same error while writing the result is a persistence failure — the two
+ * must never be confused, because only the second one happened after a paid
+ * call succeeded.
  */
-export function sanitizeSentimentError(error: unknown): SafeSentimentError {
-	const base = { provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL, errorName: nameOf(error) };
+export function sanitizeSentimentError(error: unknown, stage: "provider" | "persist" = "provider"): SafeSentimentError {
+	const base = { provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL, errorName: nameOf(error), requestSent: true };
+	if (error instanceof Error && error.name === "SentimentCanaryInputDriftError") {
+		return { ...base, code: "canary-input-drift", kind: "contract", httpStatus: null, requestSent: false };
+	}
 	if (error instanceof ClaimLostError) return { ...base, code: "claim-lost", kind: "claim", httpStatus: null };
 	if (error instanceof Error && error.name === "SentimentValidationError" && "code" in error) {
 		return { ...base, code: String((error as { code: unknown }).code), kind: "validation", httpStatus: null };
@@ -58,6 +67,10 @@ export function sanitizeSentimentError(error: unknown): SafeSentimentError {
 	if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
 		return { ...base, code: "aborted", kind: "aborted", httpStatus: null };
 	}
+	if (error instanceof Error && error.name === "SentimentCanaryContractError") {
+		return { ...base, code: "canary-contract", kind: "contract", httpStatus: null };
+	}
+	if (stage === "persist") return { ...base, code: "persistence", kind: "store", httpStatus: null };
 	if (error instanceof Error) {
 		return { ...base, code: "provider", kind: "provider", httpStatus: statusOf(error.message) };
 	}

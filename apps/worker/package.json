@@ -10,7 +10,8 @@
 		"check-types": "tsc --noEmit",
 		"test": "node --import tsx --test \"src/**/*.test.ts\"",
 		"backfill:source-classification": "tsx --env-file=../web/.env scripts/source-classification-backfill.ts",
-		"backfill:sentiment": "tsx --env-file=../web/.env scripts/sentiment-backfill.ts"
+		"backfill:sentiment": "tsx --env-file=../web/.env scripts/sentiment-backfill.ts",
+		"canary:sentiment": "tsx --env-file=../web/.env scripts/sentiment-canary.ts"
 	},
 	"dependencies": {
 		"@sentry/node": "^10.70.0",

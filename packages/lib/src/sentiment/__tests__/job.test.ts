@@ -124,7 +124,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("claims, classifies, persists atomically and records one success usage event", async () => {
 		const { d, usage } = deps();
 		const outcome = await runSentimentJob(payload, d);
-		expect(outcome).toEqual({ status: "classified", entities: 2 });
+		expect(outcome).toEqual({ status: "classified", entities: 2, entityKeys: ["brand", "c-huk"] });
 		expect(d.claimAnalysis).toHaveBeenCalledTimes(1);
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
@@ -134,6 +134,36 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(usage).toEqual([
 			expect.objectContaining({ succeeded: true, provider: "fake", model: "fake-model", promptId: run.promptId }),
 		]);
+	});
+
+	it("writes the provider's charged cost to the success usage event and falls back when usage is missing", async () => {
+		const withUsage = deps({
+			classify: vi.fn(async () => ({
+				...classification,
+				usage: {
+					inputTokens: 7000,
+					outputTokens: 900,
+					reasoningTokens: 400,
+					costUsd: 0.0312,
+					webSearchRequests: 1,
+					webSearchRequestsConflict: false,
+				},
+				request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+			})),
+		});
+		const outcome = await runSentimentJob(payload, withUsage.d);
+		expect(outcome).toMatchObject({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+			usage: { costUsd: 0.0312, webSearchRequests: 1 },
+			request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+		});
+		expect(withUsage.usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0312 })]);
+
+		const withoutUsage = deps();
+		await runSentimentJob(payload, withoutUsage.d);
+		expect(withoutUsage.usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: null })]);
 	});
 
 	it("forwards the job abort signal to the classifier", async () => {
@@ -153,6 +183,85 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(marks).toEqual([]);
 		// The paid call did happen and is attributed; only the result was discarded.
 		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
+	});
+
+	it("C4: a persistence failure after a paid answer attributes the call once with the charged cost, fails the analysis with the persistence code and writes nothing else", async () => {
+		const dbError = new Error(`insert or update on table "sentiment_observations" violates foreign key constraint`);
+		const { d, marks, usage } = deps({
+			classify: vi.fn(async () => ({
+				...classification,
+				usage: {
+					inputTokens: 7000,
+					outputTokens: 900,
+					reasoningTokens: 400,
+					costUsd: 0.0312,
+					webSearchRequests: 1,
+					webSearchRequestsConflict: false,
+				},
+			})),
+			persist: vi.fn(async () => {
+				throw dbError;
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({
+			name: "SentimentJobError",
+			code: "persistence",
+			kind: "store",
+			httpStatus: null,
+		});
+		expect(d.classify).toHaveBeenCalledTimes(1);
+		expect(usage).toEqual([
+			expect.objectContaining({ succeeded: true, actualCostUsd: 0.0312, provider: "fake", model: "fake-model" }),
+		]);
+		expect(marks).toEqual([
+			{
+				status: "failed",
+				errorCode: "persistence",
+				errorMessage: `store persistence (Error) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL}`,
+			},
+		]);
+	});
+
+	it("C4: a failing usage write does not replace the persistence error and is attempted only once", async () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const recordUsage = vi.fn(async () => {
+			throw new Error("usage_events insert failed");
+		});
+		const { d, marks } = deps({
+			recordUsage,
+			persist: vi.fn(async () => {
+				throw new Error("deadlock detected");
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "persistence", kind: "store" });
+		expect(recordUsage).toHaveBeenCalledTimes(1);
+		expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ succeeded: true }));
+		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "persistence" })]);
+		expect(error).toHaveBeenCalledWith("sentiment usage attribution failed:", "Error");
+		error.mockRestore();
+	});
+
+	it("C4: a persistence failure whose terminal write is refused still attributes the paid call once and ends claim-lost", async () => {
+		const { d, usage } = deps({
+			persist: vi.fn(async () => {
+				throw new Error("connection terminated unexpectedly");
+			}),
+			markAnalysis: vi.fn(async () => false),
+		});
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
+	});
+
+	it("C4: an abort raised at the persistence boundary after a paid answer is attributed as paid and marked aborted", async () => {
+		const { d, marks, usage } = deps({
+			classify: vi.fn(async () => ({ ...classification, usage: { ...classification.usage, costUsd: 0.02 } as never })),
+			persist: vi.fn(async () => {
+				throw new DOMException("cancelled before writing", "AbortError");
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "aborted", kind: "aborted" });
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.02 })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "aborted" })]);
 	});
 
 	it("fence: a failure whose terminal write is refused ends as claim-lost instead of failing the newer attempt", async () => {
@@ -198,7 +307,11 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("B2: an unscanned run is detected once, receipt and rows written together, before classifying", async () => {
 		const persistDetection = vi.fn(async () => mentions);
 		const { d } = deps({ loadDetection: vi.fn(async () => null), persistDetection });
-		expect(await runSentimentJob(payload, d)).toEqual({ status: "classified", entities: 2 });
+		expect(await runSentimentJob(payload, d)).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+		});
 		expect(persistDetection).toHaveBeenCalledTimes(1);
 		expect(persistDetection).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -240,7 +353,11 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("B8: a completed analysis with a stale input hash (new entity after a roster edit) is reclassified", async () => {
 		const staleHash = sentimentInputHash(run.answerBody ?? "", candidatesFromMentions(mentions.slice(0, 1), entities));
 		const { d } = deps({ analysis: { status: "completed", inputHash: staleHash } });
-		expect(await runSentimentJob(payload, d)).toEqual({ status: "classified", entities: 2 });
+		expect(await runSentimentJob(payload, d)).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+		});
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
 	});
@@ -249,9 +366,17 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		const taxonomy = deps({
 			analysis: { status: "completed", inputHash: currentHash, taxonomyVersion: "sent-aspects-v0" },
 		});
-		expect(await runSentimentJob(payload, taxonomy.d)).toEqual({ status: "classified", entities: 2 });
+		expect(await runSentimentJob(payload, taxonomy.d)).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+		});
 		const hashless = deps({ analysis: { status: "completed", inputHash: null } });
-		expect(await runSentimentJob(payload, hashless.d)).toEqual({ status: "classified", entities: 2 });
+		expect(await runSentimentJob(payload, hashless.d)).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+		});
 	});
 
 	it("a no_mentions analysis whose receipt still says no mentions is left alone", async () => {
@@ -353,9 +478,13 @@ describe("IT-SNT-002 queue policy and singleton dedupe", () => {
 		const createQueue = vi.fn(async () => undefined);
 		await ensureSentimentQueue({ createQueue, getQueue: async () => ({ policy: "exclusive" }) });
 		expect(createQueue).toHaveBeenCalledWith(SENTIMENT_QUEUE, SENTIMENT_QUEUE_OPTIONS);
-		expect(SENTIMENT_QUEUE_OPTIONS).toMatchObject({ policy: "exclusive", retryLimit: 3, retryBackoff: true });
-		expect(SENTIMENT_QUEUE_OPTIONS.expireInSeconds).toBeGreaterThan(60);
-		expect(SENTIMENT_QUEUE_OPTIONS.expireInSeconds).toBeLessThanOrEqual(3600);
+		expect(SENTIMENT_QUEUE_OPTIONS).toMatchObject({
+			policy: "exclusive",
+			retryLimit: 3,
+			retryDelay: 60,
+			retryBackoff: true,
+			expireInSeconds: 900,
+		});
 	});
 
 	it("fails fast when the existing queue carries another policy", async () => {

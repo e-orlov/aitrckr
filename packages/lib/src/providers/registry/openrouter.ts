@@ -8,7 +8,9 @@ import type {
 	ProviderOptions,
 	ScrapeResult,
 	StructuredResearchOptions,
+	StructuredResearchRequestSummary,
 	StructuredResearchResult,
+	StructuredResearchUsage,
 } from "../types";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
@@ -118,6 +120,77 @@ function extractCitationsFromOpenRouterResponse(data: any): Citation[] {
 	return citations;
 }
 
+/** A count: a finite, non-negative integer. Strings, NaN, ±Infinity, negatives and fractions are not reported. */
+const countOrNull = (value: unknown): number | null =>
+	typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** An amount: a finite, non-negative number. */
+const amountOrNull = (value: unknown): number | null =>
+	typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+
+const record = (value: unknown): Record<string, unknown> | undefined =>
+	value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+
+/**
+ * Chat-completions responses report `prompt_tokens`/`completion_tokens`,
+ * Responses-style payloads `input_tokens`/`output_tokens`. The documented
+ * chat key wins when present, whatever its value; the alternative is read
+ * only when the documented key is absent.
+ */
+function firstPresent(u: Record<string, unknown>, keys: readonly string[]): unknown {
+	for (const key of keys) if (u[key] !== undefined) return u[key];
+	return undefined;
+}
+
+/**
+ * The web-search counter has been observed under two parents:
+ * `server_tool_use` (documented) and `server_tool_use_details` (seen in
+ * live responses). Both are read; when both carry a valid count and the
+ * counts differ, neither is trusted and the conflict is reported.
+ */
+function webSearchRequests(
+	u: Record<string, unknown>,
+): Pick<StructuredResearchUsage, "webSearchRequests" | "webSearchRequestsConflict"> {
+	const reported = [record(u.server_tool_use), record(u.server_tool_use_details)]
+		.map((parent) => countOrNull(parent?.web_search_requests))
+		.filter((count): count is number => count !== null);
+	if (reported.length === 0) return { webSearchRequests: null, webSearchRequestsConflict: false };
+	if (reported.every((count) => count === reported[0])) {
+		return { webSearchRequests: reported[0], webSearchRequestsConflict: false };
+	}
+	return { webSearchRequests: null, webSearchRequestsConflict: true };
+}
+
+/**
+ * The numeric usage fields OpenRouter reports on every response (usage
+ * accounting is always on): token counts, the total charged `cost`, the
+ * reasoning-token detail and the web-search server-tool counter. Nothing
+ * else from the payload is retained, and nothing is coerced: a field that is
+ * not a valid number of its kind is reported as `null`.
+ */
+export function parseOpenRouterUsage(usage: unknown): StructuredResearchUsage | undefined {
+	const u = record(usage);
+	if (!u) return undefined;
+	const details = record(firstPresent(u, ["completion_tokens_details", "output_tokens_details"]));
+	return {
+		inputTokens: countOrNull(firstPresent(u, ["prompt_tokens", "input_tokens"])),
+		outputTokens: countOrNull(firstPresent(u, ["completion_tokens", "output_tokens"])),
+		reasoningTokens: countOrNull(details?.reasoning_tokens),
+		costUsd: amountOrNull(u.cost),
+		...webSearchRequests(u),
+	};
+}
+
+/** The verifiable part of a request body, read back from what is about to be sent. */
+function summarizeRequest(body: Record<string, unknown>): StructuredResearchRequestSummary {
+	return {
+		model: String(body.model),
+		webSearch: Array.isArray(body.tools) && body.tools.length > 0,
+		maxToolCalls: typeof body.max_tool_calls === "number" ? body.max_tool_calls : null,
+		maxOutputTokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
+	};
+}
+
 export const openrouter: Provider = {
 	id: "openrouter",
 	name: "OpenRouter",
@@ -133,6 +206,7 @@ export const openrouter: Provider = {
 		schema,
 		webSearch = true,
 		signal,
+		maxOutputTokens,
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
 		// Raw fetch (no AI SDK) so we can attach OpenRouter's server-tool fields
 		// — the AI SDK's OpenAI-compat path doesn't pass them through.
@@ -144,6 +218,7 @@ export const openrouter: Provider = {
 				type: "json_schema",
 				json_schema: { name: "research_output", strict: true, schema: jsonSchema },
 			},
+			...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
 			...(webSearch ? webSearchRequestFields() : {}),
 		};
 		const res = await fetch(OPENROUTER_API_URL, {
@@ -167,6 +242,8 @@ export const openrouter: Provider = {
 			// (e.g. "openai/gpt-5-mini" vs "openai/gpt-5-mini-2025-08-07") —
 			// matches what openai-api and anthropic-api do.
 			modelVersion: DEFAULT_RESEARCH_MODEL,
+			usage: parseOpenRouterUsage(data?.usage),
+			request: summarizeRequest(body),
 		};
 	},
 
