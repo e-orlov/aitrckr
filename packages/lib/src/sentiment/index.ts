@@ -11,11 +11,26 @@ export {
 } from "./backfill";
 export {
 	acceptCanaryRunId,
+	evaluateSentimentCanary,
+	inspectSentimentCanaryRun,
+	parseSentimentCanaryContract,
+	preflightSentimentCanary,
 	runSentimentCanary,
 	SENTIMENT_CANARY_DEADLINE_MS,
+	SENTIMENT_CANARY_LIMITS,
+	SENTIMENT_CANARY_REJECT_CODES,
 	SENTIMENT_CANARY_WATCHDOG_MS,
+	type SentimentCanaryContract,
+	type SentimentCanaryEntity,
 	SentimentCanaryError,
+	type SentimentCanaryOutcome,
+	type SentimentCanaryReason,
+	type SentimentCanaryRejectCode,
 	type SentimentCanaryReport,
+	type SentimentCanaryRunDescription,
+	type SentimentCanaryVerdict,
+	sentimentCanaryBodyDigest,
+	sentimentCanaryContractSchema,
 } from "./canary";
 export {
 	classifySentiment,

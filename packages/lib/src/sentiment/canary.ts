@@ -1,15 +1,123 @@
-import type { StructuredResearchUsage } from "../providers/types";
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import type {
+	Provider,
+	StructuredResearchOptions,
+	StructuredResearchRequestSummary,
+	StructuredResearchUsage,
+} from "../providers/types";
+import { SENTIMENT_MAX_OUTPUT_TOKENS } from "./classifier";
+import { type DetectableEntity, detectEntityMentions } from "./detector";
 import { runSentimentJob, type SentimentJobDeps, type SentimentJobOutcome } from "./job";
-import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION } from "./types";
+import { resolveSentimentProvider } from "./provider";
+import {
+	loadDetectableEntities,
+	loadDetection,
+	loadMentions,
+	loadRunForSentiment,
+	persistClassification,
+	type StoredMention,
+} from "./store";
+import {
+	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_MODEL,
+	SENTIMENT_PROVIDER_ID,
+	SENTIMENT_TAXONOMY_VERSION,
+} from "./types";
 
 /** Provider request deadline for the canary: the fetch is aborted after this. */
 export const SENTIMENT_CANARY_DEADLINE_MS = 120_000;
 /** Outer watchdog: the whole invocation fails no later than this, whatever the provider does. */
 export const SENTIMENT_CANARY_WATCHDOG_MS = 130_000;
 
+/**
+ * Post-call acceptance thresholds. None of them limits spending before the
+ * call — the pre-call limiters are `max_tokens` and `max_tool_calls` on the
+ * request; these decide whether the one call that happened is accepted.
+ */
+export const SENTIMENT_CANARY_LIMITS = Object.freeze({
+	maxCostUsd: 0.1,
+	maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,
+	webSearchRequests: 1,
+	maxToolCalls: 1,
+});
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Everything the canary must find exactly as frozen before it may spend, and
+ * exactly as expected afterwards. Authored by the operator from
+ * `inspectSentimentCanaryRun` and kept outside Git; it carries ids, a digest
+ * and versions — never the answer, the prompt or a credential.
+ */
+export const sentimentCanaryContractSchema = z.strictObject({
+	runId: z.string().regex(UUID),
+	promptId: z.string().regex(UUID),
+	brandId: z.string().min(1),
+	/** SHA-256 (hex) of the extracted answer body exactly as the classifier receives it. */
+	answerBodySha256: z.string().regex(/^[0-9a-f]{64}$/),
+	entities: z.array(z.strictObject({ key: z.string().min(1), entityType: z.enum(["brand", "competitor"]) })).min(1),
+	classifierVersion: z.string().min(1),
+	taxonomyVersion: z.string().min(1),
+	provider: z.string().min(1),
+	model: z.string().min(1),
+});
+
+export type SentimentCanaryContract = z.infer<typeof sentimentCanaryContractSchema>;
+export type SentimentCanaryEntity = SentimentCanaryContract["entities"][number];
+
+/** Stable reasons a canary is refused or rejected. Never carry text from the run, the prompt or the provider. */
+export const SENTIMENT_CANARY_REJECT_CODES = [
+	"contract-classifier-version",
+	"contract-taxonomy-version",
+	"contract-provider",
+	"contract-model",
+	"run-not-found",
+	"prompt-mismatch",
+	"brand-mismatch",
+	"body-unextractable",
+	"body-hash-mismatch",
+	"entity-unknown",
+	"entity-set-mismatch",
+	"attempts",
+	"provider-calls",
+	"job-outcome",
+	"watchdog",
+	"request-deadline",
+	"provider-error",
+	"provider-unconfigured",
+	"persistence-failed",
+	"validation",
+	"error",
+	"request-unverified",
+	"request-model",
+	"request-web-search",
+	"request-max-tool-calls",
+	"request-max-tokens",
+	"usage-missing",
+	"web-search-count-conflict",
+	"web-search-count-unknown",
+	"web-search-count",
+	"cost-missing",
+	"cost-exceeded",
+	"output-tokens-missing",
+	"output-tokens-exceeded",
+	"entities-mismatch",
+] as const;
+
+export type SentimentCanaryRejectCode = (typeof SENTIMENT_CANARY_REJECT_CODES)[number];
+
+/** A rejection reason: the stable code plus, where one exists, a stable qualifier (a status or an error code — never text). */
+export interface SentimentCanaryReason {
+	code: SentimentCanaryRejectCode;
+	detail?: string;
+}
+
+export type SentimentCanaryVerdict = { status: "accept" } | { status: "reject"; reasons: SentimentCanaryReason[] };
+
 export class SentimentCanaryError extends Error {
 	constructor(
-		readonly code: "invalid-run-id" | "not-frozen-run" | "watchdog",
+		readonly code: "invalid-run-id" | "not-frozen-run" | "watchdog" | "invalid-contract",
 		message: string,
 	) {
 		super(message);
@@ -17,23 +125,33 @@ export class SentimentCanaryError extends Error {
 	}
 }
 
+export type SentimentCanaryOutcome =
+	| {
+			status: SentimentJobOutcome["status"];
+			entities?: number;
+			entityKeys?: string[];
+			usage?: StructuredResearchUsage;
+			request?: StructuredResearchRequestSummary;
+	  }
+	| { status: "error"; name: string; code: string | null; httpStatus: number | null };
+
 export interface SentimentCanaryReport {
 	runId: string;
 	startedAt: string;
 	finishedAt: string;
 	durationMs: number;
-	/** `runSentimentJob` invocations made by this canary — always exactly 1 when the run id was accepted. */
-	attempts: 1;
-	outcome:
-		| { status: SentimentJobOutcome["status"]; entities?: number; usage?: StructuredResearchUsage }
-		| { status: "error"; name: string; code: string | null; httpStatus: number | null };
+	preflight: { status: "passed" } | { status: "refused"; reasons: SentimentCanaryReason[] };
+	/** `runSentimentJob` invocations made by this canary: 0 when refused before the call, otherwise exactly 1. */
+	attempts: 0 | 1;
+	/** Provider requests observed through the classifier's provider boundary. */
+	providerCalls: number;
+	outcome: SentimentCanaryOutcome | null;
+	verdict: SentimentCanaryVerdict;
 	deadlineMs: number;
 	watchdogMs: number;
 	classifierVersion: string;
 	taxonomyVersion: string;
 }
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Accept exactly one run id and only the frozen one. Anything else — a
@@ -52,71 +170,346 @@ export function acceptCanaryRunId(argv: readonly string[], frozenRunId: string):
 	return candidate.toLowerCase();
 }
 
+/** Parse an operator-authored contract; anything unknown or malformed is refused. */
+export function parseSentimentCanaryContract(raw: unknown): SentimentCanaryContract {
+	const parsed = sentimentCanaryContractSchema.safeParse(raw);
+	if (!parsed.success) {
+		const issue = parsed.error.issues[0];
+		throw new SentimentCanaryError(
+			"invalid-contract",
+			`contract ${issue?.path.join(".") || "root"}: ${issue?.code ?? "invalid"}`,
+		);
+	}
+	return { ...parsed.data, runId: parsed.data.runId.toLowerCase(), promptId: parsed.data.promptId.toLowerCase() };
+}
+
+/** The digest the contract freezes: SHA-256 of the extracted body, UTF-8. */
+export function sentimentCanaryBodyDigest(answerBody: string): string {
+	return createHash("sha256").update(answerBody, "utf8").digest("hex");
+}
+
+const entityToken = (entity: SentimentCanaryEntity) => `${entity.entityType}:${entity.key}`;
+
+function sameEntitySet(expected: readonly SentimentCanaryEntity[], actual: readonly SentimentCanaryEntity[]): boolean {
+	const want = new Set(expected.map(entityToken));
+	const have = new Set(actual.map(entityToken));
+	return want.size === have.size && [...want].every((token) => have.has(token));
+}
+
 /**
- * The one-shot paid canary: invoke the production job core exactly once for
- * the frozen run, with the provider request under `AbortSignal.timeout` and
- * the whole invocation under an outer watchdog. Nothing is enqueued, nothing
- * is retried — a failure ends here with a safe report; a further attempt
- * needs a new explicit authorization and invocation. Uses the same
- * classification and persistence path as the worker (`runSentimentJob`), so
- * what it writes is exactly what the queue path would write.
+ * The entities the job would classify for the run, resolved the way the job
+ * resolves them: the current detection receipt when one exists, otherwise a
+ * deterministic scan — without writing anything.
+ */
+async function resolveCanaryEntities(
+	run: { id: string; answerBody: string },
+	roster: DetectableEntity[],
+	deps: SentimentJobDeps,
+): Promise<SentimentCanaryEntity[]> {
+	const receipt = await (deps.loadDetection ?? loadDetection)(run.id);
+	const mentions: Pick<StoredMention, "key" | "entityType">[] = receipt
+		? receipt.status === "mentions"
+			? await (deps.loadMentions ?? loadMentions)(run.id)
+			: []
+		: detectEntityMentions(run.answerBody, roster);
+	return mentions.map((mention) => ({ key: mention.key, entityType: mention.entityType }));
+}
+
+export interface SentimentCanaryRunDescription {
+	runId: string;
+	promptId: string;
+	brandId: string;
+	answerBodySha256: string | null;
+	entities: SentimentCanaryEntity[];
+	classifierVersion: string;
+	taxonomyVersion: string;
+	provider: string;
+	model: string;
+}
+
+/**
+ * Read-only description of a stored run in contract form — what an operator
+ * freezes before authorizing the call. Contains no answer text.
+ */
+export async function inspectSentimentCanaryRun(
+	runId: string,
+	deps: SentimentJobDeps = {},
+): Promise<SentimentCanaryRunDescription | null> {
+	const run = await (deps.loadRun ?? loadRunForSentiment)(runId);
+	if (!run) return null;
+	const roster = await (deps.loadEntities ?? loadDetectableEntities)(run.brandId, "historical");
+	const entities =
+		run.answerBody === null
+			? []
+			: await resolveCanaryEntities({ id: run.id, answerBody: run.answerBody }, roster, deps);
+	return {
+		runId: run.id,
+		promptId: run.promptId,
+		brandId: run.brandId,
+		answerBodySha256: run.answerBody === null ? null : sentimentCanaryBodyDigest(run.answerBody),
+		entities,
+		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
+		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+		provider: SENTIMENT_PROVIDER_ID,
+		model: SENTIMENT_MODEL,
+	};
+}
+
+/**
+ * Everything that can be checked before the provider is involved: the
+ * contract still describes this code, the stored run is the frozen one (ids,
+ * body digest) and the job would classify exactly the frozen entity set.
+ * Any mismatch refuses the canary; no request leaves.
+ */
+export async function preflightSentimentCanary(
+	contract: SentimentCanaryContract,
+	deps: SentimentJobDeps = {},
+): Promise<SentimentCanaryReason[]> {
+	const reasons: SentimentCanaryReason[] = [];
+	if (contract.classifierVersion !== SENTIMENT_CLASSIFIER_VERSION)
+		reasons.push({ code: "contract-classifier-version" });
+	if (contract.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION) reasons.push({ code: "contract-taxonomy-version" });
+	if (contract.provider !== SENTIMENT_PROVIDER_ID) reasons.push({ code: "contract-provider" });
+	if (contract.model !== SENTIMENT_MODEL) reasons.push({ code: "contract-model" });
+
+	const run = await (deps.loadRun ?? loadRunForSentiment)(contract.runId);
+	if (!run) return [...reasons, { code: "run-not-found" }];
+	if (run.promptId.toLowerCase() !== contract.promptId) reasons.push({ code: "prompt-mismatch" });
+	if (run.brandId !== contract.brandId) reasons.push({ code: "brand-mismatch" });
+	if (run.answerBody === null) return [...reasons, { code: "body-unextractable" }];
+	if (sentimentCanaryBodyDigest(run.answerBody) !== contract.answerBodySha256) {
+		reasons.push({ code: "body-hash-mismatch" });
+	}
+
+	const roster = await (deps.loadEntities ?? loadDetectableEntities)(run.brandId, "historical");
+	const known = new Set(roster.map((entity) => `${entity.entityType}:${entity.key}`));
+	if (!contract.entities.every((entity) => known.has(entityToken(entity)))) reasons.push({ code: "entity-unknown" });
+	const actual = await resolveCanaryEntities({ id: run.id, answerBody: run.answerBody }, roster, deps);
+	if (!sameEntitySet(contract.entities, actual)) reasons.push({ code: "entity-set-mismatch" });
+	return reasons;
+}
+
+function isValidAmount(value: number | null | undefined): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * The post-call contract: exactly one attempt and one provider request, the
+ * request carried the locked model, web search, the tool budget and the
+ * output cap, the provider reported usage that fits every threshold, and the
+ * classification covers exactly the frozen entities.
+ */
+export function evaluateSentimentCanary(
+	contract: SentimentCanaryContract,
+	outcome: SentimentCanaryOutcome | null,
+	counts: { attempts: number; providerCalls: number },
+	limits: typeof SENTIMENT_CANARY_LIMITS = SENTIMENT_CANARY_LIMITS,
+): SentimentCanaryVerdict {
+	const reasons: SentimentCanaryReason[] = [];
+	if (counts.attempts !== 1) reasons.push({ code: "attempts", detail: String(counts.attempts) });
+	if (counts.providerCalls !== 1) reasons.push({ code: "provider-calls", detail: String(counts.providerCalls) });
+	if (!outcome) return { status: "reject", reasons: [...reasons, { code: "job-outcome", detail: "none" }] };
+
+	if (outcome.status === "error") {
+		reasons.push(rejectReasonForError(outcome));
+		return { status: "reject", reasons };
+	}
+	if (outcome.status !== "classified") {
+		reasons.push({ code: "job-outcome", detail: outcome.status });
+		return { status: "reject", reasons };
+	}
+
+	const request = outcome.request;
+	if (!request) reasons.push({ code: "request-unverified" });
+	else {
+		if (request.model !== contract.model) reasons.push({ code: "request-model" });
+		if (request.webSearch !== true) reasons.push({ code: "request-web-search" });
+		if (request.maxToolCalls !== limits.maxToolCalls) reasons.push({ code: "request-max-tool-calls" });
+		if (request.maxOutputTokens !== limits.maxOutputTokens) reasons.push({ code: "request-max-tokens" });
+	}
+
+	const usage = outcome.usage;
+	if (!usage) reasons.push({ code: "usage-missing" });
+	else {
+		if (usage.webSearchRequestsConflict) reasons.push({ code: "web-search-count-conflict" });
+		else if (usage.webSearchRequests === null) reasons.push({ code: "web-search-count-unknown" });
+		else if (usage.webSearchRequests !== limits.webSearchRequests) {
+			reasons.push({ code: "web-search-count", detail: String(usage.webSearchRequests) });
+		}
+		if (!isValidAmount(usage.costUsd)) reasons.push({ code: "cost-missing" });
+		else if (usage.costUsd > limits.maxCostUsd) reasons.push({ code: "cost-exceeded" });
+		if (!isValidAmount(usage.outputTokens)) reasons.push({ code: "output-tokens-missing" });
+		else if (usage.outputTokens > limits.maxOutputTokens) reasons.push({ code: "output-tokens-exceeded" });
+	}
+
+	const expectedKeys = new Set(contract.entities.map((entity) => entity.key));
+	const classifiedKeys = new Set(outcome.entityKeys ?? []);
+	if (
+		outcome.entityKeys === undefined ||
+		classifiedKeys.size !== outcome.entityKeys.length ||
+		classifiedKeys.size !== expectedKeys.size ||
+		![...expectedKeys].every((key) => classifiedKeys.has(key))
+	) {
+		reasons.push({ code: "entities-mismatch" });
+	}
+
+	return reasons.length === 0 ? { status: "accept" } : { status: "reject", reasons };
+}
+
+function rejectReasonForError(outcome: Extract<SentimentCanaryOutcome, { status: "error" }>): SentimentCanaryReason {
+	if (outcome.name === "SentimentCanaryError" && outcome.code === "watchdog") return { code: "watchdog" };
+	switch (outcome.code) {
+		case "aborted":
+			return { code: "request-deadline" };
+		case "provider":
+			return { code: "provider-error", detail: outcome.httpStatus === null ? undefined : String(outcome.httpStatus) };
+		case "provider-unconfigured":
+			return { code: "provider-unconfigured" };
+		case "persistence":
+			return { code: "persistence-failed" };
+		case null:
+			return { code: "error", detail: outcome.name };
+		default:
+			return outcome.code === "claim-lost" || outcome.code === "unknown"
+				? { code: "error", detail: outcome.code }
+				: { code: "validation", detail: outcome.code };
+	}
+}
+
+function safeOutcomeForError(error: unknown): SentimentCanaryOutcome {
+	const e = error as { name?: string; code?: unknown; httpStatus?: unknown };
+	return {
+		status: "error",
+		name: typeof e?.name === "string" ? e.name : "Error",
+		code: typeof e?.code === "string" ? e.code : null,
+		httpStatus: typeof e?.httpStatus === "number" ? e.httpStatus : null,
+	};
+}
+
+/**
+ * The one-shot paid canary. Preflight first (no request on any mismatch);
+ * then exactly one invocation of the production job core for the frozen run
+ * with one owned `AbortController`: its signal travels job → classifier →
+ * provider fetch, the request deadline aborts it, and the watchdog aborts it
+ * again and ends the invocation whatever the provider does. A result that
+ * arrives after the abort is still attributed as the paid call it was, but is
+ * never written — the persistence step refuses under an aborted signal.
+ * Nothing is enqueued and nothing is retried: a further attempt needs a new
+ * explicit authorization and a new invocation.
  */
 export async function runSentimentCanary(args: {
-	runId: string;
+	contract: SentimentCanaryContract;
 	deps?: SentimentJobDeps;
 	deadlineMs?: number;
 	watchdogMs?: number;
 	job?: typeof runSentimentJob;
+	limits?: typeof SENTIMENT_CANARY_LIMITS;
 }): Promise<SentimentCanaryReport> {
 	const deadlineMs = args.deadlineMs ?? SENTIMENT_CANARY_DEADLINE_MS;
 	const watchdogMs = args.watchdogMs ?? SENTIMENT_CANARY_WATCHDOG_MS;
 	if (watchdogMs <= deadlineMs)
 		throw new SentimentCanaryError("watchdog", "watchdog must outlast the request deadline");
 	const startedAt = new Date();
+	const base: SentimentJobDeps = args.deps ?? {};
+	const contract = args.contract;
+	const finish = (
+		report: Pick<SentimentCanaryReport, "preflight" | "attempts" | "providerCalls" | "outcome" | "verdict">,
+	): SentimentCanaryReport => {
+		const finishedAt = new Date();
+		return {
+			runId: contract.runId,
+			startedAt: startedAt.toISOString(),
+			finishedAt: finishedAt.toISOString(),
+			durationMs: finishedAt.getTime() - startedAt.getTime(),
+			...report,
+			deadlineMs,
+			watchdogMs,
+			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
+			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+		};
+	};
+
+	const refused = await preflightSentimentCanary(contract, base);
+	if (refused.length > 0) {
+		return finish({
+			preflight: { status: "refused", reasons: refused },
+			attempts: 0,
+			providerCalls: 0,
+			outcome: null,
+			verdict: { status: "reject", reasons: refused },
+		});
+	}
+
+	const controller = new AbortController();
+	let providerCalls = 0;
+	const resolveBase = base.resolveProvider ?? resolveSentimentProvider;
+	const deps: SentimentJobDeps = {
+		...base,
+		resolveProvider: (): Provider => {
+			const provider = resolveBase();
+			const research = provider.runStructuredResearch?.bind(provider);
+			if (!research) return provider;
+			return {
+				...provider,
+				runStructuredResearch<T>(options: StructuredResearchOptions<T>) {
+					providerCalls += 1;
+					return research(options);
+				},
+			};
+		},
+		persist: (persistArgs) => {
+			if (controller.signal.aborted) {
+				return Promise.reject(new DOMException("canary aborted before the write", "AbortError"));
+			}
+			return (base.persist ?? persistClassification)(persistArgs);
+		},
+	};
+
 	const payload = {
-		promptRunId: args.runId,
+		promptRunId: contract.runId,
 		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	};
+	const deadline = setTimeout(
+		() => controller.abort(new DOMException(`request deadline of ${deadlineMs} ms passed`, "TimeoutError")),
+		deadlineMs,
+	);
 	let watchdog: ReturnType<typeof setTimeout> | undefined;
 	const bark = new Promise<never>((_resolve, reject) => {
-		watchdog = setTimeout(
-			() => reject(new SentimentCanaryError("watchdog", `canary exceeded ${watchdogMs} ms`)),
-			watchdogMs,
-		);
+		watchdog = setTimeout(() => {
+			controller.abort(new DOMException(`watchdog of ${watchdogMs} ms passed`, "TimeoutError"));
+			reject(new SentimentCanaryError("watchdog", `canary exceeded ${watchdogMs} ms`));
+		}, watchdogMs);
 	});
-	let outcome: SentimentCanaryReport["outcome"];
+	let outcome: SentimentCanaryOutcome;
 	try {
-		const result = await Promise.race([
-			(args.job ?? runSentimentJob)(payload, args.deps ?? {}, { signal: AbortSignal.timeout(deadlineMs) }),
-			bark,
-		]);
+		const attempt = (args.job ?? runSentimentJob)(payload, deps, { signal: controller.signal });
+		// If the watchdog wins the race the attempt is abandoned; its eventual
+		// rejection must not surface as an unhandled rejection.
+		attempt.catch(() => {});
+		const result = await Promise.race([attempt, bark]);
 		outcome =
 			result.status === "classified"
-				? { status: result.status, entities: result.entities, usage: result.usage }
+				? {
+						status: result.status,
+						entities: result.entities,
+						entityKeys: result.entityKeys,
+						usage: result.usage,
+						request: result.request,
+					}
 				: { status: result.status };
 	} catch (error) {
-		const e = error as { name?: string; code?: unknown; httpStatus?: unknown };
-		outcome = {
-			status: "error",
-			name: typeof e?.name === "string" ? e.name : "Error",
-			code: typeof e?.code === "string" ? e.code : null,
-			httpStatus: typeof e?.httpStatus === "number" ? e.httpStatus : null,
-		};
+		outcome = safeOutcomeForError(error);
 	} finally {
+		clearTimeout(deadline);
 		if (watchdog) clearTimeout(watchdog);
 	}
-	const finishedAt = new Date();
-	return {
-		runId: args.runId,
-		startedAt: startedAt.toISOString(),
-		finishedAt: finishedAt.toISOString(),
-		durationMs: finishedAt.getTime() - startedAt.getTime(),
+	const counts = { attempts: 1 as const, providerCalls };
+	return finish({
+		preflight: { status: "passed" },
 		attempts: 1,
+		providerCalls,
 		outcome,
-		deadlineMs,
-		watchdogMs,
-		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
-		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
-	};
+		verdict: evaluateSentimentCanary(contract, outcome, counts, args.limits),
+	});
 }
