@@ -55,6 +55,8 @@ const RUN_CANARY_COST = "5e970004-0000-4000-8000-00000000020a";
 const RUN_CANARY_CONFLICT = "5e970004-0000-4000-8000-00000000020b";
 const RUN_CANARY_UNKNOWN = "5e970004-0000-4000-8000-00000000020c";
 const RUN_CANARY_RETRY = "5e970004-0000-4000-8000-00000000020d";
+const RUN_CANARY_RACE = "5e970004-0000-4000-8000-00000000020e";
+const RUN_CANARY_RACE2 = "5e970004-0000-4000-8000-00000000020f";
 const ALIAS_ANSWER = "Only the alias Alphaline shows up in this answer, nothing else does.";
 const ANSWER = "Alpha handles claims fast and fairly. Newco is also mentioned. Sent Pipe is fine.";
 
@@ -1238,6 +1240,135 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		expect(await observations(RUN_CANARY_RETRY)).toBe(0);
 		expect(await aspects(RUN_CANARY_RETRY)).toBe(0);
 		expect(await count("usage_events")).toBe(eventsBefore + 1);
+	});
+
+	it("IT-SNT-024: two canaries that both pass preflight race for the atomic pristine claim — exactly one reaches the provider, the loser writes nothing", {
+		timeout: 180_000,
+	}, async () => {
+		const {
+			claimAnalysis: claim,
+			ensureAnalysis: ensure,
+			inspectSentimentCanaryRunState,
+			runSentimentCanary,
+		} = await import("@workspace/lib/sentiment");
+		const contract = await pristineContract(RUN_CANARY_RACE, 6);
+		await ensure({ promptRunId: RUN_CANARY_RACE, brandId: BRAND });
+		expect(await analysisRow(RUN_CANARY_RACE)).toEqual({ status: "pending", error_code: null, attempts: 0 });
+		const eventsBefore = await count("usage_events");
+
+		// Barriers: B finishes preflight before A may claim; B may claim only after A has finished.
+		let releaseAClaim: () => void = () => {};
+		const aMayClaim = new Promise<void>((resolve) => {
+			releaseAClaim = resolve;
+		});
+		let releaseBClaim: () => void = () => {};
+		const bMayClaim = new Promise<void>((resolve) => {
+			releaseBClaim = resolve;
+		});
+		let aCalls = 0;
+		let bCalls = 0;
+		const providerA = {
+			...fakeProvider(),
+			id: "openrouter",
+			runStructuredResearch: async () => {
+				aCalls++;
+				throw new Error("OpenRouter API error (503): upstream unavailable");
+			},
+		} as unknown as Provider;
+		const providerB = fakeProvider({ onCall: () => bCalls++, usage: usageOf({}), request: lockedRequest });
+		const gatedClaim =
+			(gate: Promise<void>): typeof claim =>
+			async (analysisId, options, executor) => {
+				await gate;
+				return claim(analysisId, options, executor);
+			};
+		const { loadAnalysisState: loadState } = await import("@workspace/lib/sentiment");
+		const bPreflightSeen: typeof loadState = async (runId, executor) => {
+			const state = await loadState(runId, executor);
+			releaseAClaim();
+			return state;
+		};
+
+		const a = runSentimentCanary({
+			contract,
+			deps: { resolveProvider: () => providerA, claimAnalysis: gatedClaim(aMayClaim) },
+			...fast,
+		}).then((report) => {
+			releaseBClaim();
+			return report;
+		});
+		const b = runSentimentCanary({
+			contract,
+			deps: {
+				resolveProvider: () => providerB,
+				claimAnalysis: gatedClaim(bMayClaim),
+				loadAnalysisState: bPreflightSeen,
+			},
+			...fast,
+		});
+		const [reportA, reportB] = await Promise.all([a, b]);
+
+		expect(reportA.preflight).toEqual({ status: "passed" });
+		expect(reportB.preflight).toEqual({ status: "passed" });
+		expect(aCalls).toBe(1);
+		expect(reportA.providerCalls).toBe(1);
+		expect(reportA.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error", detail: "503" }] });
+
+		expect(bCalls).toBe(0);
+		expect(reportB.attempts).toBe(1);
+		expect(reportB.providerCalls).toBe(0);
+		expect(reportB.outcome).toEqual({ status: "claimed-elsewhere" });
+		expect(reportB.verdict).toEqual({ status: "reject", reasons: [{ code: "run-state-drift", detail: "failed" }] });
+
+		expect(await analysisRow(RUN_CANARY_RACE)).toEqual({ status: "failed", error_code: "provider", attempts: 1 });
+		expect(await observations(RUN_CANARY_RACE)).toBe(0);
+		expect(await aspects(RUN_CANARY_RACE)).toBe(0);
+		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		expect(await inspectSentimentCanaryRunState(RUN_CANARY_RACE)).toEqual({
+			analysis: { status: "failed", attempts: 1, observations: 0 },
+			pristine: false,
+		});
+	});
+
+	it("IT-SNT-024b: simultaneous pristine-only claims on one pending/0/0 row — exactly one winner, attempts 1; the worker claim still recovers a failed row", {
+		timeout: 180_000,
+	}, async () => {
+		const { claimAnalysis: claim, ensureAnalysis: ensure } = await import("@workspace/lib/sentiment");
+		await insertRun(RUN_CANARY_RACE2, PROMPT, { choices: [{ message: { content: ANSWER } }] }, 7);
+		const analysis = await ensure({ promptRunId: RUN_CANARY_RACE2, brandId: BRAND });
+		const outcomes = await Promise.all(
+			Array.from({ length: 8 }, () => claim(analysis.id, { allowFinished: true, pristineOnly: true })),
+		);
+		expect(outcomes.filter((o) => o.claimed)).toHaveLength(1);
+		expect(outcomes.filter((o) => !o.claimed).every((o) => o.status === "processing")).toBe(true);
+		expect(await analysisRow(RUN_CANARY_RACE2)).toEqual({ status: "processing", error_code: null, attempts: 1 });
+
+		// The observation check is part of the same UPDATE: a pending/0 row that already has an
+		// observation (for example a synthetic fixture) is not pristine either.
+		await runMentionBackfill({ apply: true, brandId: BRAND });
+		const [mention] = (
+			await client.query<{ id: string }>(
+				"SELECT id FROM prompt_run_entity_mentions WHERE prompt_run_id = $1 ORDER BY entity_key LIMIT 1",
+				[RUN_CANARY_RACE2],
+			)
+		).rows;
+		await client.query("UPDATE sentiment_analyses SET status = 'pending', attempts = 0 WHERE id = $1", [analysis.id]);
+		await client.query(
+			`INSERT INTO sentiment_observations (analysis_id, mention_id, prompt_run_id, brand_id, entity_type, competitor_id, entity_key, score, category, confidence, evidence)
+			 VALUES ($1, $2, $3, $4, 'brand', NULL, 'brand', 60, 'positive', 0.9, '[]')`,
+			[analysis.id, mention.id, RUN_CANARY_RACE2, BRAND],
+		);
+		expect((await claim(analysis.id, { allowFinished: true, pristineOnly: true })).claimed).toBe(false);
+		expect(await analysisRow(RUN_CANARY_RACE2)).toEqual({ status: "pending", error_code: null, attempts: 0 });
+		await client.query("DELETE FROM sentiment_observations WHERE analysis_id = $1", [analysis.id]);
+		// A failed row is not pristine for the canary …
+		await client.query("UPDATE sentiment_analyses SET status = 'failed', attempts = 1 WHERE id = $1", [analysis.id]);
+		expect((await claim(analysis.id, { allowFinished: true, pristineOnly: true })).claimed).toBe(false);
+		// … while the worker's own claim still retries it: normal semantics are untouched.
+		const worker = await claim(analysis.id, { allowFinished: true });
+		expect(worker.claimed).toBe(true);
+		expect(await analysisRow(RUN_CANARY_RACE2)).toEqual({ status: "processing", error_code: null, attempts: 2 });
+		await client.query("UPDATE sentiment_analyses SET status = 'failed' WHERE id = $1", [analysis.id]);
 	});
 });
 
