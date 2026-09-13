@@ -293,6 +293,64 @@ function isValidAmount(value: number | null | undefined): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+type Limits = typeof SENTIMENT_CANARY_LIMITS;
+
+function requestReasons(
+	request: StructuredResearchRequestSummary | undefined,
+	contract: SentimentCanaryContract,
+	limits: Limits,
+): SentimentCanaryReason[] {
+	if (!request) return [{ code: "request-unverified" }];
+	const reasons: SentimentCanaryReason[] = [];
+	if (request.model !== contract.model) reasons.push({ code: "request-model" });
+	if (request.webSearch !== true) reasons.push({ code: "request-web-search" });
+	if (request.maxToolCalls !== limits.maxToolCalls) reasons.push({ code: "request-max-tool-calls" });
+	if (request.maxOutputTokens !== limits.maxOutputTokens) reasons.push({ code: "request-max-tokens" });
+	return reasons;
+}
+
+function webSearchCountReason(usage: StructuredResearchUsage, limits: Limits): SentimentCanaryReason | null {
+	if (usage.webSearchRequestsConflict) return { code: "web-search-count-conflict" };
+	if (usage.webSearchRequests === null) return { code: "web-search-count-unknown" };
+	if (usage.webSearchRequests !== limits.webSearchRequests) {
+		return { code: "web-search-count", detail: String(usage.webSearchRequests) };
+	}
+	return null;
+}
+
+function boundedAmountReason(
+	value: number | null,
+	max: number,
+	codes: { missing: SentimentCanaryRejectCode; exceeded: SentimentCanaryRejectCode },
+): SentimentCanaryReason | null {
+	if (!isValidAmount(value)) return { code: codes.missing };
+	if (value > max) return { code: codes.exceeded };
+	return null;
+}
+
+function usageReasons(usage: StructuredResearchUsage | undefined, limits: Limits): SentimentCanaryReason[] {
+	if (!usage) return [{ code: "usage-missing" }];
+	return [
+		webSearchCountReason(usage, limits),
+		boundedAmountReason(usage.costUsd, limits.maxCostUsd, { missing: "cost-missing", exceeded: "cost-exceeded" }),
+		boundedAmountReason(usage.outputTokens, limits.maxOutputTokens, {
+			missing: "output-tokens-missing",
+			exceeded: "output-tokens-exceeded",
+		}),
+	].filter((reason): reason is SentimentCanaryReason => reason !== null);
+}
+
+function entityKeysMatch(contract: SentimentCanaryContract, entityKeys: string[] | undefined): boolean {
+	if (entityKeys === undefined) return false;
+	const expected = new Set(contract.entities.map((entity) => entity.key));
+	const classified = new Set(entityKeys);
+	return (
+		classified.size === entityKeys.length &&
+		classified.size === expected.size &&
+		[...expected].every((key) => classified.has(key))
+	);
+}
+
 /**
  * The post-call contract: exactly one attempt and one provider request, the
  * request carried the locked model, web search, the tool budget and the
@@ -303,56 +361,18 @@ export function evaluateSentimentCanary(
 	contract: SentimentCanaryContract,
 	outcome: SentimentCanaryOutcome | null,
 	counts: { attempts: number; providerCalls: number },
-	limits: typeof SENTIMENT_CANARY_LIMITS = SENTIMENT_CANARY_LIMITS,
+	limits: Limits = SENTIMENT_CANARY_LIMITS,
 ): SentimentCanaryVerdict {
 	const reasons: SentimentCanaryReason[] = [];
 	if (counts.attempts !== 1) reasons.push({ code: "attempts", detail: String(counts.attempts) });
 	if (counts.providerCalls !== 1) reasons.push({ code: "provider-calls", detail: String(counts.providerCalls) });
-	if (!outcome) return { status: "reject", reasons: [...reasons, { code: "job-outcome", detail: "none" }] };
-
-	if (outcome.status === "error") {
-		reasons.push(rejectReasonForError(outcome));
-		return { status: "reject", reasons };
-	}
-	if (outcome.status !== "classified") {
-		reasons.push({ code: "job-outcome", detail: outcome.status });
-		return { status: "reject", reasons };
-	}
-
-	const request = outcome.request;
-	if (!request) reasons.push({ code: "request-unverified" });
+	if (!outcome) reasons.push({ code: "job-outcome", detail: "none" });
+	else if (outcome.status === "error") reasons.push(rejectReasonForError(outcome));
+	else if (outcome.status !== "classified") reasons.push({ code: "job-outcome", detail: outcome.status });
 	else {
-		if (request.model !== contract.model) reasons.push({ code: "request-model" });
-		if (request.webSearch !== true) reasons.push({ code: "request-web-search" });
-		if (request.maxToolCalls !== limits.maxToolCalls) reasons.push({ code: "request-max-tool-calls" });
-		if (request.maxOutputTokens !== limits.maxOutputTokens) reasons.push({ code: "request-max-tokens" });
+		reasons.push(...requestReasons(outcome.request, contract, limits), ...usageReasons(outcome.usage, limits));
+		if (!entityKeysMatch(contract, outcome.entityKeys)) reasons.push({ code: "entities-mismatch" });
 	}
-
-	const usage = outcome.usage;
-	if (!usage) reasons.push({ code: "usage-missing" });
-	else {
-		if (usage.webSearchRequestsConflict) reasons.push({ code: "web-search-count-conflict" });
-		else if (usage.webSearchRequests === null) reasons.push({ code: "web-search-count-unknown" });
-		else if (usage.webSearchRequests !== limits.webSearchRequests) {
-			reasons.push({ code: "web-search-count", detail: String(usage.webSearchRequests) });
-		}
-		if (!isValidAmount(usage.costUsd)) reasons.push({ code: "cost-missing" });
-		else if (usage.costUsd > limits.maxCostUsd) reasons.push({ code: "cost-exceeded" });
-		if (!isValidAmount(usage.outputTokens)) reasons.push({ code: "output-tokens-missing" });
-		else if (usage.outputTokens > limits.maxOutputTokens) reasons.push({ code: "output-tokens-exceeded" });
-	}
-
-	const expectedKeys = new Set(contract.entities.map((entity) => entity.key));
-	const classifiedKeys = new Set(outcome.entityKeys ?? []);
-	if (
-		outcome.entityKeys === undefined ||
-		classifiedKeys.size !== outcome.entityKeys.length ||
-		classifiedKeys.size !== expectedKeys.size ||
-		![...expectedKeys].every((key) => classifiedKeys.has(key))
-	) {
-		reasons.push({ code: "entities-mismatch" });
-	}
-
 	return reasons.length === 0 ? { status: "accept" } : { status: "reject", reasons };
 }
 
