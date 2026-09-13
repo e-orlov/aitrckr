@@ -330,27 +330,39 @@ export async function inspectSentimentCanaryRun(
  * body digest) and the job would classify exactly the frozen entity set.
  * Any mismatch refuses the canary; no request leaves.
  */
-export async function preflightSentimentCanary(
-	contract: SentimentCanaryContract,
-	deps: SentimentJobDeps = {},
-): Promise<SentimentCanaryReason[]> {
+/** The contract must describe the code that is about to run. */
+function contractVersionReasons(contract: SentimentCanaryContract): SentimentCanaryReason[] {
 	const reasons: SentimentCanaryReason[] = [];
 	if (contract.classifierVersion !== SENTIMENT_CLASSIFIER_VERSION)
 		reasons.push({ code: "contract-classifier-version" });
 	if (contract.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION) reasons.push({ code: "contract-taxonomy-version" });
 	if (contract.provider !== SENTIMENT_PROVIDER_ID) reasons.push({ code: "contract-provider" });
 	if (contract.model !== SENTIMENT_MODEL) reasons.push({ code: "contract-model" });
+	return reasons;
+}
 
+/**
+ * The canary must be the first classification of its run: a completed
+ * analysis or any observation (for example from an acceptance fixture) means
+ * the run is not the pristine one that was frozen — refuse rather than skip
+ * silently or expect a manual reset.
+ */
+async function pristineRunReasons(runId: string, deps: SentimentJobDeps): Promise<SentimentCanaryReason[]> {
+	const analysis = await (deps.loadAnalysisState ?? loadAnalysisState)(runId);
+	if (analysis && (analysis.status === "completed" || analysis.observations > 0)) {
+		return [{ code: "run-already-classified", detail: analysis.status }];
+	}
+	return [];
+}
+
+export async function preflightSentimentCanary(
+	contract: SentimentCanaryContract,
+	deps: SentimentJobDeps = {},
+): Promise<SentimentCanaryReason[]> {
+	const reasons = contractVersionReasons(contract);
 	const run = await (deps.loadRun ?? loadRunForSentiment)(contract.runId);
 	if (!run) return [...reasons, { code: "run-not-found" }];
-	// The canary must be the first classification of its run: a completed
-	// analysis or any observation (for example from an acceptance fixture)
-	// means the run is not the pristine one that was frozen — refuse rather
-	// than skip silently or expect a manual reset.
-	const analysis = await (deps.loadAnalysisState ?? loadAnalysisState)(run.id);
-	if (analysis && (analysis.status === "completed" || analysis.observations > 0)) {
-		reasons.push({ code: "run-already-classified", detail: analysis.status });
-	}
+	reasons.push(...(await pristineRunReasons(run.id, deps)));
 	if (run.promptId.toLowerCase() !== contract.promptId) reasons.push({ code: "prompt-mismatch" });
 	if (run.brandId !== contract.brandId) reasons.push({ code: "brand-mismatch" });
 	if (run.answerBody === null) return [...reasons, { code: "body-unextractable" }];
