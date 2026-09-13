@@ -600,21 +600,25 @@ describe("E2: the exact classifier input is re-checked at the provider boundary"
 		await refusedAtBoundary({ loadEntities: drifting(entities, aliased) }, ["input-hash-drift", "prompt-hash-drift"]);
 	});
 
-	it("candidate order changed between preflight and the call: the canonical hash still matches, the literal prompt does not", async () => {
-		await refusedAtBoundary({ loadMentions: drifting(mentions, [...mentions].reverse()) }, ["prompt-hash-drift"]);
+	it("a different storage order of the same mentions between preflight and the call is not drift: one call, accepted", async () => {
+		const provider = goodProvider();
+		const { deps } = storeFakes(provider, { loadMentions: drifting(mentions, [...mentions].reverse()) });
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(report.preflight).toEqual({ status: "passed" });
+		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
+		expect(report.verdict).toEqual({ status: "accept" });
 	});
 
 	it("the digests the job computes are exactly the ones inspect froze", () => {
 		expect(frozenDigests.classifierInputHash).toMatch(/^[0-9a-f]{64}$/);
 		expect(frozenDigests.providerPromptSha256).toMatch(/^[0-9a-f]{64}$/);
 		expect(frozenDigests.classifierInputHash).not.toBe(frozenDigests.providerPromptSha256);
-		// Reordering candidates leaves the canonical hash alone and changes the prompt digest.
+		// Storage order is not part of the input: reordered mentions give the same canonical hash and the same prompt digest.
 		const reordered = sentimentCanaryInputDigests({
 			answerBody: ANSWER,
 			candidates: candidatesFromMentions([...mentions].reverse(), entities),
 		});
-		expect(reordered.classifierInputHash).toBe(frozenDigests.classifierInputHash);
-		expect(reordered.providerPromptSha256).not.toBe(frozenDigests.providerPromptSha256);
+		expect(reordered).toEqual(frozenDigests);
 	});
 });
 

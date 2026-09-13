@@ -30,6 +30,7 @@ import {
 	type SentimentAnalysisStatus,
 	type SentimentCandidate,
 	type SentimentDetectionStatus,
+	sortSentimentEntities,
 } from "./types";
 
 type Db = typeof db;
@@ -227,7 +228,13 @@ export async function loadDetection(promptRunId: string, executor: Executor = db
 	return row ?? null;
 }
 
-/** The current mention projection of a run: current detector version and not superseded. */
+/**
+ * The current mention projection of a run (current detector version, not
+ * superseded) in the canonical entity order. Row timestamps and ids never
+ * decide the order: rows written by one backfill transaction share a
+ * timestamp and their ids are random, so any order derived from them would
+ * differ between two databases holding the same data.
+ */
 export async function loadMentions(promptRunId: string, executor: Executor = db): Promise<StoredMention[]> {
 	const rows = await executor.query.promptRunEntityMentions.findMany({
 		where: and(
@@ -235,21 +242,22 @@ export async function loadMentions(promptRunId: string, executor: Executor = db)
 			eq(promptRunEntityMentions.detectorVersion, SENTIMENT_DETECTOR_VERSION),
 			isNull(promptRunEntityMentions.supersededAt),
 		),
-		orderBy: [promptRunEntityMentions.detectedAt, promptRunEntityMentions.id],
 	});
-	return rows.map((row) => ({
-		id: row.id,
-		key: row.entityKey,
-		entityType: row.entityType as "brand" | "competitor",
-		competitorId: row.competitorId,
-		entityName: row.entityName,
-	}));
+	return sortSentimentEntities(
+		rows.map((row) => ({
+			id: row.id,
+			key: row.entityKey,
+			entityType: row.entityType as "brand" | "competitor",
+			competitorId: row.competitorId,
+			entityName: row.entityName,
+		})),
+	);
 }
 
-/** Classifier candidates for stored mentions, with the names the model may use to disambiguate. */
+/** Classifier candidates for stored mentions, in canonical order, with the names the model may use to disambiguate. */
 export function candidatesFromMentions(mentions: StoredMention[], entities: DetectableEntity[]): SentimentCandidate[] {
 	const byKey = new Map(entities.map((entity) => [entity.key, entity]));
-	return mentions.map((mention) => {
+	return sortSentimentEntities(mentions).map((mention) => {
 		const entity = byKey.get(mention.key);
 		return {
 			key: mention.key,

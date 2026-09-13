@@ -26,6 +26,7 @@ import {
 	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentCandidate,
+	sortSentimentEntities,
 } from "./types";
 
 /** Provider request deadline for the canary: the fetch is aborted after this. */
@@ -203,7 +204,12 @@ export function parseSentimentCanaryContract(raw: unknown): SentimentCanaryContr
 			`contract ${issue?.path.join(".") || "root"}: ${issue?.code ?? "invalid"}`,
 		);
 	}
-	return { ...parsed.data, runId: parsed.data.runId.toLowerCase(), promptId: parsed.data.promptId.toLowerCase() };
+	return {
+		...parsed.data,
+		runId: parsed.data.runId.toLowerCase(),
+		promptId: parsed.data.promptId.toLowerCase(),
+		entities: sortSentimentEntities(parsed.data.entities),
+	};
 }
 
 /** The digest the contract freezes: SHA-256 of the extracted body, UTF-8. */
@@ -236,7 +242,7 @@ async function resolveCanaryInput(
 			: []
 		: detectEntityMentions(run.answerBody, roster);
 	return {
-		entities: mentions.map((mention) => ({ key: mention.key, entityType: mention.entityType })),
+		entities: sortSentimentEntities(mentions.map((mention) => ({ key: mention.key, entityType: mention.entityType }))),
 		candidates: candidatesFromMentions(
 			mentions.map((mention) => ({ id: "", ...mention })),
 			roster,

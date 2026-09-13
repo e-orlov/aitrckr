@@ -118,6 +118,7 @@ export {
 export { extractAnswerBody, type IndexedText, normalizeIndexed, normalizeText } from "./text";
 export {
 	BRAND_ENTITY_KEY,
+	compareSentimentEntities,
 	EVIDENCE_MAX_ITEMS,
 	EVIDENCE_POLARITIES,
 	EVIDENCE_QUOTE_MAX_LENGTH,
@@ -145,4 +146,5 @@ export {
 	sentimentClassificationResultSchema,
 	sentimentJobSchema,
 	sentimentSingletonKey,
+	sortSentimentEntities,
 } from "./types";
