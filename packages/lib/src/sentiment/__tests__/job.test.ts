@@ -140,7 +140,14 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		const withUsage = deps({
 			classify: vi.fn(async () => ({
 				...classification,
-				usage: { inputTokens: 7000, outputTokens: 900, reasoningTokens: 400, costUsd: 0.0312, webSearchRequests: 1 },
+				usage: {
+					inputTokens: 7000,
+					outputTokens: 900,
+					reasoningTokens: 400,
+					costUsd: 0.0312,
+					webSearchRequests: 1,
+					webSearchRequestsConflict: false,
+				},
 			})),
 		});
 		const outcome = await runSentimentJob(payload, withUsage.d);

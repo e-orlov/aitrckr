@@ -119,26 +119,65 @@ function extractCitationsFromOpenRouterResponse(data: any): Citation[] {
 	return citations;
 }
 
-const finiteOrNull = (value: unknown): number | null =>
-	typeof value === "number" && Number.isFinite(value) ? value : null;
+/** A count: a finite, non-negative integer. Strings, NaN, ±Infinity, negatives and fractions are not reported. */
+const countOrNull = (value: unknown): number | null =>
+	typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** An amount: a finite, non-negative number. */
+const amountOrNull = (value: unknown): number | null =>
+	typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+
+const record = (value: unknown): Record<string, unknown> | undefined =>
+	value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+
+/**
+ * Chat-completions responses report `prompt_tokens`/`completion_tokens`,
+ * Responses-style payloads `input_tokens`/`output_tokens`. The documented
+ * chat key wins when present, whatever its value; the alternative is read
+ * only when the documented key is absent.
+ */
+function firstPresent(u: Record<string, unknown>, keys: readonly string[]): unknown {
+	for (const key of keys) if (u[key] !== undefined) return u[key];
+	return undefined;
+}
+
+/**
+ * The web-search counter has been observed under two parents:
+ * `server_tool_use` (documented) and `server_tool_use_details` (seen in
+ * live responses). Both are read; when both carry a valid count and the
+ * counts differ, neither is trusted and the conflict is reported.
+ */
+function webSearchRequests(u: Record<string, unknown>): Pick<
+	StructuredResearchUsage,
+	"webSearchRequests" | "webSearchRequestsConflict"
+> {
+	const reported = [record(u.server_tool_use), record(u.server_tool_use_details)]
+		.map((parent) => countOrNull(parent?.web_search_requests))
+		.filter((count): count is number => count !== null);
+	if (reported.length === 0) return { webSearchRequests: null, webSearchRequestsConflict: false };
+	if (reported.every((count) => count === reported[0])) {
+		return { webSearchRequests: reported[0], webSearchRequestsConflict: false };
+	}
+	return { webSearchRequests: null, webSearchRequestsConflict: true };
+}
 
 /**
  * The numeric usage fields OpenRouter reports on every response (usage
  * accounting is always on): token counts, the total charged `cost`, the
  * reasoning-token detail and the web-search server-tool counter. Nothing
- * else from the payload is retained.
+ * else from the payload is retained, and nothing is coerced: a field that is
+ * not a valid number of its kind is reported as `null`.
  */
 export function parseOpenRouterUsage(usage: unknown): StructuredResearchUsage | undefined {
-	if (!usage || typeof usage !== "object") return undefined;
-	const u = usage as Record<string, unknown>;
-	const details = (u.completion_tokens_details ?? u.output_tokens_details) as Record<string, unknown> | undefined;
-	const serverTools = u.server_tool_use as Record<string, unknown> | undefined;
+	const u = record(usage);
+	if (!u) return undefined;
+	const details = record(firstPresent(u, ["completion_tokens_details", "output_tokens_details"]));
 	return {
-		inputTokens: finiteOrNull(u.prompt_tokens ?? u.input_tokens),
-		outputTokens: finiteOrNull(u.completion_tokens ?? u.output_tokens),
-		reasoningTokens: finiteOrNull(details?.reasoning_tokens),
-		costUsd: finiteOrNull(u.cost),
-		webSearchRequests: finiteOrNull(serverTools?.web_search_requests),
+		inputTokens: countOrNull(firstPresent(u, ["prompt_tokens", "input_tokens"])),
+		outputTokens: countOrNull(firstPresent(u, ["completion_tokens", "output_tokens"])),
+		reasoningTokens: countOrNull(details?.reasoning_tokens),
+		costUsd: amountOrNull(u.cost),
+		...webSearchRequests(u),
 	};
 }
 

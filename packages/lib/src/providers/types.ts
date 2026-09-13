@@ -49,8 +49,14 @@ export interface StructuredResearchUsage {
 	reasoningTokens: number | null;
 	/** Total amount charged for the call in USD, as reported by the provider. */
 	costUsd: number | null;
-	/** Server-side web searches the provider performed for the call. */
+	/**
+	 * Server-side web searches the provider performed for the call. `null` when
+	 * not reported, or when the provider reported it in more than one place
+	 * with different values — see `webSearchRequestsConflict`.
+	 */
 	webSearchRequests: number | null;
+	/** The provider reported contradicting web-search counts; none of them is trusted. */
+	webSearchRequestsConflict: boolean;
 }
 
 export interface StructuredResearchResult<T> {

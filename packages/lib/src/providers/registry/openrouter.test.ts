@@ -290,31 +290,45 @@ describe("openrouter runStructuredResearch", () => {
 			reasoningTokens: 300,
 			costUsd: 0.0234,
 			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
 		});
 		expect(JSON.stringify(result)).not.toMatch(/sk-or-|gen-secret-id|is_byok|upstream/);
 	});
 
-	it("parses the input/output token variant and reports unknown fields as null", async () => {
+	it("parses the Responses-style variant in full and reports absent fields as null", async () => {
 		stubFetch({
 			choices: [{ message: { content: JSON.stringify(structured) } }],
-			usage: { input_tokens: 10, output_tokens: 5, output_tokens_details: { reasoning_tokens: 2 } },
+			usage: {
+				input_tokens: 10,
+				output_tokens: 5,
+				output_tokens_details: { reasoning_tokens: 2 },
+				cost: 0.004,
+				server_tool_use: { web_search_requests: 1 },
+				total_tokens: 15,
+				cost_details: { upstream_inference_cost: 0.003 },
+			},
 		});
 		const result = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: false });
 		expect(result.usage).toEqual({
 			inputTokens: 10,
 			outputTokens: 5,
 			reasoningTokens: 2,
-			costUsd: null,
-			webSearchRequests: null,
+			costUsd: 0.004,
+			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
 		});
-		expect(parseOpenRouterUsage(undefined)).toBeUndefined();
-		expect(parseOpenRouterUsage({ cost: "0.5", prompt_tokens: Number.NaN })).toEqual({
-			inputTokens: null,
-			outputTokens: null,
+		expect(JSON.stringify(result)).not.toMatch(/total_tokens|upstream/);
+		expect(parseOpenRouterUsage({ input_tokens: 10, output_tokens: 5 })).toEqual({
+			inputTokens: 10,
+			outputTokens: 5,
 			reasoningTokens: null,
 			costUsd: null,
 			webSearchRequests: null,
+			webSearchRequestsConflict: false,
 		});
+		expect(parseOpenRouterUsage(undefined)).toBeUndefined();
+		expect(parseOpenRouterUsage(null)).toBeUndefined();
+		expect(parseOpenRouterUsage("usage")).toBeUndefined();
 	});
 
 	it("defaults to web search when the option is omitted", async () => {
@@ -355,5 +369,159 @@ describe("openrouter runStructuredResearch", () => {
 				return true;
 			},
 		);
+	});
+});
+
+describe("parseOpenRouterUsage web-search counter", () => {
+	const empty = {
+		inputTokens: null,
+		outputTokens: null,
+		reasoningTokens: null,
+		costUsd: null,
+	};
+
+	it("reads the documented `server_tool_use` parent", () => {
+		expect(parseOpenRouterUsage({ server_tool_use: { web_search_requests: 1 } })).toEqual({
+			...empty,
+			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
+		});
+	});
+
+	it("reads the observed `server_tool_use_details` parent", () => {
+		expect(parseOpenRouterUsage({ server_tool_use_details: { web_search_requests: 1 } })).toEqual({
+			...empty,
+			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
+		});
+	});
+
+	it("accepts both parents when they agree", () => {
+		expect(
+			parseOpenRouterUsage({
+				server_tool_use: { web_search_requests: 2 },
+				server_tool_use_details: { web_search_requests: 2 },
+			}),
+		).toEqual({ ...empty, webSearchRequests: 2, webSearchRequestsConflict: false });
+	});
+
+	it("trusts neither parent when they disagree and flags the conflict", () => {
+		expect(
+			parseOpenRouterUsage({
+				server_tool_use: { web_search_requests: 1 },
+				server_tool_use_details: { web_search_requests: 3 },
+			}),
+		).toEqual({ ...empty, webSearchRequests: null, webSearchRequestsConflict: true });
+	});
+
+	it("uses the valid parent when the other is malformed, without a conflict", () => {
+		expect(
+			parseOpenRouterUsage({
+				server_tool_use: { web_search_requests: "1" },
+				server_tool_use_details: { web_search_requests: 1 },
+			}),
+		).toEqual({ ...empty, webSearchRequests: 1, webSearchRequestsConflict: false });
+		expect(parseOpenRouterUsage({ server_tool_use: "native", server_tool_use_details: null })).toEqual({
+			...empty,
+			webSearchRequests: null,
+			webSearchRequestsConflict: false,
+		});
+	});
+});
+
+describe("parseOpenRouterUsage numeric validation", () => {
+	const nothing = {
+		inputTokens: null,
+		outputTokens: null,
+		reasoningTokens: null,
+		costUsd: null,
+		webSearchRequests: null,
+		webSearchRequestsConflict: false,
+	};
+
+	it.each([
+		["strings", "12"],
+		["NaN", Number.NaN],
+		["Infinity", Number.POSITIVE_INFINITY],
+		["-Infinity", Number.NEGATIVE_INFINITY],
+		["negative", -1],
+		["fractional", 1.5],
+		["boolean", true],
+		["object", { value: 1 }],
+		["null", null],
+	])("reports a %s count as null everywhere", (_label, value) => {
+		expect(
+			parseOpenRouterUsage({
+				prompt_tokens: value,
+				completion_tokens: value,
+				completion_tokens_details: { reasoning_tokens: value },
+				server_tool_use: { web_search_requests: value },
+			}),
+		).toEqual(nothing);
+	});
+
+	it.each([
+		["string", "0.5"],
+		["NaN", Number.NaN],
+		["Infinity", Number.POSITIVE_INFINITY],
+		["negative", -0.01],
+		["boolean", false],
+	])("reports a %s cost as null", (_label, value) => {
+		expect(parseOpenRouterUsage({ cost: value })).toEqual(nothing);
+	});
+
+	it("accepts a fractional non-negative cost and integer counts including zero", () => {
+		expect(
+			parseOpenRouterUsage({
+				prompt_tokens: 0,
+				completion_tokens: 8000,
+				completion_tokens_details: { reasoning_tokens: 0 },
+				cost: 0,
+				server_tool_use: { web_search_requests: 0 },
+			}),
+		).toEqual({
+			inputTokens: 0,
+			outputTokens: 8000,
+			reasoningTokens: 0,
+			costUsd: 0,
+			webSearchRequests: 0,
+			webSearchRequestsConflict: false,
+		});
+		expect(parseOpenRouterUsage({ cost: 0.0312 })?.costUsd).toBe(0.0312);
+	});
+
+	it("does not fall back to the alternative token key when the documented key is present but invalid", () => {
+		expect(parseOpenRouterUsage({ prompt_tokens: "7", input_tokens: 7 })?.inputTokens).toBeNull();
+		expect(parseOpenRouterUsage({ completion_tokens: -1, output_tokens: 9 })?.outputTokens).toBeNull();
+		expect(
+			parseOpenRouterUsage({
+				completion_tokens_details: { reasoning_tokens: 1.5 },
+				output_tokens_details: { reasoning_tokens: 2 },
+			})?.reasoningTokens,
+		).toBeNull();
+	});
+
+	it("retains no other field, id, credential or nested detail of the payload", () => {
+		const usage = parseOpenRouterUsage({
+			prompt_tokens: 1,
+			completion_tokens: 2,
+			cost: 0.1,
+			cost_details: { upstream_inference_cost: 0.09 },
+			prompt_tokens_details: { cached_tokens: 1 },
+			total_tokens: 3,
+			is_byok: true,
+			api_key: "sk-or-must-not-leak",
+			request_id: "req-1",
+			server_tool_use: { web_search_requests: 1, other_tool: 4 },
+		});
+		expect(Object.keys(usage ?? {}).sort()).toEqual([
+			"costUsd",
+			"inputTokens",
+			"outputTokens",
+			"reasoningTokens",
+			"webSearchRequests",
+			"webSearchRequestsConflict",
+		]);
+		expect(JSON.stringify(usage)).not.toMatch(/sk-or-|req-1|byok|upstream|cached|other_tool|total/);
 	});
 });

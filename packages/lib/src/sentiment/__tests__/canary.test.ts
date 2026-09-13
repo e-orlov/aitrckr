@@ -124,7 +124,14 @@ describe("one-shot canary", () => {
 		const job = vi.fn(async () => ({
 			status: "classified" as const,
 			entities: 2,
-			usage: { inputTokens: 7000, outputTokens: 900, reasoningTokens: 400, costUsd: 0.0312, webSearchRequests: 1 },
+			usage: {
+				inputTokens: 7000,
+				outputTokens: 900,
+				reasoningTokens: 400,
+				costUsd: 0.0312,
+				webSearchRequests: 1,
+				webSearchRequestsConflict: false,
+			},
 		}));
 		const report = await runSentimentCanary({ runId: FROZEN, job, deadlineMs: 1000, watchdogMs: 2000 });
 		expect(job).toHaveBeenCalledTimes(1);
@@ -139,7 +146,14 @@ describe("one-shot canary", () => {
 		expect(report.outcome).toEqual({
 			status: "classified",
 			entities: 2,
-			usage: { inputTokens: 7000, outputTokens: 900, reasoningTokens: 400, costUsd: 0.0312, webSearchRequests: 1 },
+			usage: {
+				inputTokens: 7000,
+				outputTokens: 900,
+				reasoningTokens: 400,
+				costUsd: 0.0312,
+				webSearchRequests: 1,
+				webSearchRequestsConflict: false,
+			},
 		});
 		expect(report).toMatchObject({
 			deadlineMs: 1000,
@@ -205,7 +219,14 @@ describe("one-shot canary", () => {
 			runStructuredResearch: vi.fn(async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
 				object: schema.parse(goodAnswer),
 				modelVersion: "openai/gpt-5-mini",
-				usage: { inputTokens: 6410, outputTokens: 812, reasoningTokens: 300, costUsd: 0.0234, webSearchRequests: 1 },
+				usage: {
+					inputTokens: 6410,
+					outputTokens: 812,
+					reasoningTokens: 300,
+					costUsd: 0.0234,
+					webSearchRequests: 1,
+					webSearchRequestsConflict: false,
+				},
 			})),
 		} as unknown as Provider;
 		const { deps, usage } = storeFakes(provider);
@@ -218,7 +239,7 @@ describe("one-shot canary", () => {
 		expect(report.outcome).toMatchObject({
 			status: "classified",
 			entities: 2,
-			usage: { costUsd: 0.0234, webSearchRequests: 1 },
+			usage: { costUsd: 0.0234, webSearchRequests: 1, webSearchRequestsConflict: false },
 		});
 		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 })]);
 	});

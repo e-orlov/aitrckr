@@ -114,6 +114,7 @@ function fakeProvider(options: { hold?: Promise<void>; onCall?: () => void; cost
 								reasoningTokens: 400,
 								costUsd: options.costUsd,
 								webSearchRequests: 1,
+								webSearchRequestsConflict: false,
 							},
 			};
 		},

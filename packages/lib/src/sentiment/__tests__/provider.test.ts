@@ -160,6 +160,7 @@ describe("CT-SNT-002 sentiment provider lock", () => {
 			reasoningTokens: 400,
 			costUsd: 0.0312,
 			webSearchRequests: 1,
+			webSearchRequestsConflict: false,
 		});
 		// The classification carries only the bounded verbatim excerpts by contract, never the raw
 		// payload, its ids, provider field names, the prompt, headers or credentials.
