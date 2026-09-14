@@ -82,6 +82,7 @@ type AnalysisStub = {
 	classifierVersion: string;
 	taxonomyVersion: string;
 	inputHash: string | null;
+	errorCode?: string | null;
 };
 
 function deps(overrides: Partial<SentimentJobDeps> & { analysis?: Partial<AnalysisStub> } = {}) {
@@ -417,7 +418,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 
 	it("a failed analysis with the current input hash is skipped without a claim or a call; another input or a provider failure's cleared hash is eligible again", async () => {
 		const current = sentimentInputHash(run.answerBody as string, candidatesFromMentions(mentions, entities));
-		const terminal = deps({ analysis: { status: "failed", inputHash: current } });
+		const terminal = deps({ analysis: { status: "failed", inputHash: current, errorCode: "evidence-unknown-anchor" } });
 		expect(await runSentimentJob(payload, terminal.d)).toMatchObject({
 			status: "skipped",
 			reason: expect.stringContaining("terminal validation failure"),
@@ -427,8 +428,13 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 
 		const cleared = deps({ analysis: { status: "failed", inputHash: null } });
 		expect(await runSentimentJob(payload, cleared.d)).toMatchObject({ status: "classified" });
-		const otherInput = deps({ analysis: { status: "failed", inputHash: "0".repeat(64) } });
+		const otherInput = deps({
+			analysis: { status: "failed", inputHash: "0".repeat(64), errorCode: "evidence-unknown-anchor" },
+		});
 		expect(await runSentimentJob(payload, otherInput.d)).toMatchObject({ status: "classified" });
+		// A hash left over from an earlier completion on a row failed for another reason is not a terminal mark.
+		const otherCode = deps({ analysis: { status: "failed", inputHash: current, errorCode: "provider" } });
+		expect(await runSentimentJob(payload, otherCode.d)).toMatchObject({ status: "classified" });
 	});
 
 	it("a provider failure keeps the queue's retry path: the job still throws and the failed row carries no input hash", async () => {

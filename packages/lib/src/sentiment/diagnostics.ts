@@ -25,6 +25,11 @@ export const DIAGNOSTIC_REASONS = [
 ] as const;
 export type DiagnosticReason = (typeof DIAGNOSTIC_REASONS)[number];
 
+/** Whether a stored error code names a local validation defect (as opposed to a provider, store or contract failure). */
+export function isValidationCode(code: unknown): code is DiagnosticReason {
+	return typeof code === "string" && (DIAGNOSTIC_REASONS as readonly string[]).includes(code);
+}
+
 /** Upper bound of the serialized diagnostic; the field bounds below keep every instance under it. */
 export const DIAGNOSTIC_MAX_BYTES = 512;
 

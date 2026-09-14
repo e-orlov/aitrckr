@@ -17,6 +17,7 @@ import {
 import { estimateRunCostUsd } from "../usage/cost";
 import type { SentimentClassification } from "./classifier";
 import { brandEntity, competitorEntity, type DetectableEntity, type DetectedMention } from "./detector";
+import { isValidationCode } from "./diagnostics";
 import { ClaimLostError } from "./errors";
 import { extractAnswerBody } from "./text";
 import {
@@ -335,18 +336,20 @@ export function isAnalysisCurrent(analysis: SentimentAnalysis, expectedInputHash
 }
 
 /**
- * A failed analysis whose stored input hash is the input that would be sent
- * now was rejected by the classifier's own validation for exactly this
- * input: sending it again can only buy the same answer. Only terminal
- * validation failures write the hash on a failed row; a provider or
- * persistence failure clears it, so such a row stays eligible.
+ * A failed analysis carrying a validation code and, as its input hash, the
+ * input that would be sent now was rejected by the classifier's own
+ * validation for exactly this input: sending it again can only buy the same
+ * answer. Only terminal validation failures write the hash on a failed row;
+ * a provider or persistence failure clears it, and a row failed by any other
+ * path (another code, a hash left from an earlier completion) stays eligible.
  */
 export function isAnalysisTerminallyFailed(analysis: SentimentAnalysis, expectedInputHash: string): boolean {
 	return (
 		analysis.status === "failed" &&
 		analysis.classifierVersion === SENTIMENT_CLASSIFIER_VERSION &&
 		analysis.taxonomyVersion === SENTIMENT_TAXONOMY_VERSION &&
-		analysis.inputHash === expectedInputHash
+		analysis.inputHash === expectedInputHash &&
+		isValidationCode(analysis.errorCode)
 	);
 }
 
