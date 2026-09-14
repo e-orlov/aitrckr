@@ -1,6 +1,7 @@
 import type { StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
 import { classifySentiment, type SentimentClassifierDeps, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
+import type { SentimentDiagnostic } from "./diagnostics";
 import {
 	ClaimLostError,
 	type SafeSentimentError,
@@ -8,6 +9,7 @@ import {
 	sanitizeSentimentError,
 	storedErrorMessage,
 } from "./errors";
+import type { PaidResponseEnvelope } from "./errors-validation";
 import {
 	type AnalysisClaim,
 	candidatesFromMentions,
@@ -15,6 +17,7 @@ import {
 	detectionResultFor,
 	ensureAnalysis,
 	isAnalysisCurrent,
+	isAnalysisTerminallyFailed,
 	type loadAnalysisState,
 	loadDetectableEntities,
 	loadDetection,
@@ -49,7 +52,21 @@ export type SentimentJobOutcome =
 	/** The attempt ran but a later attempt took the row over; nothing of this attempt was written. */
 	| { status: "claim-lost"; generation: number }
 	| { status: "no-mentions" }
-	| { status: "skipped"; reason: string };
+	| { status: "skipped"; reason: string }
+	/**
+	 * The classifier rejected the provider's answer for this exact input. The
+	 * analysis is failed with the input hash, the paid call (if any) is
+	 * attributed, and the job completes: a retry would buy the same answer.
+	 * Only a new classifier version or a changed input makes the run eligible.
+	 */
+	| {
+			status: "terminal-validation-failure";
+			code: string;
+			/** False when the answer was refused before any request left (nothing was charged). */
+			requestSent: boolean;
+			diagnostic: SentimentDiagnostic | null;
+			envelope: PaidResponseEnvelope | null;
+	  };
 
 export interface SentimentJobDeps extends SentimentClassifierDeps {
 	loadRun?: typeof loadRunForSentiment;
@@ -92,11 +109,22 @@ async function resolveMentions(
 	});
 }
 
-function failAttempt(claim: AnalysisClaim, safe: SafeSentimentError, deps: SentimentJobDeps): Promise<boolean> {
+/**
+ * Terminal write of a failed attempt. A validation failure remembers the
+ * exact input it was rejected for so the same input is never sent again;
+ * every other failure clears the hash so the row stays eligible.
+ */
+function failAttempt(
+	claim: AnalysisClaim,
+	safe: SafeSentimentError,
+	deps: SentimentJobDeps,
+	inputHash: string,
+): Promise<boolean> {
 	return (deps.markAnalysis ?? markAnalysis)(claim, {
 		status: "failed",
 		errorCode: safe.code,
 		errorMessage: storedErrorMessage(safe),
+		inputHash: safe.kind === "validation" ? inputHash : null,
 	});
 }
 
@@ -110,6 +138,7 @@ async function classifyAndPersist(
 ): Promise<SentimentJobOutcome> {
 	const recordUsage = deps.recordUsage ?? recordSentimentUsageEvent;
 	const usage = { organizationId: run.organizationId, brandId: run.brandId, promptId: run.promptId };
+	const inputHash = sentimentInputHash(run.answerBody, candidates);
 	let classification: Awaited<ReturnType<typeof classifySentiment>>;
 	try {
 		classification = await (deps.classify ?? classifySentiment)(
@@ -122,7 +151,7 @@ async function classifyAndPersist(
 		// record only the safe summary — the original error may quote a
 		// response body, the answer or a header and is dropped here.
 		const safe = sanitizeSentimentError(error);
-		const owned = await failAttempt(claim, safe, deps);
+		const owned = await failAttempt(claim, safe, deps, inputHash);
 		if (safe.requestSent) {
 			// A rejected answer was still paid for: the cost the provider
 			// reported for it is what gets attributed, not the estimate.
@@ -135,6 +164,15 @@ async function classifyAndPersist(
 			});
 		}
 		if (!owned) return { status: "claim-lost", generation: claim.generation };
+		if (safe.kind === "validation") {
+			return {
+				status: "terminal-validation-failure",
+				code: safe.code,
+				requestSent: safe.requestSent,
+				diagnostic: safe.diagnostic,
+				envelope: safe.envelope,
+			};
+		}
 		throw new SentimentJobError(safe);
 	}
 	// From here on the provider has answered and charged for the call. Whatever
@@ -173,7 +211,7 @@ async function classifyAndPersist(
 		// abort code when the caller cancelled between answer and write),
 		// never as a provider failure.
 		const safe = sanitizeSentimentError(error, "persist");
-		const owned = await failAttempt(claim, safe, deps);
+		const owned = await failAttempt(claim, safe, deps, inputHash);
 		if (!owned) return { status: "claim-lost", generation: claim.generation };
 		throw new SentimentJobError(safe);
 	}
@@ -187,6 +225,24 @@ async function classifyAndPersist(
 	};
 }
 
+/** A payload is acted on only when it is well-formed and names the current classifier and taxonomy. */
+function acceptPayload(data: unknown): { payload: SentimentJobData } | { skipped: SentimentJobOutcome } {
+	const parsed = sentimentJobSchema.safeParse(data);
+	if (!parsed.success) {
+		return {
+			skipped: { status: "skipped", reason: `invalid payload: ${parsed.error.issues[0]?.message ?? "unknown"}` },
+		};
+	}
+	const payload: SentimentJobData = parsed.data;
+	if (payload.classifierVersion !== SENTIMENT_CLASSIFIER_VERSION) {
+		return { skipped: { status: "skipped", reason: `stale classifier version "${payload.classifierVersion}"` } };
+	}
+	if (payload.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION) {
+		return { skipped: { status: "skipped", reason: `stale taxonomy version "${payload.taxonomyVersion}"` } };
+	}
+	return { payload };
+}
+
 /**
  * Worker-side core for one classify-sentiment job. Idempotent against
  * duplicates, restarts and racing workers: a completed analysis whose stored
@@ -196,26 +252,21 @@ async function classifyAndPersist(
  * non-calling outcome. Every terminal write is fenced on the claim
  * generation, so an attempt that outlived its lease ends as `claim-lost`
  * without touching what a later attempt wrote. Invalid or stale payloads are
- * skipped without a call and without failing the job; provider and
- * validation errors mark the analysis `failed` with a safe summary and
+ * skipped without a call and without failing the job. Provider, network and
+ * persistence errors mark the analysis `failed` with a safe summary and
  * propagate as `SentimentJobError` so pg-boss applies its bounded retry
- * policy — nothing partial is ever written.
+ * policy; an answer the classifier rejects is terminal for this exact input
+ * and completes the job instead — nothing partial is ever written either
+ * way.
  */
 export async function runSentimentJob(
 	data: unknown,
 	deps: SentimentJobDeps = {},
 	options: SentimentJobOptions = {},
 ): Promise<SentimentJobOutcome> {
-	const parsed = sentimentJobSchema.safeParse(data);
-	if (!parsed.success)
-		return { status: "skipped", reason: `invalid payload: ${parsed.error.issues[0]?.message ?? "unknown"}` };
-	const payload: SentimentJobData = parsed.data;
-	if (payload.classifierVersion !== SENTIMENT_CLASSIFIER_VERSION) {
-		return { status: "skipped", reason: `stale classifier version "${payload.classifierVersion}"` };
-	}
-	if (payload.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION) {
-		return { status: "skipped", reason: `stale taxonomy version "${payload.taxonomyVersion}"` };
-	}
+	const accepted = acceptPayload(data);
+	if ("skipped" in accepted) return accepted.skipped;
+	const payload = accepted.payload;
 
 	const run = await (deps.loadRun ?? loadRunForSentiment)(payload.promptRunId);
 	if (!run) return { status: "skipped", reason: "prompt run not found" };
@@ -226,8 +277,16 @@ export async function runSentimentJob(
 	const candidates = candidatesFromMentions(mentions, entities);
 	const body = mentions.length === 0 ? null : run.answerBody;
 	if (body === null && analysis.status === "no_mentions") return { status: "already-completed" };
-	if (body !== null && isAnalysisCurrent(analysis, sentimentInputHash(body, candidates)))
-		return { status: "already-completed" };
+	if (body !== null) {
+		const inputHash = sentimentInputHash(body, candidates);
+		if (isAnalysisCurrent(analysis, inputHash)) return { status: "already-completed" };
+		if (isAnalysisTerminallyFailed(analysis, inputHash)) {
+			return {
+				status: "skipped",
+				reason: `terminal validation failure ${analysis.errorCode ?? "unknown"} for this exact input; eligible again only under a new classifier version or a changed input`,
+			};
+		}
+	}
 
 	const claimed = await (deps.claimAnalysis ?? claimAnalysis)(analysis.id, { allowFinished: true });
 	if (!claimed.claimed) return { status: "claimed-elsewhere", analysisStatus: claimed.status };

@@ -7,8 +7,11 @@ import type { Job } from "pg-boss";
  * provider call, atomic persistence, usage attribution) live in
  * runSentimentJob; a thrown error (already reduced to a safe summary) propagates
  * so pg-boss applies the queue's bounded retry policy without ever writing a
- * partial observation. The job's abort signal reaches the provider request.
- * Logs carry ids and states only — never answer text.
+ * partial observation. An answer the classifier rejected is a completed job:
+ * the analysis is failed for exactly that input and retrying could only buy
+ * the same answer again. The job's abort signal reaches the provider request.
+ * Logs carry ids, states, codes and the bounded diagnostic only — never
+ * answer text.
  */
 export async function classifySentimentJob(jobs: Job<SentimentJobData>[]): Promise<void> {
 	for (const job of jobs) {
@@ -38,6 +41,13 @@ export async function classifySentimentJob(jobs: Job<SentimentJobData>[]): Promi
 				break;
 			case "skipped":
 				console.log(`[classify-sentiment] run ${runId}: skipped (${outcome.reason})`);
+				break;
+			case "terminal-validation-failure":
+				console.warn(
+					`[classify-sentiment] run ${runId}: answer rejected (${outcome.code}), terminal for this input; ` +
+						`paid=${outcome.requestSent} generation=${outcome.envelope?.generationId ?? "none"} ` +
+						`diagnostic=${outcome.diagnostic ? JSON.stringify(outcome.diagnostic) : "none"}`,
+				);
 				break;
 		}
 	}

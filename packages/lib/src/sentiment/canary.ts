@@ -169,12 +169,13 @@ export class SentimentCanaryContractError extends Error {
 
 export type SentimentCanaryOutcome =
 	| {
-			status: SentimentJobOutcome["status"];
+			status: Exclude<SentimentJobOutcome["status"], "terminal-validation-failure">;
 			entities?: number;
 			entityKeys?: string[];
 			usage?: StructuredResearchUsage;
 			request?: StructuredResearchRequestSummary;
 	  }
+	| Extract<SentimentJobOutcome, { status: "terminal-validation-failure" }>
 	| {
 			status: "error";
 			name: string;
@@ -513,6 +514,7 @@ export function evaluateSentimentCanary(
 	if (counts.providerCalls !== 1) reasons.push({ code: "provider-calls", detail: String(counts.providerCalls) });
 	if (!outcome) reasons.push({ code: "job-outcome", detail: "none" });
 	else if (outcome.status === "error") reasons.push(rejectReasonForError(outcome));
+	else if (outcome.status === "terminal-validation-failure") reasons.push({ code: "validation", detail: outcome.code });
 	else if (outcome.status !== "classified") reasons.push({ code: "job-outcome", detail: outcome.status });
 	else {
 		reasons.push(...requestReasons(outcome.request, contract, limits), ...usageReasons(outcome.usage, limits));
@@ -701,16 +703,19 @@ export async function runSentimentCanary(args: {
 		// rejection must not surface as an unhandled rejection.
 		attempt.catch(() => {});
 		const result = await Promise.race([attempt, bark]);
-		outcome =
-			result.status === "classified"
-				? {
-						status: result.status,
-						entities: result.entities,
-						entityKeys: result.entityKeys,
-						usage: result.usage,
-						request: result.request,
-					}
-				: { status: result.status };
+		if (result.status === "classified") {
+			outcome = {
+				status: result.status,
+				entities: result.entities,
+				entityKeys: result.entityKeys,
+				usage: result.usage,
+				request: result.request,
+			};
+		} else if (result.status === "terminal-validation-failure") {
+			outcome = result;
+		} else {
+			outcome = { status: result.status };
+		}
 	} catch (error) {
 		outcome = safeOutcomeForError(error);
 	} finally {

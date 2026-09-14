@@ -334,6 +334,22 @@ export function isAnalysisCurrent(analysis: SentimentAnalysis, expectedInputHash
 	);
 }
 
+/**
+ * A failed analysis whose stored input hash is the input that would be sent
+ * now was rejected by the classifier's own validation for exactly this
+ * input: sending it again can only buy the same answer. Only terminal
+ * validation failures write the hash on a failed row; a provider or
+ * persistence failure clears it, so such a row stays eligible.
+ */
+export function isAnalysisTerminallyFailed(analysis: SentimentAnalysis, expectedInputHash: string): boolean {
+	return (
+		analysis.status === "failed" &&
+		analysis.classifierVersion === SENTIMENT_CLASSIFIER_VERSION &&
+		analysis.taxonomyVersion === SENTIMENT_TAXONOMY_VERSION &&
+		analysis.inputHash === expectedInputHash
+	);
+}
+
 export type ClaimOutcome =
 	| { claimed: true; attempts: number; claim: AnalysisClaim }
 	| { claimed: false; status: SentimentAnalysisStatus };
@@ -424,6 +440,8 @@ export async function markAnalysis(
 		status: SentimentAnalysisStatus;
 		errorCode: string | null;
 		errorMessage: string | null;
+		/** On a failed row: the exact classifier input the answer was terminally rejected for; null for every other failure. */
+		inputHash: string | null;
 		completedAt: Date | null;
 	}>,
 	executor: Executor = db,

@@ -565,10 +565,26 @@ describe("canary verdict after the one call", () => {
 				},
 			],
 		};
-		const { report, marks, deps } = await rejected(goodProvider(undefined, extra), ["validation"]);
+		const { report, marks, deps, usage } = await rejected(goodProvider(undefined, extra), ["validation"]);
 		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "validation", detail: "unknown-entity" }] });
 		expect(deps.persist).not.toHaveBeenCalled();
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "unknown-entity" })]);
+		// The rejected answer is terminal for this input and the paid response is accounted for in the report.
+		expect(marks).toEqual([
+			expect.objectContaining({
+				status: "failed",
+				errorCode: "unknown-entity",
+				inputHash: frozenDigests.classifierInputHash,
+			}),
+		]);
+		expect(usage).toEqual([expect.objectContaining({ succeeded: false, actualCostUsd: goodUsage.costUsd })]);
+		expect(report.outcome).toEqual({
+			status: "terminal-validation-failure",
+			code: "unknown-entity",
+			requestSent: true,
+			diagnostic: expect.objectContaining({ stage: "entity", reason: "unknown-entity", entityKey: "c-huk" }),
+			envelope: { generationId: null, request: goodRequest, usage: goodUsage },
+		});
+		expect(JSON.stringify(report)).not.toContain("Preis-Leistungs");
 	});
 
 	it("rejects a missing entity in the answer", async () => {
