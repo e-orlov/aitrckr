@@ -36,7 +36,14 @@ const runId = (i: number) => uuid("3", i);
 // Alpha: 24 classified observations with distinct scores 10..100 plus repeats — enough for 10 highest + 10 lowest with 4 unused.
 const ALPHA_SCORES = [100, 96, 92, 88, 84, 80, 76, 72, 68, 64, 60, 56, 52, 50, 50, 48, 44, 40, 36, 32, 28, 24, 20, 10];
 const categoryFor = (score: number, mixed = false) => (score > 50 ? "positive" : score < 50 ? "negative" : mixed ? "mixed" : "neutral");
-const answerFor = (i: number) => `Synthetic answer ${i}. Alpha delivers a solid tariff while ${BRAND_NAME} keeps growing. Bravo is also named.`;
+// Run 1 (Alpha's top answer) is long, with three cited sentences far apart — the shape the anchored classifier produces.
+const FILLER = "Rechtsschutz lohnt sich vor allem bei Wartezeiten, Selbstbeteiligung und den versicherten Lebensbereichen; Vergleichsportale bewerten diese Punkte unterschiedlich. ";
+const DISTANT_SECOND = "Later on, Alpha's claims desk is praised for quick settlements.";
+const DISTANT_THIRD = "At the very end, Alpha is called pricey for small households.";
+const answerFor = (i: number) =>
+	i === 1
+		? `Synthetic answer 1. Alpha delivers a solid tariff while ${BRAND_NAME} keeps growing. Bravo is also named.\n\n${FILLER.repeat(3)}${DISTANT_SECOND}\n\n${FILLER.repeat(3)}${DISTANT_THIRD}\n\n${FILLER}`
+		: `Synthetic answer ${i}. Alpha delivers a solid tariff while ${BRAND_NAME} keeps growing. Bravo is also named.`;
 // `uuid("3", i)` puts the block digit before the zero-padded index; the index is the last eleven digits.
 const runIndex = (run: string) => Number.parseInt(run.slice(-11), 10);
 /** An exact evidence span with raw offsets into the seeded answer body. */
@@ -133,7 +140,13 @@ test.describe("Sentiment page", () => {
 						key,
 						score,
 						categoryFor(score, mixed),
-						JSON.stringify(mixed ? [evidenceSpan(run, "solid tariff", "positive"), evidenceSpan(run, "keeps growing", "negative")] : [evidenceSpan(run, "Alpha delivers a solid tariff", "positive")]),
+						JSON.stringify(
+							mixed
+								? [evidenceSpan(run, "solid tariff", "positive"), evidenceSpan(run, "keeps growing", "negative")]
+								: runIndex(run) === 1 && key === COMPETITORS[0].id
+									? [evidenceSpan(run, "Alpha delivers a solid tariff", "positive"), evidenceSpan(run, DISTANT_SECOND, "positive"), evidenceSpan(run, DISTANT_THIRD, "negative")]
+									: [evidenceSpan(run, "Alpha delivers a solid tariff", "positive")],
+						),
 					],
 				)
 			).rows[0].id;
@@ -373,14 +386,47 @@ test.describe("Sentiment page", () => {
 		await expect(focused).toContainText("Synthetic answer 1.");
 	});
 
-	test("B7: the highlighted excerpt is the exact stored span, not a text search", async ({ page }) => {
+	test("B7: the highlighted excerpts are the exact stored spans, not a text search", async ({ page }) => {
 		await page.goto(PAGE_URL);
 		await page.getByTestId("sentiment-leaderboard-row").filter({ hasText: "Alpha" }).click();
-		const first = page.getByTestId("sentiment-evidence-highest").getByTestId("sentiment-evidence-item").first();
-		await expect(first.locator("mark")).toHaveCount(1);
-		await expect(first.locator("mark")).toHaveText("Alpha delivers a solid tariff");
+		const second = page.getByTestId("sentiment-evidence-highest").getByTestId("sentiment-evidence-item").nth(1);
+		await expect(second.locator("mark")).toHaveCount(1);
+		await expect(second.locator("mark")).toHaveText("Alpha delivers a solid tariff");
 		// The excerpt around the span is the stored answer, cut at raw offsets.
-		await expect(first.getByTestId("sentiment-evidence-excerpt")).toContainText("Alpha delivers a solid tariff while Sentiment E2E keeps growing");
+		await expect(second.getByTestId("sentiment-evidence-excerpt")).toContainText("Alpha delivers a solid tariff while Sentiment E2E keeps growing");
+		await expect(second.getByTestId("sentiment-evidence-excerpts")).toHaveAttribute("data-count", "1");
+		await expect(second).not.toContainText("Evidence 1 of");
+	});
+
+	test("E2E-SNT-EXC-001: three distant cited spans are all shown in full as separate excerpts, never the whole answer", async ({ page }) => {
+		await page.goto(PAGE_URL);
+		await page.getByTestId("sentiment-leaderboard-row").filter({ hasText: "Alpha" }).click();
+		const top = page.getByTestId("sentiment-evidence-highest").getByTestId("sentiment-evidence-item").first();
+		await expect(top).toHaveAttribute("data-run", runId(1));
+		const excerpts = top.getByTestId("sentiment-evidence-excerpt");
+		await expect(excerpts).toHaveCount(3);
+		await expect(top.getByTestId("sentiment-evidence-excerpts")).toHaveAttribute("data-count", "3");
+		const marks = top.locator("mark");
+		await expect(marks).toHaveCount(3);
+		await expect(marks.nth(0)).toHaveText("Alpha delivers a solid tariff");
+		await expect(marks.nth(1)).toHaveText(DISTANT_SECOND);
+		await expect(marks.nth(2)).toHaveText(DISTANT_THIRD);
+		await expect(marks.nth(2)).toHaveAttribute("data-polarity", "negative");
+		await expect(top).toContainText("Evidence 1 of 3");
+		await expect(top).toContainText("Evidence 3 of 3");
+		// Each excerpt is a raw slice; the card is far shorter than the stored answer.
+		const starts = await excerpts.evaluateAll((els) => els.map((el) => Number(el.getAttribute("data-excerpt-start"))));
+		expect([...starts].sort((a, b) => a - b)).toEqual(starts);
+		const shown = ((await top.getByTestId("sentiment-evidence-excerpts").textContent()) ?? "").length;
+		expect(shown).toBeLessThan(answerFor(1).length);
+		expect(shown).toBeGreaterThan(DISTANT_SECOND.length + DISTANT_THIRD.length);
+		// The same rule holds for the lowest column (single-span items keep one excerpt).
+		const low = page.getByTestId("sentiment-evidence-lowest").getByTestId("sentiment-evidence-item").first();
+		await expect(low.getByTestId("sentiment-evidence-excerpt")).toHaveCount(1);
+		await expect(low.locator("mark")).toHaveText("Alpha delivers a solid tariff");
+		// One deep link per card, unchanged.
+		await expect(top.getByTestId("sentiment-evidence-deep-link")).toHaveCount(1);
+		await expect(page.getByTestId("sentiment-evidence")).not.toContainText(/openrouter|gpt|chatgpt/i);
 	});
 
 	test("B6: deleting a prompt through the real API removes its runs and every sentiment row", async ({ request }) => {
