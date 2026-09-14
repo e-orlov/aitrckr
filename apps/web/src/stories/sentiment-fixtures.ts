@@ -1,4 +1,6 @@
+import type { SentimentEvidence } from "@workspace/lib/sentiment";
 import { computeEntityMetrics, LOW_SAMPLE_THRESHOLD } from "@workspace/lib/sentiment/metrics";
+import { planExcerpts } from "@/lib/sentiment-excerpts";
 import type {
 	SentimentEntityRow,
 	SentimentEvidenceItem,
@@ -433,10 +435,29 @@ export function mockSentimentSparse(): SentimentOverviewResponse {
 	});
 }
 
-/** The answer window every fixture item shows; it starts at this raw offset of the (fictional) stored body. */
-const EXCERPT_RAW_START = 412;
-const EXCERPT_BODY =
-	"Im Vergleich der Anbieter fällt auf: Alpha Legal reguliert Schäden schnell, verlangt aber überdurchschnittliche Beiträge. Für Familien lohnt sich der Blick auf den Leistungsumfang";
+/**
+ * A fictional stored answer (never a production text) long enough for three
+ * cited sentences to sit far apart. Every fixture item derives its excerpt
+ * groups from raw offsets into this body through the real planner.
+ */
+const PARA_1 =
+	"Rechtsschutzversicherungen unterscheiden sich vor allem bei Wartezeiten, Selbstbeteiligung und den versicherten Lebensbereichen. " +
+	"Wer Privat-, Berufs- und Verkehrsrechtsschutz kombiniert, sollte auf Ausschlüsse im Kleingedruckten achten. ";
+const PARA_2 =
+	"Auch die Erreichbarkeit der Hotline, die Qualität der telefonischen Erstberatung und die Dauer der Schadenregulierung sind im Alltag entscheidend. " +
+	"Vergleichsportale bewerten diese Punkte unterschiedlich, weshalb sich ein Blick in mehrere Tests lohnt. ";
+export const FIXTURE_SPAN_1 = "Alpha Legal reguliert Schäden schnell, verlangt aber überdurchschnittliche Beiträge.";
+export const FIXTURE_SPAN_2 =
+	"Für Familien lohnt sich bei Alpha Legal der Blick auf den Leistungsumfang im Familienrecht.";
+export const FIXTURE_SPAN_3 = "Wer vor allem günstig versichert sein will, findet bei Alpha Legal eher hohe Beiträge.";
+export const FIXTURE_ADJACENT = "Die Beratung am Telefon wird dabei als hilfreich beschrieben.";
+export const FIXTURE_BODY = `${PARA_1}Im Vergleich der Anbieter fällt auf: ${FIXTURE_SPAN_1} ${FIXTURE_ADJACENT}\n\n${PARA_2}${PARA_1}${FIXTURE_SPAN_2}\n\n${PARA_2}${PARA_2}${FIXTURE_SPAN_3}\n\n${PARA_1}`;
+
+export const fixtureSpan = (quote: string, polarity: SentimentEvidence["polarity"]): SentimentEvidence => {
+	const start = FIXTURE_BODY.indexOf(quote);
+	if (start === -1) throw new Error(`fixture quote missing: ${quote}`);
+	return { quote, start, end: start + quote.length, polarity };
+};
 
 const item = (args: {
 	id: string;
@@ -444,37 +465,29 @@ const item = (args: {
 	category: SentimentEvidenceItem["category"];
 	withSources?: boolean;
 	aspects?: SentimentEvidenceItem["aspects"];
-}): SentimentEvidenceItem => ({
-	observationId: `obs-${args.id}`,
-	promptRunId: `run-${args.id}`,
-	promptId: "prompt-1",
-	promptText: "Welche Rechtsschutzversicherung ist für Familien am besten?",
-	tags: ["insurance", "families"],
-	runCreatedAt: "2026-08-20T10:00:00.000Z",
-	score: args.score,
-	category: args.category,
-	evidence: [
-		{
-			quote: "Alpha Legal reguliert Schäden schnell",
-			start: EXCERPT_RAW_START + EXCERPT_BODY.indexOf("Alpha Legal reguliert Schäden schnell"),
-			end:
-				EXCERPT_RAW_START +
-				EXCERPT_BODY.indexOf("Alpha Legal reguliert Schäden schnell") +
-				"Alpha Legal reguliert Schäden schnell".length,
-			polarity: "positive",
-		},
-	],
-	excerpt: `…${EXCERPT_BODY}…`,
-	// The leading ellipsis occupies index 0, so the window's first body character is raw offset EXCERPT_RAW_START.
-	excerptStart: EXCERPT_RAW_START - 1,
-	aspects: args.aspects ?? [{ key: "service", label: "Service", score: 82, category: "positive" }],
-	sources: args.withSources
-		? [
-				{ url: "https://verbraucher.example/test", domain: "verbraucher.example", title: "Test 2026" },
-				{ url: "https://vergleich.example/rs", domain: "vergleich.example", title: null },
-			]
-		: [],
-});
+	evidence?: SentimentEvidence[];
+}): SentimentEvidenceItem => {
+	const evidence = args.evidence ?? [fixtureSpan(FIXTURE_SPAN_1, "positive")];
+	return {
+		observationId: `obs-${args.id}`,
+		promptRunId: `run-${args.id}`,
+		promptId: "prompt-1",
+		promptText: "Welche Rechtsschutzversicherung ist für Familien am besten?",
+		tags: ["insurance", "families"],
+		runCreatedAt: "2026-08-20T10:00:00.000Z",
+		score: args.score,
+		category: args.category,
+		evidence,
+		excerpts: planExcerpts(FIXTURE_BODY, evidence),
+		aspects: args.aspects ?? [{ key: "service", label: "Service", score: 82, category: "positive" }],
+		sources: args.withSources
+			? [
+					{ url: "https://verbraucher.example/test", domain: "verbraucher.example", title: "Test 2026" },
+					{ url: "https://vergleich.example/rs", domain: "vergleich.example", title: null },
+				]
+			: [],
+	};
+};
 
 /** 10 highest / 10 lowest, non-overlapping, first item with two original sources. */
 export function mockSentimentEvidence(): SentimentEvidenceResponse {
@@ -500,5 +513,45 @@ export function mockSentimentEvidenceFew(): SentimentEvidenceResponse {
 		totalObservations: 3,
 		highest: [item({ id: "x1", score: 90, category: "positive" }), item({ id: "x2", score: 60, category: "positive" })],
 		lowest: [item({ id: "x3", score: 20, category: "negative" })],
+	};
+}
+
+/** ST-SNT-EXC — evidence shapes the anchored classifier produces: one span, adjacent spans, three distant spans, Mixed. */
+export function mockSentimentEvidenceShapes(): SentimentEvidenceResponse {
+	return {
+		entity: { key: "a", name: "Alpha Legal" },
+		aspect: "overall",
+		totalObservations: 4,
+		highest: [
+			item({ id: "single", score: 90, category: "positive", withSources: true }),
+			item({
+				id: "adjacent",
+				score: 80,
+				category: "positive",
+				evidence: [fixtureSpan(FIXTURE_SPAN_1, "positive"), fixtureSpan(FIXTURE_ADJACENT, "positive")],
+			}),
+		],
+		lowest: [
+			item({
+				id: "distant",
+				score: 50,
+				category: "mixed",
+				evidence: [
+					fixtureSpan(FIXTURE_SPAN_3, "negative"),
+					fixtureSpan(FIXTURE_SPAN_1, "positive"),
+					fixtureSpan(FIXTURE_SPAN_2, "positive"),
+				],
+				aspects: [
+					{ key: "price", label: "Price", score: 30, category: "negative" },
+					{ key: "coverage", label: "Coverage", score: 80, category: "positive" },
+				],
+			}),
+			item({
+				id: "mixed-one-anchor",
+				score: 50,
+				category: "mixed",
+				evidence: [fixtureSpan(FIXTURE_SPAN_1, "positive"), fixtureSpan(FIXTURE_SPAN_1, "negative")],
+			}),
+		],
 	};
 }

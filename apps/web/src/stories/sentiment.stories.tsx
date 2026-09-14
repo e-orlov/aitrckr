@@ -5,10 +5,16 @@ import { SentimentEvidenceColumns } from "@/components/sentiment/evidence-panels
 import { SentimentCards, SentimentEmpty, SentimentError, SentimentSkeleton } from "@/components/sentiment/section";
 import type { SentimentEvidenceResponse, SentimentOverviewResponse } from "@/server/sentiment";
 import {
+	FIXTURE_ADJACENT,
+	FIXTURE_BODY,
+	FIXTURE_SPAN_1,
+	FIXTURE_SPAN_2,
+	FIXTURE_SPAN_3,
 	mockSentimentBrandOnly,
 	mockSentimentEmpty,
 	mockSentimentEvidence,
 	mockSentimentEvidenceFew,
+	mockSentimentEvidenceShapes,
 	mockSentimentOverview,
 	mockSentimentPending,
 	mockSentimentPriceAspect,
@@ -262,7 +268,7 @@ export const ExpandedEvidence: Story = {
 		expect(runs.size).toBe(20);
 		expect(highest[0].textContent).toContain("100");
 		expect(highest[0].textContent).toContain("Positive");
-		expect(highest[0].querySelector("mark")?.textContent).toBe("Alpha Legal reguliert Schäden schnell");
+		expect(highest[0].querySelector("mark")?.textContent).toBe(FIXTURE_SPAN_1);
 		expect(within(highest[0] as HTMLElement).getByTestId("sentiment-evidence-sources").textContent).toContain(
 			"verbraucher.example",
 		);
@@ -286,5 +292,82 @@ export const ExpandedFewObservations: Story = {
 		await waitFor(() => expect(q(canvasElement, "sentiment-evidence")).toBeTruthy());
 		expect(q(canvasElement, "sentiment-evidence-highest").textContent).toContain("Highest sentiment (2)");
 		expect(q(canvasElement, "sentiment-evidence-lowest").textContent).toContain("Lowest sentiment (1)");
+	},
+};
+
+/**
+ * ST-SNT-EXC-001…004 — every stored span is rendered in full, whatever its
+ * position: a single span is one excerpt; adjacent spans share one excerpt;
+ * three distant spans give three numbered excerpts with a visible gap; a
+ * Mixed verdict citing one anchor twice shows one mark carrying both
+ * polarities. No card ever shows the whole answer.
+ */
+export const EvidenceShapes: Story = {
+	args: { data: mockSentimentOverview(), evidence: mockSentimentEvidenceShapes(), initiallyExpanded: "a" },
+	play: async ({ canvasElement }) => {
+		const root = canvasElement;
+		await waitFor(() => expect(q(root, "sentiment-evidence")).toBeTruthy());
+		const items = [...root.querySelectorAll("[data-testid=sentiment-evidence-item]")] as HTMLElement[];
+		const byRun = (run: string) => items.find((el) => el.getAttribute("data-run") === `run-${run}`) as HTMLElement;
+		const marks = (el: HTMLElement) => [...el.querySelectorAll("mark")].map((m) => m.textContent);
+		const groups = (el: HTMLElement) => el.querySelectorAll("[data-testid=sentiment-evidence-excerpt]");
+
+		// single span → one excerpt, one mark, no numbering
+		expect(groups(byRun("single"))).toHaveLength(1);
+		expect(marks(byRun("single"))).toEqual([FIXTURE_SPAN_1]);
+		expect(byRun("single").textContent).not.toContain("Evidence 1 of");
+
+		// adjacent spans → one shared excerpt with two marks in reading order
+		expect(groups(byRun("adjacent"))).toHaveLength(1);
+		expect(marks(byRun("adjacent"))).toEqual([FIXTURE_SPAN_1, FIXTURE_ADJACENT]);
+
+		// three distant spans → three numbered excerpts, every span in full, input order irrelevant
+		const distant = byRun("distant");
+		expect(groups(distant)).toHaveLength(3);
+		expect(marks(distant)).toEqual([FIXTURE_SPAN_1, FIXTURE_SPAN_2, FIXTURE_SPAN_3]);
+		expect(distant.textContent).toContain("Evidence 1 of 3");
+		expect(distant.textContent).toContain("Evidence 3 of 3");
+		expect((distant.textContent ?? "").length).toBeLessThan(FIXTURE_BODY.length);
+		expect(distant.querySelector("mark[data-polarity=negative]")?.textContent).toBe(FIXTURE_SPAN_3);
+
+		// Mixed on one anchor → one mark with both polarities
+		const mixed = byRun("mixed-one-anchor");
+		expect(marks(mixed)).toEqual([FIXTURE_SPAN_1]);
+		expect(mixed.querySelector("mark")?.getAttribute("data-polarity")).toBe("positive,negative");
+
+		// reading order of excerpts == DOM order == raw offset order (screen readers follow the list)
+		const starts = [...groups(distant)].map((g) => Number(g.getAttribute("data-excerpt-start")));
+		expect([...starts].sort((x, y) => x - y)).toEqual(starts);
+		expect(root.querySelectorAll("[data-testid=sentiment-evidence-deep-link]")).toHaveLength(4);
+		expect(q(root, "sentiment-evidence").textContent).not.toMatch(/openrouter|gpt|chatgpt|version/i);
+	},
+};
+
+/** The same shapes in dark mode: marks stay legible on the dark surface. */
+export const EvidenceShapesDark: Story = {
+	...EvidenceShapes,
+	decorators: [
+		(Story) => (
+			<div className="dark bg-background text-foreground p-6" style={{ width: 1200 }}>
+				<Story />
+			</div>
+		),
+	],
+};
+
+/** The same shapes at 375 px: excerpts stack, nothing overflows horizontally. */
+export const EvidenceShapesNarrow: Story = {
+	...EvidenceShapes,
+	decorators: [
+		(Story) => (
+			<div className="bg-background text-foreground p-2" style={{ width: 375 }}>
+				<Story />
+			</div>
+		),
+	],
+	play: async (context) => {
+		await EvidenceShapes.play?.(context);
+		const root = context.canvasElement;
+		expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
 	},
 };
