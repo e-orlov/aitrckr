@@ -126,7 +126,8 @@ describe("UT-SNT-DIAG bounded diagnostic", () => {
 		});
 		expect(safe.envelope).toEqual({
 			generationId: null,
-			request: { model: SECRET.slice(0, 128), webSearch: false, maxToolCalls: null, maxOutputTokens: null },
+			// A request summary whose model is not the locked one is dropped whole: no input string is ever copied.
+			request: null,
 			usage: {
 				inputTokens: 10,
 				outputTokens: null,

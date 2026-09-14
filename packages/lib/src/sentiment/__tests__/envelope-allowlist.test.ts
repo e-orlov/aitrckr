@@ -146,24 +146,24 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			{},
 		];
 		for (const bad of invalidCounters) {
-			expect(usageOf({ inputTokens: bad }).inputTokens, `inputTokens ${String(bad)}`).toBeNull();
-			expect(usageOf({ outputTokens: bad }).outputTokens, `outputTokens ${String(bad)}`).toBeNull();
-			expect(usageOf({ reasoningTokens: bad }).reasoningTokens, `reasoningTokens ${String(bad)}`).toBeNull();
-			expect(usageOf({ webSearchRequests: bad }).webSearchRequests, `webSearchRequests ${String(bad)}`).toBeNull();
+			expect(usageOf({ inputTokens: bad })?.inputTokens, `inputTokens ${String(bad)}`).toBeNull();
+			expect(usageOf({ outputTokens: bad })?.outputTokens, `outputTokens ${String(bad)}`).toBeNull();
+			expect(usageOf({ reasoningTokens: bad })?.reasoningTokens, `reasoningTokens ${String(bad)}`).toBeNull();
+			expect(usageOf({ webSearchRequests: bad })?.webSearchRequests, `webSearchRequests ${String(bad)}`).toBeNull();
 			expect(requestOf({ maxToolCalls: bad })?.maxToolCalls, `maxToolCalls ${String(bad)}`).toBeNull();
 			expect(requestOf({ maxOutputTokens: bad })?.maxOutputTokens, `maxOutputTokens ${String(bad)}`).toBeNull();
 		}
 		for (const good of [0, 1, 8000, 2 ** 53 - 1]) {
-			expect(usageOf({ inputTokens: good }).inputTokens).toBe(good);
+			expect(usageOf({ inputTokens: good })?.inputTokens).toBe(good);
 			expect(requestOf({ maxOutputTokens: good })?.maxOutputTokens).toBe(good);
 		}
 		for (const bad of [-0.01, Number.NaN, Number.POSITIVE_INFINITY, "0.02", null, undefined]) {
-			expect(usageOf({ costUsd: bad }).costUsd, `costUsd ${String(bad)}`).toBeNull();
+			expect(usageOf({ costUsd: bad })?.costUsd, `costUsd ${String(bad)}`).toBeNull();
 		}
-		for (const good of [0, 0.020047, 1.5]) expect(usageOf({ costUsd: good }).costUsd).toBe(good);
-		expect(usageOf({ webSearchRequestsConflict: "true" }).webSearchRequestsConflict).toBe(false);
-		expect(usageOf({ webSearchRequestsConflict: 1 }).webSearchRequestsConflict).toBe(false);
-		expect(usageOf({ webSearchRequestsConflict: true }).webSearchRequestsConflict).toBe(true);
+		for (const good of [0, 0.020047, 1.5]) expect(usageOf({ costUsd: good })?.costUsd).toBe(good);
+		expect(usageOf({ webSearchRequestsConflict: "true" })?.webSearchRequestsConflict).toBe(false);
+		expect(usageOf({ webSearchRequestsConflict: 1 })?.webSearchRequestsConflict).toBe(false);
+		expect(usageOf({ webSearchRequestsConflict: true })?.webSearchRequestsConflict).toBe(true);
 		expect(requestOf({ webSearch: "true" })?.webSearch).toBe(false);
 		expect(requestOf({ webSearch: 1 })?.webSearch).toBe(false);
 		// Unknown fields never survive.

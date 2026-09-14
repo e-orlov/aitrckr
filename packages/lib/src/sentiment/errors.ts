@@ -100,32 +100,49 @@ export function sanitizeSentimentError(error: unknown, stage: "provider" | "pers
 }
 
 const GENERATION_ID = /^[A-Za-z0-9_-]{1,64}$/;
-const finiteOrNull = (value: unknown): number | null =>
-	typeof value === "number" && Number.isFinite(value) ? value : null;
 
-/** Only the numeric usage, the request summary's fixed fields and an opaque generation id survive. */
+/** A count: a finite, non-negative safe integer; anything else — including a numeric string — is not reported. */
+const countOrNull = (value: unknown): number | null =>
+	typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** An amount: a finite, non-negative number. */
+const amountOrNull = (value: unknown): number | null =>
+	typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+
+const record = (value: unknown): Record<string, unknown> | null =>
+	value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+
+/**
+ * The strict allowlist of what a paid response's envelope may leave behind.
+ * No input string is ever copied: the model is kept only when it is exactly
+ * the locked sentiment model (otherwise the whole request summary is
+ * dropped), the generation id only when it is an opaque identifier, counts
+ * only as safe non-negative integers, the cost only as a finite non-negative
+ * number, flags only as booleans. Unknown fields are ignored.
+ */
 function safeEnvelope(value: unknown): PaidResponseEnvelope | null {
-	if (!value || typeof value !== "object") return null;
-	const e = value as { generationId?: unknown; request?: unknown; usage?: unknown };
-	const u = e.usage && typeof e.usage === "object" ? (e.usage as Record<string, unknown>) : null;
-	const r = e.request && typeof e.request === "object" ? (e.request as Record<string, unknown>) : null;
+	const e = record(value);
+	if (!e) return null;
+	const r = record(e.request);
+	const u = record(e.usage);
 	return {
 		generationId: typeof e.generationId === "string" && GENERATION_ID.test(e.generationId) ? e.generationId : null,
-		request: r
-			? {
-					model: typeof r.model === "string" ? r.model.slice(0, 128) : "",
-					webSearch: r.webSearch === true,
-					maxToolCalls: finiteOrNull(r.maxToolCalls),
-					maxOutputTokens: finiteOrNull(r.maxOutputTokens),
-				}
-			: null,
+		request:
+			r && r.model === SENTIMENT_MODEL
+				? {
+						model: SENTIMENT_MODEL,
+						webSearch: r.webSearch === true,
+						maxToolCalls: countOrNull(r.maxToolCalls),
+						maxOutputTokens: countOrNull(r.maxOutputTokens),
+					}
+				: null,
 		usage: u
 			? {
-					inputTokens: finiteOrNull(u.inputTokens),
-					outputTokens: finiteOrNull(u.outputTokens),
-					reasoningTokens: finiteOrNull(u.reasoningTokens),
-					costUsd: finiteOrNull(u.costUsd),
-					webSearchRequests: finiteOrNull(u.webSearchRequests),
+					inputTokens: countOrNull(u.inputTokens),
+					outputTokens: countOrNull(u.outputTokens),
+					reasoningTokens: countOrNull(u.reasoningTokens),
+					costUsd: amountOrNull(u.costUsd),
+					webSearchRequests: countOrNull(u.webSearchRequests),
 					webSearchRequestsConflict: u.webSearchRequestsConflict === true,
 				}
 			: null,
