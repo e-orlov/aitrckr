@@ -261,7 +261,7 @@ describe("grounded evidence — RED before the corrective", () => {
 		expect(outcome).toMatchObject({ status: "skipped", reason: expect.stringContaining("terminal") });
 	});
 
-	it("5. the provider-facing schema cannot bind a free-form quote to the answer: a paraphrase passes the schema", () => {
+	it("5. the provider-facing schema binds evidence to anchor ids, so a free-form (paraphrased) quote no longer fits it", () => {
 		const jsonSchema = z.toJSONSchema(sentimentClassificationResultSchema) as {
 			$defs?: Record<string, unknown>;
 			properties?: Record<string, unknown>;
