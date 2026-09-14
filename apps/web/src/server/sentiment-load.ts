@@ -46,6 +46,7 @@ import { getEffectiveBrandedStatus } from "@workspace/lib/tag-utils";
 import { and, asc, desc, eq, gte, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { PgSelect } from "drizzle-orm/pg-core";
 import type { LookbackPeriod } from "@/lib/chart-utils";
+import { type ExcerptGroup, isExactEvidenceSpan, planExcerpts } from "@/lib/sentiment-excerpts";
 import { getTimezoneLookbackRange, resolveTimezone } from "@/lib/timezone-utils";
 
 export type SentimentAspectFilter = "overall" | SentimentAspectKey;
@@ -127,13 +128,12 @@ export interface SentimentEvidenceItem {
 	/** Exact excerpts with raw-body offsets and polarity. */
 	evidence: SentimentEvidence[];
 	/**
-	 * A short window of the stored answer around the first excerpt. Raw offset
-	 * `excerptStart` maps evidence offsets onto it: an excerpt character at
-	 * index `i` is raw offset `excerptStart + i` (the leading ellipsis, when
-	 * present, is accounted for).
+	 * Windows of the stored answer that together show every cited span in
+	 * full: one per span, merged where they overlap or touch. Highlights carry
+	 * raw offsets; a character at index `i` of `text` is raw offset
+	 * `excerptStart + i`.
 	 */
-	excerpt: string;
-	excerptStart: number;
+	excerpts: ExcerptGroup[];
 	aspects: { key: SentimentAspectKey; label: string; score: number; category: SentimentCategory }[];
 	/** The monitoring answer's own citations — deduplicated and bounded; never classifier search results. */
 	sources: { url: string; domain: string; title: string | null }[];
@@ -147,7 +147,6 @@ export interface SentimentEvidenceResponse {
 	lowest: SentimentEvidenceItem[];
 }
 
-const EXCERPT_RADIUS = 160;
 /** Original citations returned per stored answer in the evidence cards. */
 export const EVIDENCE_SOURCES_PER_RUN = 8;
 
@@ -572,21 +571,18 @@ export interface SentimentEvidenceScope extends SentimentScope {
 }
 
 /**
- * The answer window around the first excerpt, cut at raw offsets so the
- * client can highlight `evidence[i].start - excerptStart`. Excerpts are
- * stored with raw offsets; nothing is re-searched by text here.
+ * Excerpt windows for one observation, from the stored raw offsets only.
+ * A span that is not an exact slice of the stored body is left out rather
+ * than approximated; nothing is ever re-searched by text here.
  */
-function excerptAround(answer: string, evidence: SentimentEvidence[]): { excerpt: string; excerptStart: number } {
-	const first = evidence[0];
-	const anchor = first && first.start >= 0 && first.end <= answer.length ? first : null;
-	const start = anchor ? Math.max(0, anchor.start - EXCERPT_RADIUS) : 0;
-	const end = anchor
-		? Math.min(answer.length, anchor.end + EXCERPT_RADIUS)
-		: Math.min(answer.length, EXCERPT_RADIUS * 2);
-	return {
-		excerpt: `${start > 0 ? "…" : ""}${answer.slice(start, end)}${end < answer.length ? "…" : ""}`,
-		excerptStart: start > 0 ? start - 1 : 0,
-	};
+function excerptsFor(observationId: string, answer: string, evidence: SentimentEvidence[]): ExcerptGroup[] {
+	const exact = evidence.filter((span) => isExactEvidenceSpan(answer, span));
+	if (exact.length !== evidence.length) {
+		console.warn(
+			`[sentiment-evidence] observation ${observationId}: ${evidence.length - exact.length} evidence span(s) do not slice the stored answer and are not highlighted`,
+		);
+	}
+	return planExcerpts(answer, exact);
 }
 
 interface ExtremeRow {
@@ -874,7 +870,7 @@ export async function loadSentimentEvidence(scope: SentimentEvidenceScope): Prom
 			score: candidate.score,
 			category: (selectedAspect ? selectedAspect.category : observation.category) as SentimentCategory,
 			evidence,
-			...excerptAround(body, evidence),
+			excerpts: excerptsFor(observation.id, body, evidence),
 			aspects,
 			sources: sourcesByRun.get(run.id) ?? [],
 		};

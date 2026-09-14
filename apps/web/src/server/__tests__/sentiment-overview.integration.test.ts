@@ -325,12 +325,15 @@ describe("IT-SNT-007 sentiment evidence loader", () => {
 		expect(top.promptText).toBe("Tagged prompt about legal cover");
 		expect(top.tags).toEqual(["insurance"]);
 		expect(top.aspects).toEqual([{ key: "price", label: "Price", score: 20, category: "negative" }]);
-		expect(top.excerpt).toContain("Alpha is mentioned here");
+		expect(top.excerpts).toHaveLength(1);
+		expect(top.excerpts[0].text).toContain("Alpha is mentioned here");
 		// B7: the stored raw offsets resolve to the cited characters inside the excerpt window.
 		const span = top.evidence[0];
-		expect(top.excerpt.slice(span.start - top.excerptStart, span.end - top.excerptStart)).toBe(
+		const [group] = top.excerpts;
+		expect(group.text.slice(span.start - group.excerptStart, span.end - group.excerptStart)).toBe(
 			"Alpha is mentioned here",
 		);
+		expect(group.highlights).toEqual([{ start: span.start, end: span.end, polarities: ["positive"] }]);
 		expect(span.polarity).toBe("positive");
 		expect(evidence.lowest[0].sources).toEqual([]);
 		expect(JSON.stringify(evidence)).not.toMatch(/openrouter|gpt-5|classifier/);
@@ -342,12 +345,8 @@ describe("IT-SNT-007 sentiment evidence loader", () => {
 		expect(evidence.highest.map((i) => `${i.score}:${i.category}`)).toEqual(["20:negative"]);
 		expect(evidence.lowest).toEqual([]);
 		const span = evidence.highest[0].evidence[0];
-		expect(
-			evidence.highest[0].excerpt.slice(
-				span.start - evidence.highest[0].excerptStart,
-				span.end - evidence.highest[0].excerptStart,
-			),
-		).toBe("Sent IT too");
+		const [group] = evidence.highest[0].excerpts;
+		expect(group.text.slice(span.start - group.excerptStart, span.end - group.excerptStart)).toBe("Sent IT too");
 	});
 
 	it("rejects an entity that does not belong to the brand", async () => {

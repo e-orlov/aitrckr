@@ -126,17 +126,18 @@ describe("IT-SNT-EXC-001 evidence loader exposes every cited span in full", () =
 		expect(evidence.totalObservations).toBe(1);
 		const item = evidence.highest[0];
 		expect(item.evidence).toHaveLength(3);
-		const html = renderToStaticMarkup(
-			createElement(Fragment, null, ...highlightExcerpt(item.excerpt, item.evidence, item.excerptStart)),
+		const marks = item.excerpts.flatMap((group) =>
+			marksOf(renderToStaticMarkup(createElement(Fragment, null, ...highlightExcerpt(group)))),
 		);
-		const marks = marksOf(html);
 		for (const span of THREE_DISTANT_SPANS) {
 			expect(marks, `span ${span.start}-${span.end} must be rendered in full`).toContain(
 				LONG_ANSWER.slice(span.start, span.end),
 			);
 		}
 		expect(marks).toHaveLength(3);
-		// The card never becomes the whole answer.
-		expect(item.excerpt.length).toBeLessThan(LONG_ANSWER.length);
+		// Three distant anchors → three separate groups, each an exact raw slice, and never the whole answer.
+		expect(item.excerpts).toHaveLength(3);
+		for (const group of item.excerpts) expect(group.text).toBe(LONG_ANSWER.slice(group.excerptStart, group.excerptEnd));
+		expect(item.excerpts.reduce((n, g) => n + g.text.length, 0)).toBeLessThan(LONG_ANSWER.length);
 	});
 });

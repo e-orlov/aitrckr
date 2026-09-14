@@ -2,7 +2,7 @@
  * The two evidence areas under an expanded leaderboard row: up to ten
  * highest- and ten lowest-sentiment answers for one entity, side by side on
  * wide screens and stacked on narrow ones. Each item shows the score and
- * category, the exact excerpt highlighted inside a short answer window, the
+ * category, every cited span highlighted inside its own short answer window, the
  * prompt, date and tags, aspect labels, the monitoring answer's own source
  * links (never classifier search results) and a deep link to the stored
  * response. No model, provider or classifier version is shown anywhere.
@@ -15,45 +15,75 @@ import { ExternalLink } from "lucide-react";
 import type { ReactNode } from "react";
 import { CATEGORY_STYLE, formatScore } from "@/components/sentiment/format";
 import { type SentimentFilters, useSentimentEvidence } from "@/hooks/use-sentiment";
+import type { ExcerptGroup } from "@/lib/sentiment-excerpts";
 import type { SentimentAspectParam } from "@/lib/sentiment-search";
 import type { SentimentEvidenceItem, SentimentEvidenceResponse } from "@/server/sentiment";
 
+const POLARITY_LABEL: Record<string, string> = { positive: "positive", negative: "negative", neutral: "neutral" };
+
 /**
- * Wrap the stored evidence spans in `<mark>` using their raw offsets mapped
- * onto the excerpt window (`start - excerptStart`), clipped to the window and
- * without overlapping. Nothing is re-searched by text, so an excerpt whose
- * stored form differs from the model's quote in whitespace or Unicode form
- * still highlights exactly the cited characters.
+ * Wrap the highlights of one excerpt group in `<mark>` using their raw
+ * offsets mapped onto the group (`start - excerptStart`). Every highlight is
+ * an exact slice of the stored answer and lies inside its group by
+ * construction, so the marked text is the cited text — nothing is searched
+ * or re-derived from normalized text.
  */
-export function highlightExcerpt(
-	excerpt: string,
-	spans: readonly { start: number; end: number }[],
-	excerptStart: number,
-): ReactNode[] {
-	const ranges: [number, number][] = [];
-	for (const span of spans) {
-		const start = Math.max(0, span.start - excerptStart);
-		const end = Math.min(excerpt.length, span.end - excerptStart);
-		if (end > start) ranges.push([start, end]);
-	}
-	ranges.sort((a, b) => a[0] - b[0]);
+export function highlightExcerpt(group: ExcerptGroup): ReactNode[] {
 	const parts: ReactNode[] = [];
 	let cursor = 0;
-	for (const [start, end] of ranges) {
-		if (start < cursor) continue;
-		if (start > cursor) parts.push(excerpt.slice(cursor, start));
+	for (const highlight of group.highlights) {
+		const start = highlight.start - group.excerptStart;
+		const end = highlight.end - group.excerptStart;
+		if (start > cursor) parts.push(group.text.slice(cursor, start));
 		parts.push(
 			<mark
-				key={`${start}-${end}`}
+				key={`${highlight.start}-${highlight.end}`}
 				className="rounded-sm bg-yellow-200/70 px-0.5 text-foreground dark:bg-yellow-500/30"
+				data-polarity={highlight.polarities.join(",")}
+				title={`Cited evidence (${highlight.polarities.map((p) => POLARITY_LABEL[p] ?? p).join(" and ")})`}
 			>
-				{excerpt.slice(start, end)}
+				{group.text.slice(start, end)}
 			</mark>,
 		);
 		cursor = end;
 	}
-	if (cursor < excerpt.length) parts.push(excerpt.slice(cursor));
+	if (cursor < group.text.length) parts.push(group.text.slice(cursor));
 	return parts;
+}
+
+/**
+ * All excerpt groups of one answer, in reading order, each with its own
+ * ellipses only where stored text is really skipped. Several groups are
+ * separated visually and numbered so a reader can tell three distant
+ * citations from one continuous passage; the card never grows into the
+ * whole answer because every group is bounded by the planner's radius.
+ */
+function EvidenceExcerpts({ excerpts }: { excerpts: ExcerptGroup[] }) {
+	const many = excerpts.length > 1;
+	return (
+		<ol className="mt-2 grid gap-2" data-testid="sentiment-evidence-excerpts" data-count={excerpts.length}>
+			{excerpts.map((group, index) => (
+				<li
+					key={group.excerptStart}
+					className={many ? "border-l-2 border-muted pl-2" : undefined}
+					data-testid="sentiment-evidence-excerpt"
+					data-excerpt-start={group.excerptStart}
+					data-excerpt-end={group.excerptEnd}
+				>
+					{many && (
+						<span className="text-muted-foreground block text-[10px] font-medium uppercase tracking-wide">
+							Evidence {index + 1} of {excerpts.length}
+						</span>
+					)}
+					<p className="text-muted-foreground whitespace-pre-line text-xs leading-relaxed">
+						{group.leadingEllipsis && <span aria-hidden="true">… </span>}
+						{highlightExcerpt(group)}
+						{group.trailingEllipsis && <span aria-hidden="true"> …</span>}
+					</p>
+				</li>
+			))}
+		</ol>
+	);
 }
 
 function EvidenceCard({
@@ -85,12 +115,7 @@ function EvidenceCard({
 				)}
 				<span className="text-muted-foreground ml-auto text-xs">{date}</span>
 			</div>
-			<p
-				className="text-muted-foreground mt-2 line-clamp-6 whitespace-pre-line text-xs leading-relaxed"
-				data-testid="sentiment-evidence-excerpt"
-			>
-				{highlightExcerpt(item.excerpt, item.evidence, item.excerptStart)}
-			</p>
+			<EvidenceExcerpts excerpts={item.excerpts} />
 			<p className="mt-2 truncate text-xs" title={item.promptText}>
 				<span className="text-muted-foreground">Prompt: </span>
 				{item.promptText}
