@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SentimentClassification } from "../classifier";
 import { SentimentValidationError, sentimentInputHash } from "../classifier";
 import type { DetectableEntity } from "../detector";
+import { diagnostic } from "../diagnostics";
 import { enqueueSentimentBestEffort } from "../enqueue";
 import { ClaimLostError, SentimentJobError } from "../errors";
 import { runSentimentJob, type SentimentJobDeps } from "../job";
@@ -405,6 +406,50 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(usage).toEqual([
 			expect.objectContaining({ succeeded: false, provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL }),
 		]);
+	});
+
+	it("a paid answer rejected before the request left is attributed nothing; one rejected after it is attributed its charged cost, and the envelope survives without any text", async () => {
+		const refused = deps({
+			classify: vi.fn(async () => {
+				throw new SentimentValidationError("answer-unsegmentable", "no citable segment").beforeRequest();
+			}),
+		});
+		await expect(runSentimentJob(payload, refused.d)).rejects.toBeInstanceOf(SentimentJobError);
+		expect(refused.usage).toEqual([]);
+
+		const envelope = {
+			generationId: "gen-abc123",
+			request: { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+			usage: {
+				inputTokens: 6410,
+				outputTokens: 812,
+				reasoningTokens: 300,
+				costUsd: 0.020047,
+				webSearchRequests: 1,
+				webSearchRequestsConflict: false,
+			},
+		};
+		const paid = deps({
+			classify: vi.fn(async () => {
+				throw new SentimentValidationError(
+					"mixed-needs-dual-evidence",
+					`entity "c-huk": ${"HUK ist teuer. ".repeat(50)}`,
+					diagnostic("cross-field", "mixed-needs-dual-evidence", { entityKey: "c-huk" }),
+				).withEnvelope(envelope);
+			}),
+		});
+		const thrown = await runSentimentJob(payload, paid.d).catch((error: unknown) => error);
+		expect(thrown).toBeInstanceOf(SentimentJobError);
+		expect(thrown).toMatchObject({ code: "mixed-needs-dual-evidence", envelope, diagnostic: { entityKey: "c-huk" } });
+		expect(paid.usage).toEqual([
+			expect.objectContaining({ succeeded: false, provider: SENTIMENT_PROVIDER_ID, actualCostUsd: 0.020047 }),
+		]);
+		const failed = paid.marks.at(-1) as { errorMessage: string };
+		expect(failed.errorMessage).toContain('diagnostic={"stage":"cross-field"');
+		expect(failed.errorMessage).toContain('"generationId":"gen-abc123"');
+		expect(`${failed.errorMessage}${JSON.stringify(thrown)}${(thrown as Error).message}`).not.toContain(
+			"HUK ist teuer",
+		);
 	});
 
 	it("sanitizes provider errors: no key, answer text or response body reaches the row or the thrown error", async () => {

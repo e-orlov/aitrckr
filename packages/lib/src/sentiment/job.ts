@@ -5,8 +5,8 @@ import {
 	ClaimLostError,
 	type SafeSentimentError,
 	SentimentJobError,
-	safeErrorMessage,
 	sanitizeSentimentError,
+	storedErrorMessage,
 } from "./errors";
 import {
 	type AnalysisClaim,
@@ -96,7 +96,7 @@ function failAttempt(claim: AnalysisClaim, safe: SafeSentimentError, deps: Senti
 	return (deps.markAnalysis ?? markAnalysis)(claim, {
 		status: "failed",
 		errorCode: safe.code,
-		errorMessage: safeErrorMessage(safe),
+		errorMessage: storedErrorMessage(safe),
 	});
 }
 
@@ -124,7 +124,15 @@ async function classifyAndPersist(
 		const safe = sanitizeSentimentError(error);
 		const owned = await failAttempt(claim, safe, deps);
 		if (safe.requestSent) {
-			await recordUsage({ ...usage, provider: safe.provider, model: safe.model, succeeded: false });
+			// A rejected answer was still paid for: the cost the provider
+			// reported for it is what gets attributed, not the estimate.
+			await recordUsage({
+				...usage,
+				provider: safe.provider,
+				model: safe.model,
+				succeeded: false,
+				actualCostUsd: safe.envelope?.usage?.costUsd ?? null,
+			});
 		}
 		if (!owned) return { status: "claim-lost", generation: claim.generation };
 		throw new SentimentJobError(safe);

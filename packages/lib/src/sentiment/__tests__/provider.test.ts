@@ -168,10 +168,12 @@ describe("CT-SNT-002 sentiment provider lock", () => {
 			maxToolCalls: 1,
 			maxOutputTokens: 8000,
 		});
-		// The classification carries only the bounded verbatim excerpts by contract, never the raw
-		// payload, its ids, provider field names, the prompt, headers or credentials.
+		// The classification carries the bounded verbatim excerpts and the opaque generation id by
+		// contract, never the raw payload, provider field names, the prompt, headers or credentials.
+		expect(result.generationId).toBe("gen-abc");
 		const serialized = JSON.stringify(result);
-		expect(serialized).not.toMatch(/sk-or-|gen-abc|Authorization|Bearer|prompt_tokens|server_tool_use|choices/);
+		expect(serialized).not.toMatch(/sk-or-|Authorization|Bearer|prompt_tokens|server_tool_use|choices/);
+		expect(serialized).not.toContain("gpt-5-mini-2025-08-07");
 		expect(serialized).not.toContain("You are an analyst");
 		expect(logs.join("\n")).not.toMatch(/sk-or-|gen-abc|Bearer/);
 		expect(logs.join("\n")).not.toContain(answer);

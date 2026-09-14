@@ -9,6 +9,9 @@ import type {
 import { SENTIMENT_EVIDENCE_VERSION } from "./anchors";
 import { classifySentiment, SENTIMENT_MAX_OUTPUT_TOKENS, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
+import type { SentimentDiagnostic } from "./diagnostics";
+import { SentimentJobError } from "./errors";
+import type { PaidResponseEnvelope } from "./errors-validation";
 import { runSentimentJob, type SentimentJobDeps, type SentimentJobOutcome } from "./job";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
@@ -172,7 +175,15 @@ export type SentimentCanaryOutcome =
 			usage?: StructuredResearchUsage;
 			request?: StructuredResearchRequestSummary;
 	  }
-	| { status: "error"; name: string; code: string | null; httpStatus: number | null };
+	| {
+			status: "error";
+			name: string;
+			code: string | null;
+			httpStatus: number | null;
+			/** Present when the failure came after a paid answer: what was charged and which generation, never its text. */
+			envelope?: PaidResponseEnvelope | null;
+			diagnostic?: SentimentDiagnostic | null;
+	  };
 
 export interface SentimentCanaryReport {
 	runId: string;
@@ -537,6 +548,9 @@ function safeOutcomeForError(error: unknown): SentimentCanaryOutcome {
 		name: typeof e?.name === "string" ? e.name : "Error",
 		code: typeof e?.code === "string" ? e.code : null,
 		httpStatus: typeof e?.httpStatus === "number" ? e.httpStatus : null,
+		// SentimentJobError only ever carries the sanitized envelope and diagnostic.
+		...(error instanceof SentimentJobError && error.envelope ? { envelope: error.envelope } : {}),
+		...(error instanceof SentimentJobError && error.diagnostic ? { diagnostic: error.diagnostic } : {}),
 	};
 }
 
