@@ -79,6 +79,29 @@ export interface StructuredResearchResult<T> {
 	modelVersion?: string;
 	usage?: StructuredResearchUsage;
 	request?: StructuredResearchRequestSummary;
+	/** Opaque provider generation id, for audit and billing reconciliation; null when not reported. */
+	generationId?: string | null;
+}
+
+/**
+ * The provider answered (and charged) but the content could not be turned
+ * into the requested object: no content, invalid JSON, or a schema mismatch.
+ * Carries only the paid response's envelope — never the completion text.
+ */
+export class StructuredResearchResponseError extends Error {
+	constructor(
+		readonly code: "no-content" | "invalid-json" | "schema",
+		readonly envelope: {
+			provider: string;
+			model: string | null;
+			generationId: string | null;
+			request: StructuredResearchRequestSummary;
+			usage: StructuredResearchUsage | undefined;
+		},
+	) {
+		super(`structured research response rejected: ${code}`);
+		this.name = "StructuredResearchResponseError";
+	}
 }
 
 /**

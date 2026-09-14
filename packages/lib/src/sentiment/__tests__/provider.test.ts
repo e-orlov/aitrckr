@@ -22,7 +22,7 @@ const goodAnswer = {
 			score: 80,
 			category: "positive",
 			confidence: 0.9,
-			evidence: [{ quote: "Arvo ist empfehlenswert.", polarity: "positive" }],
+			evidence: [{ anchorId: "s0001", polarity: "positive" }],
 			aspects: [],
 		},
 	],

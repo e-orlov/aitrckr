@@ -1,6 +1,6 @@
+import { type EvidenceAnchor, segmentAnswer } from "./anchors";
 import {
 	EVIDENCE_MAX_ITEMS,
-	EVIDENCE_QUOTE_MAX_LENGTH,
 	SENTIMENT_ASPECT_KEYS,
 	SENTIMENT_ASPECTS,
 	type SentimentCandidate,
@@ -24,7 +24,7 @@ Rules:
 - Different entities in the same answer may have different sentiment; repeated mentions of one entity are one observation.
 - Confidence is 0..1 for how unambiguous the evidence is.`;
 
-export const SENTIMENT_EVIDENCE_RULES = `Evidence must be exact, verbatim excerpts copied from the ANSWER (max ${EVIDENCE_QUOTE_MAX_LENGTH} characters each, at most ${EVIDENCE_MAX_ITEMS} per item). Do not paraphrase, translate, fix typos or merge sentences. Label every excerpt with its "polarity": "positive", "negative" or "neutral" for what that excerpt says about the entity. A "mixed" item needs at least two excerpts: one labelled positive, one labelled negative.`;
+export const SENTIMENT_EVIDENCE_RULES = `Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]. For every entity and aspect item, list at most ${EVIDENCE_MAX_ITEMS} evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity. Never invent ids, never quote or rewrite text. A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative (the same segment may carry both only when it states both sides).`;
 
 export function aspectTaxonomyText(): string {
 	return SENTIMENT_ASPECT_KEYS.map((key) => {
@@ -40,7 +40,18 @@ export function aspectTaxonomyText(): string {
  * allowed only to disambiguate identities; it may never add, replace or
  * correct sentiment that the stored answer does not express.
  */
-export function buildSentimentPrompt(args: { answerBody: string; candidates: SentimentCandidate[] }): string {
+/** The answer as the model receives it: every anchor once, in order, prefixed by its id. */
+export function renderAnchoredAnswer(anchors: readonly EvidenceAnchor[]): string {
+	return anchors.map((anchor) => `[${anchor.id}] ${anchor.text}`).join("\n");
+}
+
+export function buildSentimentPrompt(args: {
+	answerBody: string;
+	candidates: SentimentCandidate[];
+	/** Pre-computed anchors of `answerBody`; segmented here when omitted. */
+	anchors?: readonly EvidenceAnchor[];
+}): string {
+	const anchors = args.anchors ?? segmentAnswer(args.answerBody);
 	const entityList = sortSentimentEntities(args.candidates)
 		.map((candidate) => {
 			const aliases = candidate.aliases.length > 0 ? ` (also known as: ${candidate.aliases.join(", ")})` : "";
@@ -51,7 +62,7 @@ export function buildSentimentPrompt(args: { answerBody: string; candidates: Sen
 
 	return `You are an analyst measuring how an AI assistant's stored answer portrays specific insurance companies.
 
-You will receive the ANSWER (a stored response) and a list of ENTITIES with fixed keys. Return one item per entity key — every listed key exactly once, no other keys. Your judgement must be based ONLY on the text of the ANSWER. You may use web search solely to recognise which company a name, abbreviation or domain refers to; never to look up reputation, reviews or facts and never to change a sentiment the ANSWER does not express itself.
+You will receive the ANSWER (a stored response, split into numbered segments) and a list of ENTITIES with fixed keys. Return one item per entity key — every listed key exactly once, no other keys. Your judgement must be based ONLY on the text of the ANSWER. You may use web search solely to recognise which company a name, abbreviation or domain refers to; never to look up reputation, reviews or facts and never to change a sentiment the ANSWER does not express itself.
 
 ${SENTIMENT_SCORE_RULES}
 
@@ -63,8 +74,8 @@ ${SENTIMENT_EVIDENCE_RULES}
 ENTITIES:
 ${entityList}
 
-ANSWER:
+ANSWER (segments; cite by id):
 """
-${args.answerBody}
+${renderAnchoredAnswer(anchors)}
 """`;
 }

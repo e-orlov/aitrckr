@@ -95,17 +95,8 @@ function fakeProvider(
 					score: key === "brand" ? 60 : 82,
 					category: "positive",
 					confidence: 0.9,
-					evidence: [
-						{
-							quote:
-								key === ALPHA
-									? "Alpha handles claims fast and fairly"
-									: key === NEWCO
-										? "Newco is also mentioned"
-										: "Sent Pipe is fine",
-							polarity: "positive",
-						},
-					],
+					// The answer segments into one anchor per sentence: Alpha, Newco, Sent Pipe.
+					evidence: [{ anchorId: key === ALPHA ? "s0001" : key === NEWCO ? "s0002" : "s0003", polarity: "positive" }],
 					aspects:
 						key === ALPHA
 							? [
@@ -114,7 +105,7 @@ function fakeProvider(
 										score: 85,
 										category: "positive",
 										confidence: 0.9,
-										evidence: [{ quote: "handles claims fast", polarity: "positive" }],
+										evidence: [{ anchorId: "s0001", polarity: "positive" }],
 									},
 								]
 							: [],
@@ -372,7 +363,8 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 			ALPHA,
 		]);
 		const span = evidence.rows[0].evidence[0];
-		expect(ANSWER.slice(span.start, span.end)).toBe("Alpha handles claims fast and fairly");
+		expect(ANSWER.slice(span.start, span.end)).toBe("Alpha handles claims fast and fairly.");
+		expect(span.quote).toBe("Alpha handles claims fast and fairly.");
 		expect(span.polarity).toBe("positive");
 	});
 
@@ -685,7 +677,7 @@ describe("IT-SNT-014 superseded mention lifecycle", () => {
 							score: 75,
 							category: "positive",
 							confidence: 0.9,
-							evidence: [{ quote: "Alphaline shows up", polarity: "positive" }],
+							evidence: [{ anchorId: "s0001", polarity: "positive" }],
 							aspects: [],
 						},
 					],

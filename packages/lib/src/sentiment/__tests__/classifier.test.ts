@@ -1,14 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "../../providers/types";
+import { segmentAnswer } from "../anchors";
 import {
 	classifySentiment,
-	locateEvidence,
 	SentimentValidationError,
 	sentimentInputHash,
 	validateSentimentResult,
 } from "../classifier";
-import { buildSentimentPrompt } from "../prompt";
-import { normalizeIndexed, normalizeText } from "../text";
+import { buildSentimentPrompt, renderAnchoredAnswer } from "../prompt";
 import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION, type SentimentCandidate } from "../types";
 
 const answer =
@@ -19,6 +18,7 @@ const candidates: SentimentCandidate[] = [
 	{ key: "c-wgv", entityType: "competitor", competitorId: "c-wgv", name: "WGV", aliases: [] },
 ];
 
+// s0001 = the ARAG sentence, s0002 = the HUK sentence, s0003 = the WGV sentence.
 const good = {
 	entities: [
 		{
@@ -26,21 +26,21 @@ const good = {
 			score: 80,
 			category: "positive",
 			confidence: 0.9,
-			evidence: [{ quote: "ARAG ist nicht teuer und bietet einen sehr guten Service.", polarity: "positive" }],
+			evidence: [{ anchorId: "s0001", polarity: "positive" }],
 			aspects: [
 				{
 					key: "price",
 					score: 70,
 					category: "positive",
 					confidence: 0.8,
-					evidence: [{ quote: "nicht teuer", polarity: "positive" }],
+					evidence: [{ anchorId: "s0001", polarity: "positive" }],
 				},
 				{
 					key: "service",
 					score: 85,
 					category: "positive",
 					confidence: 0.9,
-					evidence: [{ quote: "sehr guten Service", polarity: "positive" }],
+					evidence: [{ anchorId: "s0001", polarity: "positive" }],
 				},
 			],
 		},
@@ -50,8 +50,8 @@ const good = {
 			category: "mixed",
 			confidence: 0.7,
 			evidence: [
-				{ quote: "HUK-COBURG ist günstig", polarity: "positive" },
-				{ quote: "die Schadenabwicklung dauert lange", polarity: "negative" },
+				{ anchorId: "s0002", polarity: "positive" },
+				{ anchorId: "s0002", polarity: "negative" },
 			],
 			aspects: [
 				{
@@ -59,14 +59,14 @@ const good = {
 					score: 75,
 					category: "positive",
 					confidence: 0.8,
-					evidence: [{ quote: "ist günstig", polarity: "positive" }],
+					evidence: [{ anchorId: "s0002", polarity: "positive" }],
 				},
 				{
 					key: "service",
 					score: 25,
 					category: "negative",
 					confidence: 0.8,
-					evidence: [{ quote: "Schadenabwicklung dauert lange", polarity: "negative" }],
+					evidence: [{ anchorId: "s0002", polarity: "negative" }],
 				},
 			],
 		},
@@ -75,15 +75,17 @@ const good = {
 			score: 50,
 			category: "neutral",
 			confidence: 0.95,
-			evidence: [{ quote: "WGV wird nur genannt.", polarity: "neutral" }],
+			evidence: [{ anchorId: "s0003", polarity: "neutral" }],
 			aspects: [],
 		},
 	],
 };
 
+const validate = (raw: unknown) => validateSentimentResult(raw, { answerBody: answer, candidates });
+
 describe("UT-SNT-006 evidence and consistency validation", () => {
-	it("accepts a grounded, consistent result and resolves evidence offsets into the raw stored body", () => {
-		const entities = validateSentimentResult(good, { answerBody: answer, candidates });
+	it("accepts a grounded, consistent result and resolves anchors into exact raw slices of the stored body", () => {
+		const entities = validate(good);
 		expect(entities.map((e) => `${e.key}:${e.category}:${e.score}`)).toEqual([
 			"brand:positive:80",
 			"c-huk:mixed:50",
@@ -95,86 +97,67 @@ describe("UT-SNT-006 evidence and consistency validation", () => {
 				expect(ev.quote).toBe(ev.quote.trim());
 			}
 		}
+		expect(entities[0].evidence[0]).toEqual({
+			quote: "ARAG ist nicht teuer und bietet einen sehr guten Service.",
+			start: 0,
+			end: 57,
+			polarity: "positive",
+		});
+		expect(entities[2].evidence[0]).toMatchObject({ quote: "WGV wird nur genannt.", start: 129, end: 150 });
 		expect(entities[1].evidence.map((ev) => ev.polarity)).toEqual(["positive", "negative"]);
 		expect(entities[1].aspects.map((a) => `${a.key}:${a.category}`)).toEqual(["price:positive", "service:negative"]);
 	});
 
-	it("tolerates whitespace and Unicode differences in excerpts but rejects paraphrases", () => {
-		const indexed = normalizeIndexed(answer);
-		const hit = locateEvidence(indexed, answer, "HUK-COBURG   ist\ngünstig", "positive");
-		expect(hit).not.toBeNull();
-		expect(answer.slice(hit?.start, hit?.end)).toBe("HUK-COBURG ist günstig");
-		expect(locateEvidence(indexed, answer, "HUK-COBURG ist billig", "positive")).toBeNull();
-		const bad = structuredClone(good);
-		bad.entities[2].evidence = [{ quote: "WGV is only mentioned.", polarity: "neutral" }];
-		expect(() => validateSentimentResult(bad, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "evidence-not-in-answer" }),
-		);
+	it("rejects an anchor that is not part of the answer, and free-text excerpts are no longer accepted at all", () => {
+		const unknown = structuredClone(good);
+		unknown.entities[2].evidence = [{ anchorId: "s0004", polarity: "neutral" }];
+		expect(() => validate(unknown)).toThrow(expect.objectContaining({ code: "evidence-unknown-anchor" }));
+		const malformed = structuredClone(good);
+		malformed.entities[2].evidence = [{ anchorId: "WGV wird nur genannt.", polarity: "neutral" }];
+		expect(() => validate(malformed)).toThrow(expect.objectContaining({ code: "schema" }));
+		const quoted = structuredClone(good) as unknown as { entities: { evidence: unknown[] }[] };
+		quoted.entities[2].evidence = [{ quote: "WGV wird nur genannt.", polarity: "neutral" }];
+		expect(() => validate(quoted)).toThrow(expect.objectContaining({ code: "schema" }));
 	});
 
-	it("whole-string NFKC: decomposed body vs composed quote, and the reverse, resolve to exact raw slices", () => {
-		// Decomposed raw (e + U+0301), composed quote.
-		const decomposed = "Das Cafe\u0301 am Markt ist ausgezeichnet.";
-		const hit1 = locateEvidence(normalizeIndexed(decomposed), decomposed, "Caf\u00e9 am Markt", "positive");
-		expect(hit1).not.toBeNull();
-		expect(hit1).toMatchObject({ start: 4, end: 18 });
-		expect(decomposed.slice(hit1?.start, hit1?.end)).toBe("Cafe\u0301 am Markt");
-		expect(hit1?.quote).toBe("Cafe\u0301 am Markt");
-		// Composed raw, decomposed quote.
-		const composed = "Das Caf\u00e9 am Markt ist ausgezeichnet.";
-		const hit2 = locateEvidence(normalizeIndexed(composed), composed, "Cafe\u0301 am Markt", "positive");
-		expect(hit2).toMatchObject({ start: 4, end: 17 });
-		expect(composed.slice(hit2?.start, hit2?.end)).toBe("Caf\u00e9 am Markt");
-		// Composition across two adjacent code points inside a larger word (o + U+0308 → ö) with a stacked second mark.
-		const stacked = "Sch\u006f\u0308\u0301n und gut";
-		const hit3 = locateEvidence(normalizeIndexed(stacked), stacked, "sch\u00f6\u0301n", "positive");
-		expect(hit3).toMatchObject({ start: 0, end: 7 });
-		expect(stacked.slice(hit3?.start, hit3?.end)).toBe("Sch\u006f\u0308\u0301n");
-		// NFKC compatibility: circled digit, ligature and fullwidth letter in the body, plain ASCII in the quote.
-		const compat = "Tarif \u2460 ist \ufb01x und \uff21AA-bewertet";
-		const hit4 = locateEvidence(normalizeIndexed(compat), compat, "1 ist fix und AAA-bewertet", "positive");
-		expect(hit4).toMatchObject({ start: 6, end: compat.length });
-		expect(normalizeText(compat.slice(hit4?.start, hit4?.end))).toBe("1 ist fix und aaa-bewertet");
-		// The normalized text itself is the whole-string NFKC of the body, folded.
-		expect(normalizeIndexed(decomposed).text).toBe(decomposed.normalize("NFKC").toLowerCase());
-		expect(normalizeIndexed(compat).text).toBe(compat.normalize("NFKC").toLowerCase());
+	it("the resolved evidence is decided by the code, not the model: the same anchor id always yields the same slice", () => {
+		const anchors = segmentAnswer(answer);
+		expect(anchors.map((a) => a.id)).toEqual(["s0001", "s0002", "s0003"]);
+		const entities = validate(good);
+		const huk = anchors[1];
+		for (const ev of entities[1].evidence) {
+			expect(ev).toMatchObject({ quote: huk.text, start: huk.start, end: huk.end });
+		}
 	});
 
-	it("B7: offsets survive NFKC ligatures, fullwidth letters and collapsed whitespace in the stored body", () => {
-		const raw = "Die  Schadenregulierung\u00a0ist   e\uFB03zient;\n\n\uFF21RAG   bleibt  fair.";
-		const indexed = normalizeIndexed(raw);
-		const hit = locateEvidence(indexed, raw, "schadenregulierung ist effizient; arag bleibt fair", "positive");
-		expect(hit).not.toBeNull();
-		if (!hit) return;
-		expect(raw.slice(hit.start, hit.end)).toBe(
-			"Schadenregulierung\u00a0ist   e\uFB03zient;\n\n\uFF21RAG   bleibt  fair",
-		);
-		expect(hit.quote).toBe(raw.slice(hit.start, hit.end));
-		expect(normalizeText(hit.quote)).toBe("schadenregulierung ist effizient; arag bleibt fair");
+	it("forbids the same (anchor, polarity) twice and two polarities on one anchor outside a Mixed verdict", () => {
+		const duplicate = structuredClone(good);
+		duplicate.entities[0].evidence = [
+			{ anchorId: "s0001", polarity: "positive" },
+			{ anchorId: "s0001", polarity: "positive" },
+		];
+		expect(() => validate(duplicate)).toThrow(expect.objectContaining({ code: "evidence-duplicate" }));
+		const conflict = structuredClone(good);
+		conflict.entities[0].evidence = [
+			{ anchorId: "s0001", polarity: "positive" },
+			{ anchorId: "s0001", polarity: "negative" },
+		];
+		expect(() => validate(conflict)).toThrow(expect.objectContaining({ code: "evidence-anchor-polarity-conflict" }));
 	});
 
-	it("requires one positive and one negative excerpt for Mixed; two same-polarity excerpts fail", () => {
+	it("requires one positive and one negative citation for Mixed; two same-polarity citations fail", () => {
 		const single = structuredClone(good);
-		single.entities[1].evidence = [{ quote: "HUK-COBURG ist günstig", polarity: "positive" }];
-		expect(() => validateSentimentResult(single, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "mixed-needs-dual-evidence" }),
-		);
+		single.entities[1].evidence = [{ anchorId: "s0002", polarity: "positive" }];
+		expect(() => validate(single)).toThrow(expect.objectContaining({ code: "mixed-needs-dual-evidence" }));
 		const samePolarity = structuredClone(good);
 		samePolarity.entities[1].evidence = [
-			{ quote: "HUK-COBURG ist günstig", polarity: "positive" },
-			{ quote: "die Schadenabwicklung dauert lange", polarity: "positive" },
+			{ anchorId: "s0002", polarity: "positive" },
+			{ anchorId: "s0003", polarity: "positive" },
 		];
-		expect(() => validateSentimentResult(samePolarity, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "mixed-needs-dual-evidence" }),
-		);
+		expect(() => validate(samePolarity)).toThrow(expect.objectContaining({ code: "mixed-needs-dual-evidence" }));
 		const noPolarity = structuredClone(good) as unknown as { entities: { evidence: unknown[] }[] };
-		noPolarity.entities[1].evidence = [
-			{ quote: "HUK-COBURG ist günstig" },
-			{ quote: "die Schadenabwicklung dauert lange" },
-		];
-		expect(() => validateSentimentResult(noPolarity, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "schema" }),
-		);
+		noPolarity.entities[1].evidence = [{ anchorId: "s0002" }, { anchorId: "s0003" }];
+		expect(() => validate(noPolarity)).toThrow(expect.objectContaining({ code: "schema" }));
 	});
 
 	it("B8: the input hash covers the normalized body and every candidate identity in stable order", () => {
@@ -193,58 +176,69 @@ describe("UT-SNT-006 evidence and consistency validation", () => {
 	it("rejects inconsistent score/category pairs on entities and aspects", () => {
 		const bad = structuredClone(good);
 		bad.entities[0].score = 50;
-		expect(() => validateSentimentResult(bad, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "score-category" }),
-		);
+		expect(() => validate(bad)).toThrow(expect.objectContaining({ code: "score-category" }));
 		const badAspect = structuredClone(good);
 		badAspect.entities[0].aspects[0].category = "negative";
-		expect(() => validateSentimentResult(badAspect, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "score-category" }),
-		);
+		expect(() => validate(badAspect)).toThrow(expect.objectContaining({ code: "score-category" }));
 	});
 
 	it("requires every candidate exactly once and nothing else", () => {
 		const missing = structuredClone(good);
 		missing.entities.pop();
-		expect(() => validateSentimentResult(missing, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "missing-entity" }),
-		);
+		expect(() => validate(missing)).toThrow(expect.objectContaining({ code: "missing-entity" }));
 		const extra = structuredClone(good);
 		extra.entities.push({ ...good.entities[2], key: "c-unknown" });
-		expect(() => validateSentimentResult(extra, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "unknown-entity" }),
-		);
+		expect(() => validate(extra)).toThrow(expect.objectContaining({ code: "unknown-entity" }));
 		const dup = structuredClone(good);
 		dup.entities.push(good.entities[2]);
-		expect(() => validateSentimentResult(dup, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "duplicate-entity" }),
-		);
+		expect(() => validate(dup)).toThrow(expect.objectContaining({ code: "duplicate-entity" }));
 	});
 
 	it("rejects unknown aspects, duplicate aspects, and out-of-schema fields", () => {
 		const unknownAspect = structuredClone(good) as unknown as { entities: { aspects: { key: string }[] }[] };
 		unknownAspect.entities[0].aspects[0].key = "reputation";
-		expect(() => validateSentimentResult(unknownAspect, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "schema" }),
-		);
+		expect(() => validate(unknownAspect)).toThrow(expect.objectContaining({ code: "schema" }));
 		const dupAspect = structuredClone(good);
 		dupAspect.entities[0].aspects.push(good.entities[0].aspects[0]);
-		expect(() => validateSentimentResult(dupAspect, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "duplicate-aspect" }),
-		);
+		expect(() => validate(dupAspect)).toThrow(expect.objectContaining({ code: "duplicate-aspect" }));
 		const extraField = structuredClone(good) as unknown as { entities: Record<string, unknown>[] };
 		extraField.entities[0].netSentiment = 1;
-		expect(() => validateSentimentResult(extraField, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "schema" }),
-		);
+		expect(() => validate(extraField)).toThrow(expect.objectContaining({ code: "schema" }));
+	});
+
+	it("every rejection carries a bounded diagnostic that names the place, never the text", () => {
+		const unknown = structuredClone(good);
+		unknown.entities[1].aspects[1].evidence = [{ anchorId: "s0009", polarity: "negative" }];
+		let caught: unknown;
+		try {
+			validate(unknown);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(SentimentValidationError);
+		const err = caught as SentimentValidationError;
+		expect(err.diagnostic).toEqual({
+			stage: "evidence",
+			reason: "evidence-unknown-anchor",
+			entityKey: "c-huk",
+			aspectKey: "service",
+			evidenceIndex: 0,
+			anchorId: "s0009",
+			quoteLength: null,
+			rawLength: null,
+			normalizedLength: null,
+			generationId: null,
+		});
+		expect(JSON.stringify(err.diagnostic)).not.toContain("Schadenabwicklung");
 	});
 });
 
 describe("classifySentiment through an injected provider", () => {
-	it("makes exactly one structured call with web search on and returns versions and audit metadata", async () => {
+	it("makes exactly one structured call with web search on, the segmented answer and an anchor-bound schema", async () => {
 		const run = vi.fn(async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
 			object: schema.parse(good),
 			modelVersion: "openai/gpt-5-mini",
+			generationId: "gen-1",
 		}));
 		const provider = { id: "openrouter", runStructuredResearch: run } as unknown as Provider;
 		const controller = new AbortController();
@@ -254,16 +248,28 @@ describe("classifySentiment through an injected provider", () => {
 			controller.signal,
 		);
 		expect(run).toHaveBeenCalledTimes(1);
-		const call = run.mock.calls[0][0] as unknown as { prompt: string; webSearch: boolean; signal: AbortSignal };
+		const call = run.mock.calls[0][0] as unknown as {
+			prompt: string;
+			webSearch: boolean;
+			signal: AbortSignal;
+			schema: { safeParse: (v: unknown) => { success: boolean } };
+		};
 		expect(call.webSearch).toBe(true);
 		expect(call.signal).toBe(controller.signal);
 		expect(call.prompt).toContain('key "c-huk": HUK-COBURG (also known as: HUK)');
-		expect(call.prompt).toContain(answer);
+		expect(call.prompt).toContain(renderAnchoredAnswer(segmentAnswer(answer)));
+		expect(call.prompt).toContain("[s0003] WGV wird nur genannt.");
+		expect(call.prompt).not.toContain("\nWGV wird nur genannt.\n");
+		// The request schema only admits this answer's anchors.
+		const foreign = structuredClone(good);
+		foreign.entities[2].evidence = [{ anchorId: "s0004", polarity: "neutral" }];
+		expect(call.schema.safeParse(foreign).success).toBe(false);
 		expect(result.provider).toBe("openrouter");
 		expect(result.model).toBe("openai/gpt-5-mini");
 		expect(result.classifierVersion).toBe(SENTIMENT_CLASSIFIER_VERSION);
 		expect(result.taxonomyVersion).toBe(SENTIMENT_TAXONOMY_VERSION);
 		expect(result.inputHash).toMatch(/^[a-f0-9]{64}$/);
+		expect(result.generationId).toBe("gen-1");
 		expect(result.entities).toHaveLength(3);
 	});
 
@@ -303,10 +309,20 @@ describe("classifySentiment through an injected provider", () => {
 		await expect(classifySentiment({ answerBody: answer, candidates: [] })).rejects.toThrow(/nothing to classify/);
 	});
 
-	it("tells the model that search may only disambiguate identities", () => {
+	it("an answer without a citable segment is refused before any request leaves", async () => {
+		const run = vi.fn();
+		const provider = { id: "openrouter", runStructuredResearch: run } as unknown as Provider;
+		await expect(
+			classifySentiment({ answerBody: "   \n\n  ", candidates }, { resolveProvider: () => provider }),
+		).rejects.toThrow(expect.objectContaining({ code: "answer-unsegmentable", requestSent: false }));
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("tells the model that search may only disambiguate identities and that evidence is cited by anchor id", () => {
 		const prompt = buildSentimentPrompt({ answerBody: answer, candidates });
 		expect(prompt).toMatch(/never to change a sentiment the ANSWER does not express/);
 		expect(prompt).toContain('"price" (Price)');
 		expect(prompt).toContain("Synonyms: cost");
+		expect(prompt).toMatch(/anchorId/);
 	});
 });

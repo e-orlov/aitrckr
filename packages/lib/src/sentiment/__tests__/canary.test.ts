@@ -7,6 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../../providers/types";
+import { SENTIMENT_EVIDENCE_VERSION } from "../anchors";
 import {
 	acceptCanaryRunId,
 	evaluateSentimentCanary,
@@ -65,6 +66,7 @@ const contract: SentimentCanaryContract = {
 	...frozenDigests,
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+	evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
 	provider: "openrouter",
 	model: "openai/gpt-5-mini",
 };
@@ -75,7 +77,7 @@ const goodAnswer = {
 			score: 80,
 			category: "positive",
 			confidence: 0.9,
-			evidence: [{ quote: "ARAG Aktiv Komfort ist sehr leistungsstark.", polarity: "positive" }],
+			evidence: [{ anchorId: "s0001", polarity: "positive" }],
 			aspects: [],
 		},
 		{
@@ -83,14 +85,14 @@ const goodAnswer = {
 			score: 85,
 			category: "positive",
 			confidence: 0.9,
-			evidence: [{ quote: "beste Preis-Leistungs-Verhältnis", polarity: "positive" }],
+			evidence: [{ anchorId: "s0002", polarity: "positive" }],
 			aspects: [
 				{
 					key: "price",
 					score: 85,
 					category: "positive",
 					confidence: 0.9,
-					evidence: [{ quote: "beste Preis-Leistungs-Verhältnis", polarity: "positive" }],
+					evidence: [{ anchorId: "s0002", polarity: "positive" }],
 				},
 			],
 		},
@@ -272,6 +274,7 @@ describe("canary contract", () => {
 			...frozenDigests,
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+			evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
 			provider: "openrouter",
 			model: "openai/gpt-5-mini",
 		});
@@ -320,10 +323,9 @@ describe("canary preflight refuses before any request", () => {
 	});
 
 	it("body hash mismatch (the stored answer changed)", async () => {
-		// Trailing whitespace changes the raw body and the literal prompt; the canonical (normalized) input hash survives.
+		// Trailing whitespace changes the raw body; the canonical input hash and the prompt over trimmed segments survive.
 		expect(await refusal({ loadRun: vi.fn(async () => ({ ...run, answerBody: `${ANSWER} ` })) })).toEqual([
 			"body-hash-mismatch",
-			"contract-prompt-hash",
 		]);
 		expect(
 			await refusal({ loadRun: vi.fn(async () => ({ ...run, answerBody: ANSWER.replace("beste", "gute") })) }),
@@ -381,11 +383,18 @@ describe("canary preflight refuses before any request", () => {
 					...contract,
 					classifierVersion: "sent-classifier-v0",
 					taxonomyVersion: "sent-aspects-v0",
+					evidenceVersion: "sent-evidence-v0",
 					provider: "openai-api",
 					model: "openai/gpt-5.6-luna",
 				},
 			),
-		).toEqual(["contract-classifier-version", "contract-taxonomy-version", "contract-provider", "contract-model"]);
+		).toEqual([
+			"contract-classifier-version",
+			"contract-taxonomy-version",
+			"contract-evidence-version",
+			"contract-provider",
+			"contract-model",
+		]);
 	});
 
 	it("input hash or prompt hash frozen against another candidate set or prompt template", async () => {
@@ -551,7 +560,7 @@ describe("canary verdict after the one call", () => {
 					score: 50,
 					category: "neutral",
 					confidence: 0.5,
-					evidence: [{ quote: "WGV PBV Optimal", polarity: "neutral" }],
+					evidence: [{ anchorId: "s0002", polarity: "neutral" }],
 					aspects: [],
 				},
 			],

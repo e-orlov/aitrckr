@@ -9,7 +9,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import type { Provider } from "../../providers/types";
+import { type Provider, StructuredResearchResponseError } from "../../providers/types";
 import { classifySentiment, type SentimentClassification, sentimentInputHash } from "../classifier";
 import type { DetectableEntity } from "../detector";
 import { runSentimentJob, type SentimentJobDeps } from "../job";
@@ -51,7 +51,11 @@ const usage = {
 };
 const request = { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 };
 
-/** A structurally valid answer whose brand excerpt is paraphrased — exactly the failure class of the consumed canary. */
+/**
+ * An answer in the pre-corrective shape whose brand excerpt is paraphrased —
+ * exactly the failure class of the consumed canary. Under the anchored
+ * contract it no longer even fits the request schema.
+ */
 const paraphrased = {
 	entities: [
 		{
@@ -76,16 +80,61 @@ const paraphrased = {
 	],
 };
 
+/**
+ * An answer that fits the anchored request schema but is rejected by the
+ * local rules: a Mixed verdict citing only one polarity. This is the
+ * post-schema failure class that still costs a paid call.
+ */
+const locallyRejected = {
+	entities: [
+		{
+			key: "brand",
+			score: 80,
+			category: "positive",
+			confidence: 0.9,
+			evidence: [{ anchorId: "s0001", polarity: "positive" }],
+			aspects: [],
+		},
+		{
+			key: "c-wgv",
+			score: 50,
+			category: "mixed",
+			confidence: 0.8,
+			evidence: [{ anchorId: "s0002", polarity: "positive" }],
+			aspects: [],
+		},
+	],
+};
+
+/**
+ * A provider double with the real provider's post-response contract: the
+ * charged response is parsed against the request schema and a mismatch is a
+ * `StructuredResearchResponseError` that carries the paid envelope.
+ */
 function providerAnswering(object: unknown): Provider {
 	return {
 		id: "openrouter",
-		runStructuredResearch: vi.fn(async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
-			object: schema.parse(object),
-			modelVersion: "openai/gpt-5-mini",
-			usage,
-			request,
-			generationId: "gen-abc123",
-		})),
+		runStructuredResearch: vi.fn(
+			async ({ schema }: { schema: { safeParse: (v: unknown) => { success: boolean; data?: unknown } } }) => {
+				const parsed = schema.safeParse(object);
+				if (!parsed.success) {
+					throw new StructuredResearchResponseError("schema", {
+						provider: "openrouter",
+						model: "openai/gpt-5-mini",
+						generationId: "gen-abc123",
+						request,
+						usage,
+					});
+				}
+				return {
+					object: parsed.data,
+					modelVersion: "openai/gpt-5-mini",
+					usage,
+					request,
+					generationId: "gen-abc123",
+				};
+			},
+		),
 	} as unknown as Provider;
 }
 
@@ -139,19 +188,25 @@ function jobDeps(
 }
 
 describe("grounded evidence — RED before the corrective", () => {
-	it("1. a structurally valid answer with a paraphrased excerpt is rejected, and the paid response's usage and generation survive in the error", async () => {
-		const provider = providerAnswering(paraphrased);
-		let thrown: unknown;
-		try {
-			await classifySentiment({ answerBody: ANSWER, candidates }, { resolveProvider: () => provider });
-		} catch (error) {
-			thrown = error;
+	it("1. a paraphrased excerpt and a locally rejected anchored answer are both rejected, and the paid response's usage and generation survive in the error", async () => {
+		for (const [answer, code] of [
+			[paraphrased, "schema"],
+			[locallyRejected, "mixed-needs-dual-evidence"],
+		] as const) {
+			const provider = providerAnswering(answer);
+			let thrown: unknown;
+			try {
+				await classifySentiment({ answerBody: ANSWER, candidates }, { resolveProvider: () => provider });
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown).toMatchObject({ name: "SentimentValidationError", code, requestSent: true });
+			// The provider was paid: the error must carry the numeric envelope (never the text).
+			expect(thrown).toMatchObject({
+				envelope: { usage: { costUsd: 0.020047, webSearchRequests: 1 }, generationId: "gen-abc123", request },
+			});
+			expect(JSON.stringify(thrown)).not.toContain("Rechtsschutz");
 		}
-		expect(thrown).toMatchObject({ name: "SentimentValidationError" });
-		// The provider was paid: the error must carry the numeric envelope (never the text).
-		expect(thrown).toMatchObject({
-			envelope: { usage: { costUsd: 0.020047, webSearchRequests: 1 }, generationId: "gen-abc123", request },
-		});
 	});
 
 	it("2. the job attributes the charged cost of a locally rejected paid answer, not the estimate", async () => {

@@ -6,6 +6,7 @@ import type {
 	StructuredResearchRequestSummary,
 	StructuredResearchUsage,
 } from "../providers/types";
+import { SENTIMENT_EVIDENCE_VERSION } from "./anchors";
 import { classifySentiment, SENTIMENT_MAX_OUTPUT_TOKENS, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import { runSentimentJob, type SentimentJobDeps, type SentimentJobOutcome } from "./job";
@@ -76,6 +77,8 @@ export const sentimentCanaryContractSchema = z.strictObject({
 	providerPromptSha256: z.string().regex(/^[0-9a-f]{64}$/),
 	classifierVersion: z.string().min(1),
 	taxonomyVersion: z.string().min(1),
+	/** The provider-facing evidence contract (anchored segments); frozen like the other versions. */
+	evidenceVersion: z.string().min(1),
 	provider: z.string().min(1),
 	model: z.string().min(1),
 });
@@ -87,6 +90,7 @@ export type SentimentCanaryEntity = SentimentCanaryContract["entities"][number];
 export const SENTIMENT_CANARY_REJECT_CODES = [
 	"contract-classifier-version",
 	"contract-taxonomy-version",
+	"contract-evidence-version",
 	"contract-provider",
 	"contract-model",
 	"run-not-found",
@@ -288,6 +292,7 @@ export interface SentimentCanaryRunDescription {
 	providerPromptSha256: string | null;
 	classifierVersion: string;
 	taxonomyVersion: string;
+	evidenceVersion: string;
 	provider: string;
 	model: string;
 }
@@ -339,6 +344,7 @@ export async function inspectSentimentCanaryRun(
 		...digests,
 		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+		evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
 		provider: SENTIMENT_PROVIDER_ID,
 		model: SENTIMENT_MODEL,
 	};
@@ -356,6 +362,7 @@ function contractVersionReasons(contract: SentimentCanaryContract): SentimentCan
 	if (contract.classifierVersion !== SENTIMENT_CLASSIFIER_VERSION)
 		reasons.push({ code: "contract-classifier-version" });
 	if (contract.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION) reasons.push({ code: "contract-taxonomy-version" });
+	if (contract.evidenceVersion !== SENTIMENT_EVIDENCE_VERSION) reasons.push({ code: "contract-evidence-version" });
 	if (contract.provider !== SENTIMENT_PROVIDER_ID) reasons.push({ code: "contract-provider" });
 	if (contract.model !== SENTIMENT_MODEL) reasons.push({ code: "contract-model" });
 	return reasons;

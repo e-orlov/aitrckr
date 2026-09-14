@@ -201,8 +201,9 @@ function inspectFixture() {
 		],
 		classifierInputHash: "1".repeat(64),
 		providerPromptSha256: "2".repeat(64),
-		classifierVersion: "sent-classifier-v1",
+		classifierVersion: "sent-classifier-v2",
 		taxonomyVersion: "sent-aspects-v1",
+		evidenceVersion: "sent-evidence-v1",
 		provider: "openrouter",
 		model: "openai/gpt-5-mini",
 	};

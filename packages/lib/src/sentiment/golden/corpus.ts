@@ -448,10 +448,10 @@ export const GOLDEN_CASES: GoldenCase[] = [
 		},
 		reference: {
 			entities: [
-				e("brand", 50, "neutral", ["- Arvo"]),
-				e("c-beltra", 50, "neutral", ["- Beltra"]),
-				e("c-corvex", 50, "neutral", ["- Corvex"]),
-				e("c-dunhill", 50, "neutral", ["- Dunhill Schutz"]),
+				e("brand", 50, "neutral", ["Arvo"]),
+				e("c-beltra", 50, "neutral", ["Beltra"]),
+				e("c-corvex", 50, "neutral", ["Corvex"]),
+				e("c-dunhill", 50, "neutral", ["Dunhill Schutz"]),
 			],
 		},
 	},

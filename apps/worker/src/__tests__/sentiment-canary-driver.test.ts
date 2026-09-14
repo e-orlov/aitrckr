@@ -22,8 +22,9 @@ const CONTRACT = {
 	entities: [{ key: "brand", entityType: "brand" }],
 	classifierInputHash: "2".repeat(64),
 	providerPromptSha256: "3".repeat(64),
-	classifierVersion: "sent-classifier-v1",
+	classifierVersion: "sent-classifier-v2",
 	taxonomyVersion: "sent-aspects-v1",
+	evidenceVersion: "sent-evidence-v1",
 	provider: "openrouter",
 	model: "openai/gpt-5-mini",
 };

@@ -7,6 +7,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "../../providers/types";
+import { SENTIMENT_EVIDENCE_VERSION } from "../anchors";
 import {
 	inspectSentimentCanaryRunState,
 	parseSentimentCanaryContract,
@@ -57,6 +58,7 @@ const contract = parseSentimentCanaryContract({
 	...sentimentCanaryInputDigests({ answerBody: ANSWER, candidates: candidatesFromMentions(mentions, roster) }),
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+	evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
 	provider: "openrouter",
 	model: "openai/gpt-5-mini",
 });
