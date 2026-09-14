@@ -1,5 +1,6 @@
-import type { Meta } from "@storybook/react";
+import type { Meta, StoryObj } from "@storybook/react";
 import { DEFAULT_CHART_COLORS } from "@workspace/config/constants";
+import { expect, within } from "storybook/test";
 import { ChartExportPreview, type ChartExportPreviewProps } from "@/components/chart-export-preview";
 import { type ClientConfig, setMockClientConfig } from "./_mocks/config-client";
 import { MockRouteContextProvider, setMockRouteContext } from "./_mocks/tanstack-router";
@@ -96,7 +97,7 @@ export default {
 	title: "Chart Export Preview",
 } satisfies Meta;
 
-export const ElmoDefault = () => {
+function renderDefault() {
 	setupMocks();
 	const data = generateChartData(30);
 	const branding = { isWhitelabel: false, chartColors: DEFAULT_CHART_COLORS };
@@ -142,6 +143,16 @@ export const ElmoDefault = () => {
 			</div>
 		</MockRouteContextProvider>
 	);
+}
+
+/** Every exported chart is signed with the wordmark. */
+export const ElmoDefault: StoryObj = {
+	render: renderDefault,
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		await expect(canvas.getAllByText("aitrckr", { exact: true })).toHaveLength(3);
+		await expect(canvas.queryByText("elmo", { exact: true })).toBeNull();
+	},
 };
 
 export const Whitelabel = () => {

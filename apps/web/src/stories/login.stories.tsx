@@ -6,9 +6,10 @@
  * sales panel shows — engine coverage, the runs-per-day comparison — comes from
  * packages/config, so these stories are also where a plan change shows up first.
  */
-import type { Meta } from "@storybook/react";
+import type { Meta, StoryObj } from "@storybook/react";
 import { DEFAULT_CHART_COLORS } from "@workspace/config/constants";
 import type { ReactNode } from "react";
+import { expect, within } from "storybook/test";
 import { DemoLogin, EmailPasswordLogin, SSOLogin } from "@/routes/auth/login";
 import { resetMockAuthClient, setMockSsoError } from "./_mocks/auth-client";
 import { type ClientConfig, setMockClientConfig } from "./_mocks/config-client";
@@ -71,7 +72,14 @@ export const Cloud = () => <EmailPasswordLogin isCloud canRegister />;
  * Self-hosted, once the instance has its account. Before that the page
  * redirects to sign-up, so there is no unbootstrapped story to tell.
  */
-export const SelfHosted = () => <EmailPasswordLogin />;
+export const SelfHosted: StoryObj = {
+	render: () => <EmailPasswordLogin />,
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		await expect(await canvas.findByText("aitrckr", { exact: true })).toBeVisible();
+		await expect(canvas.queryByText("elmo", { exact: true })).toBeNull();
+	},
+};
 
 /** Demo — the shared credentials on a plain card, with nothing to sell. */
 export const Demo = () => <DemoLogin />;
