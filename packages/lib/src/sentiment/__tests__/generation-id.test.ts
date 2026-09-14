@@ -169,9 +169,14 @@ describe("H1 the generation id survives the successful path", () => {
 
 	it("a canary never accepts a paid answer it cannot reconcile: no generation id or an unsafe one is a rejection", async () => {
 		for (const generationId of [undefined, null, "", `gen ${"x".repeat(10)}`, "y".repeat(65), 42]) {
-			const report = await runSentimentCanary({ contract, deps: fakes(providerWith(generationId)), ...fast });
+			const deps = fakes(providerWith(generationId));
+			const report = await runSentimentCanary({ contract, deps, ...fast });
 			expect(codes(report), JSON.stringify(generationId)).toEqual(["generation-id-missing"]);
-			expect(report.outcome).toMatchObject({ status: "classified", generationId: null });
+			// Decided at the persistence boundary like every other post-call rejection: nothing is written.
+			expect(report.outcome).toMatchObject({ status: "error", code: "canary-contract" });
+			expect(deps.persist).not.toHaveBeenCalled();
+			expect(deps.markAnalysis).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ status: "failed" }));
+			expect(JSON.stringify(report)).not.toMatch(/gen x|yyyyy/);
 		}
 	});
 });

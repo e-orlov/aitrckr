@@ -46,6 +46,8 @@ export type SentimentJobOutcome =
 			entityKeys: string[];
 			usage?: StructuredResearchUsage;
 			request?: StructuredResearchRequestSummary;
+			/** The provider's opaque generation id as validated by the classifier; null when none was reported or it was unsafe. */
+			generationId: string | null;
 	  }
 	| { status: "already-completed" }
 	| { status: "claimed-elsewhere"; analysisStatus: string }
@@ -222,6 +224,7 @@ async function classifyAndPersist(
 		entityKeys: classification.entities.map((entity) => entity.key),
 		usage: classification.usage,
 		request: classification.request,
+		generationId: classification.generationId ?? null,
 	};
 }
 

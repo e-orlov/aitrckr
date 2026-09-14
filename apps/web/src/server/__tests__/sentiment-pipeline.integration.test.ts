@@ -118,6 +118,7 @@ function fakeProvider(
 			return {
 				object: object as T,
 				modelVersion: SENTIMENT_MODEL,
+				generationId: "gen-it-001",
 				request: options.request,
 				usage:
 					options.usage ??

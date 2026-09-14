@@ -74,6 +74,7 @@ const classification: SentimentClassification = {
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	inputHash: currentHash,
+	generationId: "gen-job-001",
 };
 
 type AnalysisStub = {
@@ -126,7 +127,12 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("claims, classifies, persists atomically and records one success usage event", async () => {
 		const { d, usage } = deps();
 		const outcome = await runSentimentJob(payload, d);
-		expect(outcome).toEqual({ status: "classified", entities: 2, entityKeys: ["brand", "c-huk"] });
+		expect(outcome).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
+		});
 		expect(d.claimAnalysis).toHaveBeenCalledTimes(1);
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
@@ -314,6 +320,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			status: "classified",
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
 		});
 		expect(persistDetection).toHaveBeenCalledTimes(1);
 		expect(persistDetection).toHaveBeenCalledWith(
@@ -360,6 +367,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			status: "classified",
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
 		});
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
@@ -373,12 +381,14 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			status: "classified",
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
 		});
 		const hashless = deps({ analysis: { status: "completed", inputHash: null } });
 		expect(await runSentimentJob(payload, hashless.d)).toEqual({
 			status: "classified",
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
 		});
 	});
 

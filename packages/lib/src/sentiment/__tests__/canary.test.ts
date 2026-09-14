@@ -165,6 +165,7 @@ function goodProvider(
 		runStructuredResearch: vi.fn(async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
 			object: schema.parse(answer),
 			modelVersion: "openai/gpt-5-mini",
+			generationId: "gen-good-001",
 			...("usage" in meta ? { usage: meta.usage } : {}),
 			...("request" in meta ? { request: meta.request } : {}),
 		})),
@@ -582,7 +583,7 @@ describe("canary verdict after the one call", () => {
 			code: "unknown-entity",
 			requestSent: true,
 			diagnostic: expect.objectContaining({ stage: "entity", reason: "unknown-entity", entityKey: "c-huk" }),
-			envelope: { generationId: null, request: goodRequest, usage: goodUsage },
+			envelope: { generationId: "gen-good-001", request: goodRequest, usage: goodUsage },
 		});
 		expect(JSON.stringify(report)).not.toContain("Preis-Leistungs");
 	});
@@ -600,6 +601,7 @@ describe("canary verdict after the one call", () => {
 			entityKeys: ["brand", "c-huk"],
 			usage: goodUsage,
 			request: goodRequest,
+			generationId: "gen-good-001",
 		}));
 		const { deps } = storeFakes(goodProvider());
 		const report = await runSentimentCanary({ contract, deps, job, ...fast });
@@ -676,10 +678,24 @@ describe("canary verdict after the one call", () => {
 		expect(
 			evaluateSentimentCanary(
 				contract,
-				{ status: "classified", entities: 2, entityKeys: ["brand", WGV], usage: goodUsage, request: goodRequest },
+				{
+					status: "classified",
+					entities: 2,
+					entityKeys: ["brand", WGV],
+					usage: goodUsage,
+					request: goodRequest,
+					generationId: "gen-good-001",
+				},
 				{ attempts: 1, providerCalls: 2 },
 			),
 		).toEqual({ status: "reject", reasons: [{ code: "provider-calls", detail: "2" }] });
+		expect(
+			evaluateSentimentCanary(
+				contract,
+				{ status: "classified", entities: 2, entityKeys: ["brand", WGV], usage: goodUsage, request: goodRequest },
+				{ attempts: 1, providerCalls: 1 },
+			),
+		).toEqual({ status: "reject", reasons: [{ code: "generation-id-missing" }] });
 	});
 });
 
@@ -843,6 +859,7 @@ describe("E1: the post-call gate runs before persistence", () => {
 				inputHash: frozenDigests.classifierInputHash,
 				usage: goodUsage,
 				request: goodRequest,
+				generationId: "gen-good-001",
 			})),
 		});
 		const report = await runSentimentCanary({ contract, deps, ...fast });
@@ -899,7 +916,12 @@ describe("canary deadline and watchdog share one abort signal", () => {
 						observedSignal = signal;
 						// Ignores `signal` on purpose and answers only when the test says so.
 						lateAnswer = () =>
-							resolve({ object: schema.parse(goodAnswer), modelVersion: "openai/gpt-5-mini", usage: goodUsage });
+							resolve({
+								object: schema.parse(goodAnswer),
+								modelVersion: "openai/gpt-5-mini",
+								generationId: "gen-late-001",
+								usage: goodUsage,
+							});
 					}),
 			),
 		} as unknown as Provider;

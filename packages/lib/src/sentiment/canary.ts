@@ -133,6 +133,7 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"output-tokens-missing",
 	"output-tokens-exceeded",
 	"entities-mismatch",
+	"generation-id-missing",
 ] as const;
 
 export type SentimentCanaryRejectCode = (typeof SENTIMENT_CANARY_REJECT_CODES)[number];
@@ -174,6 +175,8 @@ export type SentimentCanaryOutcome =
 			entityKeys?: string[];
 			usage?: StructuredResearchUsage;
 			request?: StructuredResearchRequestSummary;
+			/** Safe generation id of the paid call; present on a classified outcome, null when the provider reported none or an unsafe one. */
+			generationId?: string | null;
 	  }
 	| Extract<SentimentJobOutcome, { status: "terminal-validation-failure" }>
 	| {
@@ -519,6 +522,8 @@ export function evaluateSentimentCanary(
 	else {
 		reasons.push(...requestReasons(outcome.request, contract, limits), ...usageReasons(outcome.usage, limits));
 		if (!entityKeysMatch(contract, outcome.entityKeys)) reasons.push({ code: "entities-mismatch" });
+		// A paid answer the operator cannot reconcile against the provider's ledger is never accepted.
+		if (!outcome.generationId) reasons.push({ code: "generation-id-missing" });
 	}
 	return reasons.length === 0 ? { status: "accept" } : { status: "reject", reasons };
 }
@@ -668,6 +673,7 @@ export async function runSentimentCanary(args: {
 					entityKeys: classification.entities.map((entity) => entity.key),
 					usage: classification.usage,
 					request: classification.request,
+					generationId: classification.generationId ?? null,
 				},
 				{ attempts: 1, providerCalls },
 				args.limits,
@@ -710,6 +716,7 @@ export async function runSentimentCanary(args: {
 				entityKeys: result.entityKeys,
 				usage: result.usage,
 				request: result.request,
+				generationId: result.generationId,
 			};
 		} else if (result.status === "terminal-validation-failure") {
 			outcome = result;
