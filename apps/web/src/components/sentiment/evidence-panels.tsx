@@ -12,44 +12,12 @@ import { Badge } from "@workspace/ui/components/badge";
 import { Button } from "@workspace/ui/components/button";
 import { Skeleton } from "@workspace/ui/components/skeleton";
 import { ExternalLink } from "lucide-react";
-import type { ReactNode } from "react";
+import { highlightExcerpt } from "@/components/sentiment/excerpt-highlight";
 import { CATEGORY_STYLE, formatScore } from "@/components/sentiment/format";
 import { type SentimentFilters, useSentimentEvidence } from "@/hooks/use-sentiment";
 import type { ExcerptGroup } from "@/lib/sentiment-excerpts";
 import type { SentimentAspectParam } from "@/lib/sentiment-search";
 import type { SentimentEvidenceItem, SentimentEvidenceResponse } from "@/server/sentiment";
-
-const POLARITY_LABEL: Record<string, string> = { positive: "positive", negative: "negative", neutral: "neutral" };
-
-/**
- * Wrap the highlights of one excerpt group in `<mark>` using their raw
- * offsets mapped onto the group (`start - excerptStart`). Every highlight is
- * an exact slice of the stored answer and lies inside its group by
- * construction, so the marked text is the cited text — nothing is searched
- * or re-derived from normalized text.
- */
-export function highlightExcerpt(group: ExcerptGroup): ReactNode[] {
-	const parts: ReactNode[] = [];
-	let cursor = 0;
-	for (const highlight of group.highlights) {
-		const start = highlight.start - group.excerptStart;
-		const end = highlight.end - group.excerptStart;
-		if (start > cursor) parts.push(group.text.slice(cursor, start));
-		parts.push(
-			<mark
-				key={`${highlight.start}-${highlight.end}`}
-				className="rounded-sm bg-yellow-200/70 px-0.5 text-foreground dark:bg-yellow-500/30"
-				data-polarity={highlight.polarities.join(",")}
-				title={`Cited evidence (${highlight.polarities.map((p) => POLARITY_LABEL[p] ?? p).join(" and ")})`}
-			>
-				{group.text.slice(start, end)}
-			</mark>,
-		);
-		cursor = end;
-	}
-	if (cursor < group.text.length) parts.push(group.text.slice(cursor));
-	return parts;
-}
 
 /**
  * All excerpt groups of one answer, in reading order, each with its own

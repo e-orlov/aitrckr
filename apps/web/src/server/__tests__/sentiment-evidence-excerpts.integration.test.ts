@@ -9,7 +9,7 @@ import { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LONG_ANSWER, THREE_DISTANT_SPANS } from "@/components/sentiment/__tests__/evidence-fixture";
-import { highlightExcerpt } from "@/components/sentiment/evidence-panels";
+import { highlightExcerpt } from "@/components/sentiment/excerpt-highlight";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test stack");

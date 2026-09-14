@@ -7,7 +7,7 @@
  */
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { highlightExcerpt } from "@/components/sentiment/evidence-panels";
+import { highlightExcerpt } from "@/components/sentiment/excerpt-highlight";
 import { planExcerpts } from "@/lib/sentiment-excerpts";
 import { LONG_ANSWER, THREE_DISTANT_SPANS } from "./evidence-fixture";
 
