@@ -1,4 +1,12 @@
 export {
+	ANCHOR_MAX_COUNT,
+	anchorMap,
+	type EvidenceAnchor,
+	isAnchorId,
+	SENTIMENT_EVIDENCE_VERSION,
+	segmentAnswer,
+} from "./anchors";
+export {
 	decodeRunCursor,
 	encodeRunCursor,
 	type MentionBackfillCounts,
@@ -40,7 +48,6 @@ export {
 } from "./canary";
 export {
 	classifySentiment,
-	locateEvidence,
 	SENTIMENT_MAX_OUTPUT_TOKENS,
 	type SentimentClassification,
 	type SentimentClassifierDeps,
@@ -61,6 +68,19 @@ export {
 	normalizeDomainTerm,
 } from "./detector";
 export {
+	DIAGNOSTIC_MAX_BYTES,
+	DIAGNOSTIC_REASONS,
+	DIAGNOSTIC_STAGES,
+	type DiagnosticReason,
+	type DiagnosticStage,
+	diagnostic,
+	isValidationCode,
+	type SentimentDiagnostic,
+	safeGenerationId,
+	sentimentDiagnosticSchema,
+	serializeDiagnostic,
+} from "./diagnostics";
+export {
 	enqueueSentimentBestEffort,
 	type SentimentEnqueueOutcome,
 	type SentimentSender,
@@ -73,6 +93,7 @@ export {
 	safeErrorMessage,
 	sanitizeSentimentError,
 } from "./errors";
+export type { PaidResponseEnvelope } from "./errors-validation";
 export { runSentimentJob, type SentimentJobDeps, type SentimentJobOptions, type SentimentJobOutcome } from "./job";
 export {
 	bucketForRange,
@@ -95,7 +116,7 @@ export {
 	splitExtremes,
 	viewVisibility,
 } from "./metrics";
-export { buildSentimentPrompt, SENTIMENT_EVIDENCE_RULES, SENTIMENT_SCORE_RULES } from "./prompt";
+export { buildSentimentPrompt, renderAnchoredAnswer, SENTIMENT_EVIDENCE_RULES, SENTIMENT_SCORE_RULES } from "./prompt";
 export { resolveSentimentProvider, SentimentProviderError } from "./provider";
 export { ensureSentimentQueue, SENTIMENT_QUEUE_OPTIONS, type SentimentQueueAdmin } from "./queue-setup";
 export {
@@ -108,6 +129,7 @@ export {
 	detectionResultFor,
 	ensureAnalysis,
 	isAnalysisCurrent,
+	isAnalysisTerminallyFailed,
 	loadAnalysisState,
 	loadDetectableEntities,
 	loadDetection,
@@ -148,8 +170,10 @@ export {
 	type SentimentClassificationResult,
 	type SentimentDetectionStatus,
 	type SentimentEvidence,
+	type SentimentEvidenceRef,
 	type SentimentJobData,
 	sentimentClassificationResultSchema,
+	sentimentClassificationResultSchemaFor,
 	sentimentJobSchema,
 	sentimentSingletonKey,
 	sortSentimentEntities,

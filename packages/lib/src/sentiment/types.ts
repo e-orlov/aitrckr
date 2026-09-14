@@ -12,7 +12,7 @@ export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v1";
  * change). Rows with another version stay auditable and are ignored at read
  * time.
  */
-export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v1";
+export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v2";
 
 /**
  * Versioned separately from the classifier: a later taxonomy must never
@@ -87,9 +87,6 @@ export const SENTIMENT_ASPECTS: Record<SentimentAspectKey, { label: string; desc
 
 export const EVIDENCE_QUOTE_MAX_LENGTH = 300;
 export const EVIDENCE_MAX_ITEMS = 3;
-/** A located excerpt may span whitespace runs the normalized quote collapsed; bound the raw span too. */
-export const EVIDENCE_RAW_SPAN_MAX_LENGTH = 2 * EVIDENCE_QUOTE_MAX_LENGTH;
-
 /**
  * The polarity of one excerpt as the classifier reads it. Declared per
  * excerpt so a Mixed verdict can be checked locally: it must cite at least one
@@ -139,40 +136,67 @@ export function isScoreCategoryConsistent(score: number, category: SentimentCate
 	}
 }
 
-const evidenceSchema = z.strictObject({
-	quote: z.string().trim().min(1).max(EVIDENCE_QUOTE_MAX_LENGTH),
-	polarity: z.enum(EVIDENCE_POLARITIES),
-});
-
-const aspectResultSchema = z.strictObject({
-	key: z.enum(SENTIMENT_ASPECT_KEYS),
-	score: z.number().int().min(0).max(100),
-	category: z.enum(SENTIMENT_CATEGORIES),
-	confidence: z.number().min(0).max(1),
-	evidence: z.array(evidenceSchema).min(1).max(EVIDENCE_MAX_ITEMS),
-});
-
-const entityResultSchema = z.strictObject({
-	key: z.string().min(1),
-	score: z.number().int().min(0).max(100),
-	category: z.enum(SENTIMENT_CATEGORIES),
-	confidence: z.number().min(0).max(1),
-	evidence: z.array(evidenceSchema).min(1).max(EVIDENCE_MAX_ITEMS),
-	aspects: z.array(aspectResultSchema).max(SENTIMENT_ASPECT_KEYS.length),
-});
+/** Anchor ids are `s0001`…: four digits, assigned by the deterministic segmenter in answer order. */
+export const ANCHOR_ID_PATTERN = /^s\d{4}$/;
 
 /**
- * Strict contract for the classifier's structured answer. Unknown keys,
- * categories or aspects are validation errors and are never coerced into a
- * stored Neutral or `other`.
+ * The provider never types an excerpt: it cites one of the answer's anchors
+ * by id and labels its polarity. `anchorIdSchema` binds the id to the
+ * current answer when the ids are known (the request schema), and to the
+ * anchor pattern otherwise (parsing a stored or replayed result).
  */
+function evidenceSchemaFor(anchorIds?: readonly string[]) {
+	const anchorId =
+		anchorIds && anchorIds.length > 0
+			? z.enum(anchorIds as [string, ...string[]])
+			: z.string().regex(ANCHOR_ID_PATTERN);
+	return z.strictObject({
+		anchorId,
+		polarity: z.enum(EVIDENCE_POLARITIES),
+	});
+}
+
+function aspectResultSchemaFor(anchorIds?: readonly string[]) {
+	return z.strictObject({
+		key: z.enum(SENTIMENT_ASPECT_KEYS),
+		score: z.number().int().min(0).max(100),
+		category: z.enum(SENTIMENT_CATEGORIES),
+		confidence: z.number().min(0).max(1),
+		evidence: z.array(evidenceSchemaFor(anchorIds)).min(1).max(EVIDENCE_MAX_ITEMS),
+	});
+}
+
+function entityResultSchemaFor(anchorIds?: readonly string[]) {
+	return z.strictObject({
+		key: z.string().min(1),
+		score: z.number().int().min(0).max(100),
+		category: z.enum(SENTIMENT_CATEGORIES),
+		confidence: z.number().min(0).max(1),
+		evidence: z.array(evidenceSchemaFor(anchorIds)).min(1).max(EVIDENCE_MAX_ITEMS),
+		aspects: z.array(aspectResultSchemaFor(anchorIds)).max(SENTIMENT_ASPECT_KEYS.length),
+	});
+}
+
+/**
+ * Strict contract for the classifier's structured answer, bound to one
+ * answer's anchor ids: an id outside the answer fails the provider-side
+ * schema before it can reach local validation. Unknown keys, categories or
+ * aspects are validation errors and are never coerced into a stored Neutral
+ * or `other`.
+ */
+export function sentimentClassificationResultSchemaFor(anchorIds: readonly string[]) {
+	return z.strictObject({ entities: z.array(entityResultSchemaFor(anchorIds)).min(1) });
+}
+
+/** The same contract without the per-answer id binding (anchor ids by pattern only). */
 export const sentimentClassificationResultSchema = z.strictObject({
-	entities: z.array(entityResultSchema).min(1),
+	entities: z.array(entityResultSchemaFor()).min(1),
 });
 
 export type SentimentClassificationResult = z.infer<typeof sentimentClassificationResultSchema>;
-export type SentimentEntityResult = z.infer<typeof entityResultSchema>;
-export type SentimentAspectResult = z.infer<typeof aspectResultSchema>;
+export type SentimentEntityResult = SentimentClassificationResult["entities"][number];
+export type SentimentAspectResult = SentimentEntityResult["aspects"][number];
+export type SentimentEvidenceRef = SentimentEntityResult["evidence"][number];
 
 /**
  * An exact excerpt of the stored answer body. `start`/`end` are UTF-16 offsets

@@ -6,8 +6,12 @@ import type {
 	StructuredResearchRequestSummary,
 	StructuredResearchUsage,
 } from "../providers/types";
+import { SENTIMENT_EVIDENCE_VERSION } from "./anchors";
 import { classifySentiment, SENTIMENT_MAX_OUTPUT_TOKENS, sentimentInputHash } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
+import type { SentimentDiagnostic } from "./diagnostics";
+import { SentimentJobError } from "./errors";
+import type { PaidResponseEnvelope } from "./errors-validation";
 import { runSentimentJob, type SentimentJobDeps, type SentimentJobOutcome } from "./job";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
@@ -76,6 +80,8 @@ export const sentimentCanaryContractSchema = z.strictObject({
 	providerPromptSha256: z.string().regex(/^[0-9a-f]{64}$/),
 	classifierVersion: z.string().min(1),
 	taxonomyVersion: z.string().min(1),
+	/** The provider-facing evidence contract (anchored segments); frozen like the other versions. */
+	evidenceVersion: z.string().min(1),
 	provider: z.string().min(1),
 	model: z.string().min(1),
 });
@@ -87,6 +93,7 @@ export type SentimentCanaryEntity = SentimentCanaryContract["entities"][number];
 export const SENTIMENT_CANARY_REJECT_CODES = [
 	"contract-classifier-version",
 	"contract-taxonomy-version",
+	"contract-evidence-version",
 	"contract-provider",
 	"contract-model",
 	"run-not-found",
@@ -126,6 +133,7 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"output-tokens-missing",
 	"output-tokens-exceeded",
 	"entities-mismatch",
+	"generation-id-missing",
 ] as const;
 
 export type SentimentCanaryRejectCode = (typeof SENTIMENT_CANARY_REJECT_CODES)[number];
@@ -162,13 +170,24 @@ export class SentimentCanaryContractError extends Error {
 
 export type SentimentCanaryOutcome =
 	| {
-			status: SentimentJobOutcome["status"];
+			status: Exclude<SentimentJobOutcome["status"], "terminal-validation-failure">;
 			entities?: number;
 			entityKeys?: string[];
 			usage?: StructuredResearchUsage;
 			request?: StructuredResearchRequestSummary;
+			/** Safe generation id of the paid call; present on a classified outcome, null when the provider reported none or an unsafe one. */
+			generationId?: string | null;
 	  }
-	| { status: "error"; name: string; code: string | null; httpStatus: number | null };
+	| Extract<SentimentJobOutcome, { status: "terminal-validation-failure" }>
+	| {
+			status: "error";
+			name: string;
+			code: string | null;
+			httpStatus: number | null;
+			/** Present when the failure came after a paid answer: what was charged and which generation, never its text. */
+			envelope?: PaidResponseEnvelope | null;
+			diagnostic?: SentimentDiagnostic | null;
+	  };
 
 export interface SentimentCanaryReport {
 	runId: string;
@@ -288,6 +307,7 @@ export interface SentimentCanaryRunDescription {
 	providerPromptSha256: string | null;
 	classifierVersion: string;
 	taxonomyVersion: string;
+	evidenceVersion: string;
 	provider: string;
 	model: string;
 }
@@ -339,6 +359,7 @@ export async function inspectSentimentCanaryRun(
 		...digests,
 		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+		evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
 		provider: SENTIMENT_PROVIDER_ID,
 		model: SENTIMENT_MODEL,
 	};
@@ -356,6 +377,7 @@ function contractVersionReasons(contract: SentimentCanaryContract): SentimentCan
 	if (contract.classifierVersion !== SENTIMENT_CLASSIFIER_VERSION)
 		reasons.push({ code: "contract-classifier-version" });
 	if (contract.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION) reasons.push({ code: "contract-taxonomy-version" });
+	if (contract.evidenceVersion !== SENTIMENT_EVIDENCE_VERSION) reasons.push({ code: "contract-evidence-version" });
 	if (contract.provider !== SENTIMENT_PROVIDER_ID) reasons.push({ code: "contract-provider" });
 	if (contract.model !== SENTIMENT_MODEL) reasons.push({ code: "contract-model" });
 	return reasons;
@@ -495,10 +517,13 @@ export function evaluateSentimentCanary(
 	if (counts.providerCalls !== 1) reasons.push({ code: "provider-calls", detail: String(counts.providerCalls) });
 	if (!outcome) reasons.push({ code: "job-outcome", detail: "none" });
 	else if (outcome.status === "error") reasons.push(rejectReasonForError(outcome));
+	else if (outcome.status === "terminal-validation-failure") reasons.push({ code: "validation", detail: outcome.code });
 	else if (outcome.status !== "classified") reasons.push({ code: "job-outcome", detail: outcome.status });
 	else {
 		reasons.push(...requestReasons(outcome.request, contract, limits), ...usageReasons(outcome.usage, limits));
 		if (!entityKeysMatch(contract, outcome.entityKeys)) reasons.push({ code: "entities-mismatch" });
+		// A paid answer the operator cannot reconcile against the provider's ledger is never accepted.
+		if (!outcome.generationId) reasons.push({ code: "generation-id-missing" });
 	}
 	return reasons.length === 0 ? { status: "accept" } : { status: "reject", reasons };
 }
@@ -530,6 +555,9 @@ function safeOutcomeForError(error: unknown): SentimentCanaryOutcome {
 		name: typeof e?.name === "string" ? e.name : "Error",
 		code: typeof e?.code === "string" ? e.code : null,
 		httpStatus: typeof e?.httpStatus === "number" ? e.httpStatus : null,
+		// SentimentJobError only ever carries the sanitized envelope and diagnostic.
+		...(error instanceof SentimentJobError && error.envelope ? { envelope: error.envelope } : {}),
+		...(error instanceof SentimentJobError && error.diagnostic ? { diagnostic: error.diagnostic } : {}),
 	};
 }
 
@@ -645,6 +673,7 @@ export async function runSentimentCanary(args: {
 					entityKeys: classification.entities.map((entity) => entity.key),
 					usage: classification.usage,
 					request: classification.request,
+					generationId: classification.generationId ?? null,
 				},
 				{ attempts: 1, providerCalls },
 				args.limits,
@@ -680,16 +709,20 @@ export async function runSentimentCanary(args: {
 		// rejection must not surface as an unhandled rejection.
 		attempt.catch(() => {});
 		const result = await Promise.race([attempt, bark]);
-		outcome =
-			result.status === "classified"
-				? {
-						status: result.status,
-						entities: result.entities,
-						entityKeys: result.entityKeys,
-						usage: result.usage,
-						request: result.request,
-					}
-				: { status: result.status };
+		if (result.status === "classified") {
+			outcome = {
+				status: result.status,
+				entities: result.entities,
+				entityKeys: result.entityKeys,
+				usage: result.usage,
+				request: result.request,
+				generationId: result.generationId,
+			};
+		} else if (result.status === "terminal-validation-failure") {
+			outcome = result;
+		} else {
+			outcome = { status: result.status };
+		}
 	} catch (error) {
 		outcome = safeOutcomeForError(error);
 	} finally {

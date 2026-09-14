@@ -17,6 +17,7 @@ import {
 import { estimateRunCostUsd } from "../usage/cost";
 import type { SentimentClassification } from "./classifier";
 import { brandEntity, competitorEntity, type DetectableEntity, type DetectedMention } from "./detector";
+import { isValidationCode } from "./diagnostics";
 import { ClaimLostError } from "./errors";
 import { extractAnswerBody } from "./text";
 import {
@@ -334,6 +335,24 @@ export function isAnalysisCurrent(analysis: SentimentAnalysis, expectedInputHash
 	);
 }
 
+/**
+ * A failed analysis carrying a validation code and, as its input hash, the
+ * input that would be sent now was rejected by the classifier's own
+ * validation for exactly this input: sending it again can only buy the same
+ * answer. Only terminal validation failures write the hash on a failed row;
+ * a provider or persistence failure clears it, and a row failed by any other
+ * path (another code, a hash left from an earlier completion) stays eligible.
+ */
+export function isAnalysisTerminallyFailed(analysis: SentimentAnalysis, expectedInputHash: string): boolean {
+	return (
+		analysis.status === "failed" &&
+		analysis.classifierVersion === SENTIMENT_CLASSIFIER_VERSION &&
+		analysis.taxonomyVersion === SENTIMENT_TAXONOMY_VERSION &&
+		analysis.inputHash === expectedInputHash &&
+		isValidationCode(analysis.errorCode)
+	);
+}
+
 export type ClaimOutcome =
 	| { claimed: true; attempts: number; claim: AnalysisClaim }
 	| { claimed: false; status: SentimentAnalysisStatus };
@@ -424,6 +443,8 @@ export async function markAnalysis(
 		status: SentimentAnalysisStatus;
 		errorCode: string | null;
 		errorMessage: string | null;
+		/** On a failed row: the exact classifier input the answer was terminally rejected for; null for every other failure. */
+		inputHash: string | null;
 		completedAt: Date | null;
 	}>,
 	executor: Executor = db,
@@ -513,11 +534,14 @@ export async function persistClassification(args: {
 
 /**
  * Billing-grade attribution for one classifier attempt, success or failure.
- * A successful call records the cost the provider actually charged when it
- * reported one, otherwise the tunable estimate; a failed attempt is still
- * attributed to the locked provider/model — the request went out — without
- * any credential or response detail. Never throws: attribution must not
- * break the job.
+ * Whenever the provider answered and reported what it charged, that amount
+ * is recorded — also for an answer the classifier then rejected, which was
+ * paid for all the same; only a call without a reported cost falls back to
+ * the tunable estimate. The column is named `estimated_cost_usd` for
+ * historical reasons: for sentiment it holds the charged cost when one was
+ * reported and the estimate otherwise. A failed attempt is attributed to the
+ * locked provider/model without any credential or response detail. Never
+ * throws: attribution must not break the job.
  */
 export async function recordSentimentUsageEvent(args: {
 	organizationId: string;
@@ -526,15 +550,12 @@ export async function recordSentimentUsageEvent(args: {
 	provider: string;
 	model: string | null;
 	succeeded: boolean;
-	/** Charged cost in USD reported by the provider for a successful call. */
+	/** Charged cost in USD reported by the provider for the call, whatever became of its answer. */
 	actualCostUsd?: number | null;
 }): Promise<void> {
 	try {
 		const actual =
-			args.succeeded &&
-			typeof args.actualCostUsd === "number" &&
-			Number.isFinite(args.actualCostUsd) &&
-			args.actualCostUsd >= 0
+			typeof args.actualCostUsd === "number" && Number.isFinite(args.actualCostUsd) && args.actualCostUsd >= 0
 				? args.actualCostUsd
 				: null;
 		const cost = actual ?? estimateRunCostUsd(args.provider, true);

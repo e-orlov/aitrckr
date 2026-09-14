@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../providers/config";
 import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
+import { StructuredResearchResponseError } from "../providers/types";
+import { anchorMap, type EvidenceAnchor, segmentAnswer } from "./anchors";
+import { type DiagnosticReason, type DiagnosticStage, diagnostic, safeGenerationId } from "./diagnostics";
+import { type PaidResponseEnvelope, SentimentValidationError } from "./errors-validation";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
-import { type IndexedText, normalizeIndexed, normalizeText } from "./text";
+import { normalizeText } from "./text";
 import {
-	EVIDENCE_RAW_SPAN_MAX_LENGTH,
 	type EvidencePolarity,
 	isScoreCategoryConsistent,
 	SENTIMENT_CLASSIFIER_VERSION,
@@ -17,18 +20,12 @@ import {
 	type SentimentCategory,
 	type SentimentClassificationResult,
 	type SentimentEvidence,
+	type SentimentEvidenceRef,
 	sentimentClassificationResultSchema,
+	sentimentClassificationResultSchemaFor,
 } from "./types";
 
-export class SentimentValidationError extends Error {
-	constructor(
-		readonly code: string,
-		message: string,
-	) {
-		super(message);
-		this.name = "SentimentValidationError";
-	}
-}
+export { SentimentValidationError } from "./errors-validation";
 
 export interface ValidatedAspect {
 	key: SentimentAspectKey;
@@ -59,6 +56,8 @@ export interface SentimentClassification {
 	usage?: StructuredResearchUsage;
 	/** What the provider was asked to do (model, web search, tool budget, output cap); undefined when it did not report it. */
 	request?: StructuredResearchRequestSummary;
+	/** Opaque provider generation id of the call, for audit; null when the provider reported none. */
+	generationId?: string | null;
 }
 
 /**
@@ -90,124 +89,173 @@ export function sentimentInputHash(answerBody: string, candidates: SentimentCand
 	return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
-/**
- * Locate an excerpt in the answer after the shared normalization and map it
- * back to the raw stored body. Returns the raw-offset locator whose slice
- * normalizes to the same text, or null when the excerpt is not verbatim.
- */
-export function locateEvidence(
-	body: IndexedText,
-	rawBody: string,
-	quote: string,
-	polarity: EvidencePolarity,
-): SentimentEvidence | null {
-	const needle = normalizeText(quote);
-	if (needle.length === 0) return null;
-	const at = body.text.indexOf(needle);
-	if (at === -1) return null;
-	const start = body.starts[at];
-	const end = body.ends[at + needle.length - 1];
-	if (start === undefined || end === undefined) return null;
-	const raw = rawBody.slice(start, end);
-	if (normalizeText(raw) !== needle || raw.length > EVIDENCE_RAW_SPAN_MAX_LENGTH) return null;
-	return { quote: raw, start, end, polarity };
+interface EvidenceWhere {
+	stage: DiagnosticStage;
+	entityKey: string;
+	aspectKey: SentimentAspectKey | null;
+	label: string;
 }
 
-function validateEvidence(
-	body: IndexedText,
-	rawBody: string,
-	quotes: { quote: string; polarity: EvidencePolarity }[],
-	where: string,
+function fail(
+	reason: DiagnosticReason,
+	message: string,
+	where: Partial<EvidenceWhere> & { stage: DiagnosticStage },
+	extra: { evidenceIndex?: number; anchorId?: string } = {},
+): never {
+	throw new SentimentValidationError(
+		reason,
+		message,
+		diagnostic(where.stage, reason, {
+			entityKey: where.entityKey ?? null,
+			aspectKey: where.aspectKey ?? null,
+			evidenceIndex: extra.evidenceIndex ?? null,
+			anchorId: extra.anchorId ?? null,
+		}),
+	);
+}
+
+/** One citation: known anchor, unique `(anchorId, polarity)`, two polarities on one anchor only for Mixed. */
+function resolveOneRef(
+	anchors: Map<string, EvidenceAnchor>,
+	ref: SentimentEvidenceRef,
+	index: number,
+	where: EvidenceWhere,
+	category: SentimentCategory,
+	seenPairs: Set<string>,
+	polaritiesByAnchor: Map<string, Set<EvidencePolarity>>,
+): SentimentEvidence {
+	const anchor = anchors.get(ref.anchorId);
+	if (!anchor) {
+		fail("evidence-unknown-anchor", `${where.label}: anchor "${ref.anchorId}" is not part of the answer`, where, {
+			evidenceIndex: index,
+			anchorId: /^s\d{4}$/.test(ref.anchorId) ? ref.anchorId : undefined,
+		});
+	}
+	const pair = `${ref.anchorId}:${ref.polarity}`;
+	if (seenPairs.has(pair)) {
+		fail("evidence-duplicate", `${where.label}: anchor "${ref.anchorId}" cited twice with the same polarity`, where, {
+			evidenceIndex: index,
+			anchorId: ref.anchorId,
+		});
+	}
+	seenPairs.add(pair);
+	const polarities = polaritiesByAnchor.get(ref.anchorId) ?? new Set<EvidencePolarity>();
+	polarities.add(ref.polarity);
+	polaritiesByAnchor.set(ref.anchorId, polarities);
+	if (polarities.size > 1 && category !== "mixed") {
+		fail(
+			"evidence-anchor-polarity-conflict",
+			`${where.label}: anchor "${ref.anchorId}" cited with two polarities outside a mixed verdict`,
+			where,
+			{ evidenceIndex: index, anchorId: ref.anchorId },
+		);
+	}
+	return { quote: anchor.text, start: anchor.start, end: anchor.end, polarity: ref.polarity };
+}
+
+/**
+ * Resolve cited anchors into stored evidence: every id must belong to this
+ * answer, `(anchorId, polarity)` pairs are unique, one anchor may carry two
+ * polarities only for a Mixed verdict, and Mixed needs a positive and a
+ * negative citation. The stored form is the exact raw slice of the anchor.
+ */
+function resolveEvidence(
+	anchors: Map<string, EvidenceAnchor>,
+	refs: SentimentEvidenceRef[],
+	where: EvidenceWhere,
 	category: SentimentCategory,
 ): SentimentEvidence[] {
-	const located: SentimentEvidence[] = [];
-	for (const { quote, polarity } of quotes) {
-		const hit = locateEvidence(body, rawBody, quote, polarity);
-		if (!hit)
-			throw new SentimentValidationError("evidence-not-in-answer", `${where}: excerpt is not verbatim in the answer`);
-		located.push(hit);
-	}
+	const resolved: SentimentEvidence[] = [];
+	const seenPairs = new Set<string>();
+	const polaritiesByAnchor = new Map<string, Set<EvidencePolarity>>();
+	refs.forEach((ref, index) => {
+		resolved.push(resolveOneRef(anchors, ref, index, where, category, seenPairs, polaritiesByAnchor));
+	});
 	if (category === "mixed") {
-		const polarities = new Set(located.map((e) => e.polarity));
+		const polarities = new Set(resolved.map((e) => e.polarity));
 		if (!polarities.has("positive") || !polarities.has("negative")) {
-			throw new SentimentValidationError(
-				"mixed-needs-dual-evidence",
-				`${where}: mixed requires one positive and one negative excerpt`,
-			);
+			fail("mixed-needs-dual-evidence", `${where.label}: mixed requires one positive and one negative citation`, {
+				...where,
+				stage: "cross-field",
+			});
 		}
 	}
-	return located;
+	return resolved;
+}
+
+/** Aspect rows of one entity: unique keys, consistent score/category, resolved citations. */
+function validateAspects(
+	anchors: Map<string, EvidenceAnchor>,
+	entity: SentimentClassificationResult["entities"][number],
+): ValidatedAspect[] {
+	const aspectKeys = new Set<string>();
+	const aspects: ValidatedAspect[] = [];
+	for (const aspect of entity.aspects) {
+		const at: EvidenceWhere = {
+			stage: "aspect",
+			entityKey: entity.key,
+			aspectKey: aspect.key,
+			label: `entity "${entity.key}" aspect "${aspect.key}"`,
+		};
+		if (aspectKeys.has(aspect.key)) fail("duplicate-aspect", `${at.label} returned twice`, at);
+		aspectKeys.add(aspect.key);
+		if (!isScoreCategoryConsistent(aspect.score, aspect.category)) {
+			fail("score-category", `${at.label}: ${aspect.category} does not fit score ${aspect.score}`, {
+				...at,
+				stage: "cross-field",
+			});
+		}
+		aspects.push({
+			key: aspect.key,
+			score: aspect.score,
+			category: aspect.category,
+			confidence: aspect.confidence,
+			evidence: resolveEvidence(anchors, aspect.evidence, { ...at, stage: "evidence" }, aspect.category),
+		});
+	}
+	return aspects;
 }
 
 /**
  * Local validation of a structured answer, independent of what the provider
  * already parsed: every supplied candidate exactly once and nothing else,
- * score/category consistency, evidence verbatim in the stored body (raw
- * offsets resolved), a positive and a negative excerpt for Mixed, at most one
- * result per aspect key. Anything invalid throws and nothing is persisted.
+ * score/category consistency, every citation an anchor of this very answer
+ * (resolved here to the exact raw slice and offsets), a positive and a
+ * negative citation for Mixed, at most one result per aspect key. Anything
+ * invalid throws with a bounded diagnostic and nothing is persisted.
  */
 export function validateSentimentResult(
 	raw: unknown,
-	args: { answerBody: string; candidates: SentimentCandidate[] },
+	args: { answerBody: string; candidates: SentimentCandidate[]; anchors?: readonly EvidenceAnchor[] },
 ): ValidatedEntitySentiment[] {
+	const anchors = anchorMap([...(args.anchors ?? segmentAnswer(args.answerBody))]);
 	const parsed = sentimentClassificationResultSchema.safeParse(raw);
 	if (!parsed.success) {
-		throw new SentimentValidationError("schema", parsed.error.issues[0]?.message ?? "invalid classifier output");
+		fail("schema", parsed.error.issues[0]?.message ?? "invalid classifier output", { stage: "provider-schema" });
 	}
 	const result: SentimentClassificationResult = parsed.data;
-	const body = normalizeIndexed(args.answerBody);
 	const expected = new Set(args.candidates.map((c) => c.key));
 	const seen = new Set<string>();
 	const entities: ValidatedEntitySentiment[] = [];
 
 	for (const entity of result.entities) {
-		if (!expected.has(entity.key))
-			throw new SentimentValidationError("unknown-entity", `entity "${entity.key}" was not a candidate`);
-		if (seen.has(entity.key))
-			throw new SentimentValidationError("duplicate-entity", `entity "${entity.key}" returned twice`);
+		const at: EvidenceWhere = {
+			stage: "entity",
+			entityKey: entity.key,
+			aspectKey: null,
+			label: `entity "${entity.key}"`,
+		};
+		if (!expected.has(entity.key)) fail("unknown-entity", `${at.label} was not a candidate`, at);
+		if (seen.has(entity.key)) fail("duplicate-entity", `${at.label} returned twice`, at);
 		seen.add(entity.key);
 		if (!isScoreCategoryConsistent(entity.score, entity.category)) {
-			throw new SentimentValidationError(
-				"score-category",
-				`entity "${entity.key}": ${entity.category} does not fit score ${entity.score}`,
-			);
-		}
-		const evidence = validateEvidence(
-			body,
-			args.answerBody,
-			entity.evidence,
-			`entity "${entity.key}"`,
-			entity.category,
-		);
-		const aspectKeys = new Set<string>();
-		const aspects: ValidatedAspect[] = [];
-		for (const aspect of entity.aspects) {
-			if (aspectKeys.has(aspect.key))
-				throw new SentimentValidationError(
-					"duplicate-aspect",
-					`entity "${entity.key}": aspect "${aspect.key}" returned twice`,
-				);
-			aspectKeys.add(aspect.key);
-			if (!isScoreCategoryConsistent(aspect.score, aspect.category)) {
-				throw new SentimentValidationError(
-					"score-category",
-					`entity "${entity.key}" aspect "${aspect.key}": ${aspect.category} does not fit score ${aspect.score}`,
-				);
-			}
-			aspects.push({
-				key: aspect.key,
-				score: aspect.score,
-				category: aspect.category,
-				confidence: aspect.confidence,
-				evidence: validateEvidence(
-					body,
-					args.answerBody,
-					aspect.evidence,
-					`entity "${entity.key}" aspect "${aspect.key}"`,
-					aspect.category,
-				),
+			fail("score-category", `${at.label}: ${entity.category} does not fit score ${entity.score}`, {
+				...at,
+				stage: "cross-field",
 			});
 		}
+		const evidence = resolveEvidence(anchors, entity.evidence, { ...at, stage: "evidence" }, entity.category);
+		const aspects = validateAspects(anchors, entity);
 		entities.push({
 			key: entity.key,
 			score: entity.score,
@@ -219,7 +267,8 @@ export function validateSentimentResult(
 	}
 
 	for (const key of expected) {
-		if (!seen.has(key)) throw new SentimentValidationError("missing-entity", `candidate "${key}" was not classified`);
+		if (!seen.has(key))
+			fail("missing-entity", `candidate "${key}" was not classified`, { stage: "entity", entityKey: key });
 	}
 	return entities;
 }
@@ -229,46 +278,121 @@ export interface SentimentClassifierDeps {
 	resolveProvider?: () => Provider;
 }
 
+/** Anchors of the answer, computed before any request; an answer that cannot be represented is refused without spending. */
+function anchorsBeforeRequest(answerBody: string): EvidenceAnchor[] {
+	let anchors: EvidenceAnchor[];
+	try {
+		anchors = segmentAnswer(answerBody);
+	} catch (error) {
+		if (error instanceof SentimentValidationError) throw error.beforeRequest();
+		throw error;
+	}
+	if (anchors.length === 0) {
+		throw new SentimentValidationError(
+			"answer-unsegmentable",
+			"the answer has no citable segment",
+			diagnostic("evidence", "answer-unsegmentable"),
+		).beforeRequest();
+	}
+	return anchors;
+}
+
+type ResearchResult = Awaited<ReturnType<NonNullable<Provider["runStructuredResearch"]>>>;
+
+/**
+ * The one provider request. A response the provider itself could not turn
+ * into the requested object is a paid, terminal defect of this answer and is
+ * rethrown as a validation error carrying the response envelope.
+ */
+async function requestClassification(
+	provider: Provider,
+	prompt: string,
+	anchorIds: string[],
+	signal: AbortSignal | undefined,
+): Promise<ResearchResult> {
+	if (!provider.runStructuredResearch) {
+		throw new Error(`Provider "${provider.id}" does not implement structured research`);
+	}
+	try {
+		return await provider.runStructuredResearch({
+			prompt,
+			schema: sentimentClassificationResultSchemaFor(anchorIds),
+			webSearch: true,
+			signal,
+			maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,
+		});
+	} catch (error) {
+		if (error instanceof StructuredResearchResponseError) {
+			throw new SentimentValidationError(
+				error.code,
+				error.message,
+				diagnostic("provider-schema", error.code === "no-content" ? "invalid-json" : error.code),
+			).withEnvelope({
+				generationId: error.envelope.generationId,
+				request: error.envelope.request,
+				usage: error.envelope.usage ?? null,
+			});
+		}
+		throw error;
+	}
+}
+
 /**
  * One structured-research call per prompt run through the locked provider
  * path (web search on, so the model can disambiguate identities), validated
- * locally before anything is persisted. Retry policy belongs to the queue.
+ * locally before anything is persisted. Retry policy belongs to the queue;
+ * a locally rejected paid answer is terminal for this exact input.
  */
 export async function classifySentiment(
 	args: { answerBody: string; candidates: SentimentCandidate[] },
 	deps: SentimentClassifierDeps = {},
 	signal?: AbortSignal,
 ): Promise<SentimentClassification> {
-	if (args.candidates.length === 0) throw new SentimentValidationError("no-candidates", "nothing to classify");
-
-	const provider = deps.resolveProvider ? deps.resolveProvider() : resolveSentimentProvider();
-	if (!provider.runStructuredResearch) {
-		throw new Error(`Provider "${provider.id}" does not implement structured research`);
-	}
-
-	const result = await provider.runStructuredResearch({
-		prompt: buildSentimentPrompt(args),
-		schema: sentimentClassificationResultSchema,
-		webSearch: true,
-		signal,
-		maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,
-	});
-	if (provider.id === SENTIMENT_PROVIDER_ID && result.modelVersion !== SENTIMENT_MODEL) {
+	if (args.candidates.length === 0) {
 		throw new SentimentValidationError(
-			"model-mismatch",
-			`sentiment is locked to ${SENTIMENT_MODEL}; provider answered with ${result.modelVersion ?? "unknown"}`,
-		);
+			"no-candidates",
+			"nothing to classify",
+			diagnostic("entity", "no-candidates"),
+		).beforeRequest();
 	}
-
-	return {
-		entities: validateSentimentResult(result.object, args),
-		provider: provider.id,
-		model: result.modelVersion ?? null,
-		webSearch: true,
-		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
-		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
-		inputHash: sentimentInputHash(args.answerBody, args.candidates),
-		usage: result.usage,
-		request: result.request,
+	const anchors = anchorsBeforeRequest(args.answerBody);
+	const provider = deps.resolveProvider ? deps.resolveProvider() : resolveSentimentProvider();
+	const result = await requestClassification(
+		provider,
+		buildSentimentPrompt({ ...args, anchors }),
+		anchors.map((anchor) => anchor.id),
+		signal,
+	);
+	// From here on the provider has answered and charged: every rejection
+	// carries the paid response's envelope so the cost and the generation
+	// are never lost with the answer.
+	const envelope: PaidResponseEnvelope = {
+		generationId: safeGenerationId(result.generationId),
+		request: result.request ?? null,
+		usage: result.usage ?? null,
 	};
+	try {
+		if (provider.id === SENTIMENT_PROVIDER_ID && result.modelVersion !== SENTIMENT_MODEL) {
+			throw new SentimentValidationError(
+				"model-mismatch",
+				`sentiment is locked to ${SENTIMENT_MODEL}; provider answered with ${result.modelVersion ?? "unknown"}`,
+				diagnostic("provider-schema", "model-mismatch"),
+			);
+		}
+		return {
+			entities: validateSentimentResult(result.object, { ...args, anchors }),
+			provider: provider.id,
+			model: result.modelVersion ?? null,
+			webSearch: true,
+			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
+			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+			inputHash: sentimentInputHash(args.answerBody, args.candidates),
+			usage: result.usage,
+			request: result.request,
+			generationId: envelope.generationId,
+		};
+	} catch (error) {
+		if (error instanceof SentimentValidationError) throw error.withEnvelope(envelope);
+		throw error;
+	}
 }

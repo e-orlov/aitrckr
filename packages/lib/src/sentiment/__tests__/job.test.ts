@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SentimentClassification } from "../classifier";
 import { SentimentValidationError, sentimentInputHash } from "../classifier";
 import type { DetectableEntity } from "../detector";
+import { diagnostic } from "../diagnostics";
 import { enqueueSentimentBestEffort } from "../enqueue";
 import { ClaimLostError, SentimentJobError } from "../errors";
 import { runSentimentJob, type SentimentJobDeps } from "../job";
@@ -73,6 +74,7 @@ const classification: SentimentClassification = {
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	inputHash: currentHash,
+	generationId: "gen-job-001",
 };
 
 type AnalysisStub = {
@@ -81,6 +83,7 @@ type AnalysisStub = {
 	classifierVersion: string;
 	taxonomyVersion: string;
 	inputHash: string | null;
+	errorCode?: string | null;
 };
 
 function deps(overrides: Partial<SentimentJobDeps> & { analysis?: Partial<AnalysisStub> } = {}) {
@@ -124,7 +127,12 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("claims, classifies, persists atomically and records one success usage event", async () => {
 		const { d, usage } = deps();
 		const outcome = await runSentimentJob(payload, d);
-		expect(outcome).toEqual({ status: "classified", entities: 2, entityKeys: ["brand", "c-huk"] });
+		expect(outcome).toEqual({
+			status: "classified",
+			entities: 2,
+			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
+		});
 		expect(d.claimAnalysis).toHaveBeenCalledTimes(1);
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
@@ -218,6 +226,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 				status: "failed",
 				errorCode: "persistence",
 				errorMessage: `store persistence (Error) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL}`,
+				inputHash: null,
 			},
 		]);
 	});
@@ -311,6 +320,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			status: "classified",
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
 		});
 		expect(persistDetection).toHaveBeenCalledTimes(1);
 		expect(persistDetection).toHaveBeenCalledWith(
@@ -357,6 +367,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			status: "classified",
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
 		});
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
@@ -370,12 +381,14 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			status: "classified",
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
 		});
 		const hashless = deps({ analysis: { status: "completed", inputHash: null } });
 		expect(await runSentimentJob(payload, hashless.d)).toEqual({
 			status: "classified",
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
+			generationId: "gen-job-001",
 		});
 	});
 
@@ -388,23 +401,111 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(d.claimAnalysis).not.toHaveBeenCalled();
 	});
 
-	it("marks failed with a safe code, attributes the failed attempt to the locked provider/model, writes nothing and rethrows a safe error", async () => {
+	it("a rejected answer marks failed with a safe code and the exact input hash, attributes the attempt to the locked provider/model, writes nothing and completes as a terminal outcome", async () => {
 		const { d, marks, usage } = deps({
 			classify: vi.fn(async () => {
-				throw new SentimentValidationError("evidence-not-in-answer", `entity "brand": ${"x".repeat(2000)}`);
+				throw new SentimentValidationError("evidence-unknown-anchor", `entity "brand": ${"x".repeat(2000)}`);
 			}),
 		});
-		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
+		expect(await runSentimentJob(payload, d)).toEqual({
+			status: "terminal-validation-failure",
+			code: "evidence-unknown-anchor",
+			requestSent: true,
+			diagnostic: null,
+			envelope: null,
+		});
 		expect(d.persist).not.toHaveBeenCalled();
-		const failed = marks.at(-1) as { status: string; errorCode: string; errorMessage: string };
-		expect(failed.status).toBe("failed");
-		expect(failed.errorCode).toBe("evidence-not-in-answer");
-		expect(failed.errorMessage).toBe(
-			`validation evidence-not-in-answer (SentimentValidationError) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL}`,
-		);
+		expect(marks.at(-1)).toEqual({
+			status: "failed",
+			errorCode: "evidence-unknown-anchor",
+			errorMessage: `validation evidence-unknown-anchor (SentimentValidationError) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL}`,
+			inputHash: sentimentInputHash(run.answerBody as string, candidatesFromMentions(mentions, entities)),
+		});
 		expect(usage).toEqual([
 			expect.objectContaining({ succeeded: false, provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL }),
 		]);
+	});
+
+	it("a failed analysis with the current input hash is skipped without a claim or a call; another input or a provider failure's cleared hash is eligible again", async () => {
+		const current = sentimentInputHash(run.answerBody as string, candidatesFromMentions(mentions, entities));
+		const terminal = deps({ analysis: { status: "failed", inputHash: current, errorCode: "evidence-unknown-anchor" } });
+		expect(await runSentimentJob(payload, terminal.d)).toMatchObject({
+			status: "skipped",
+			reason: expect.stringContaining("terminal validation failure"),
+		});
+		expect(terminal.d.claimAnalysis).not.toHaveBeenCalled();
+		expect(terminal.d.classify).not.toHaveBeenCalled();
+
+		const cleared = deps({ analysis: { status: "failed", inputHash: null } });
+		expect(await runSentimentJob(payload, cleared.d)).toMatchObject({ status: "classified" });
+		const otherInput = deps({
+			analysis: { status: "failed", inputHash: "0".repeat(64), errorCode: "evidence-unknown-anchor" },
+		});
+		expect(await runSentimentJob(payload, otherInput.d)).toMatchObject({ status: "classified" });
+		// A hash left over from an earlier completion on a row failed for another reason is not a terminal mark.
+		const otherCode = deps({ analysis: { status: "failed", inputHash: current, errorCode: "provider" } });
+		expect(await runSentimentJob(payload, otherCode.d)).toMatchObject({ status: "classified" });
+	});
+
+	it("a provider failure keeps the queue's retry path: the job still throws and the failed row carries no input hash", async () => {
+		const { d, marks } = deps({
+			classify: vi.fn(async () => {
+				throw new Error("OpenRouter API error (503): upstream unavailable");
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ name: "SentimentJobError", code: "provider" });
+		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "provider", inputHash: null });
+	});
+
+	it("a paid answer rejected before the request left is attributed nothing; one rejected after it is attributed its charged cost, and the envelope survives without any text", async () => {
+		const refused = deps({
+			classify: vi.fn(async () => {
+				throw new SentimentValidationError("answer-unsegmentable", "no citable segment").beforeRequest();
+			}),
+		});
+		expect(await runSentimentJob(payload, refused.d)).toMatchObject({
+			status: "terminal-validation-failure",
+			code: "answer-unsegmentable",
+			requestSent: false,
+		});
+		expect(refused.usage).toEqual([]);
+
+		const envelope = {
+			generationId: "gen-abc123",
+			request: { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+			usage: {
+				inputTokens: 6410,
+				outputTokens: 812,
+				reasoningTokens: 300,
+				costUsd: 0.020047,
+				webSearchRequests: 1,
+				webSearchRequestsConflict: false,
+			},
+		};
+		const paid = deps({
+			classify: vi.fn(async () => {
+				throw new SentimentValidationError(
+					"mixed-needs-dual-evidence",
+					`entity "c-huk": ${"HUK ist teuer. ".repeat(50)}`,
+					diagnostic("cross-field", "mixed-needs-dual-evidence", { entityKey: "c-huk" }),
+				).withEnvelope(envelope);
+			}),
+		});
+		const outcome = await runSentimentJob(payload, paid.d);
+		expect(outcome).toMatchObject({
+			status: "terminal-validation-failure",
+			code: "mixed-needs-dual-evidence",
+			requestSent: true,
+			envelope,
+			diagnostic: { entityKey: "c-huk" },
+		});
+		expect(paid.usage).toEqual([
+			expect.objectContaining({ succeeded: false, provider: SENTIMENT_PROVIDER_ID, actualCostUsd: 0.020047 }),
+		]);
+		const failed = paid.marks.at(-1) as { errorMessage: string };
+		expect(failed.errorMessage).toContain('diagnostic={"stage":"cross-field"');
+		expect(failed.errorMessage).toContain('"generationId":"gen-abc123"');
+		expect(`${failed.errorMessage}${JSON.stringify(outcome)}`).not.toContain("HUK ist teuer");
 	});
 
 	it("sanitizes provider errors: no key, answer text or response body reaches the row or the thrown error", async () => {

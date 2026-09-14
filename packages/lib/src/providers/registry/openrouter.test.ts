@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { WEB_QUERIES_UNAVAILABLE } from "../../constants";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../config";
+import { StructuredResearchResponseError } from "../types";
 import { openrouter, parseOpenRouterUsage } from "./openrouter";
 
 function stubFetch(
@@ -252,8 +253,16 @@ describe("openrouter runStructuredResearch", () => {
 		expect(result).toEqual({
 			object: structured,
 			modelVersion: "openai/gpt-5-mini",
+			generationId: null,
+			usage: undefined,
 			request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: null },
 		});
+	});
+
+	it("reports the response's generation id alongside the object", async () => {
+		stubFetch({ id: "gen-01HXYZ", choices: [{ message: { content: JSON.stringify(structured) } }] });
+		const result = await openrouter.runStructuredResearch!({ prompt: "research", schema });
+		expect(result.generationId).toBe("gen-01HXYZ");
 	});
 
 	it("adds max_tokens only when a caller supplies maxOutputTokens; the default request is unchanged", async () => {
@@ -287,7 +296,7 @@ describe("openrouter runStructuredResearch", () => {
 		});
 	});
 
-	it("returns only safe numeric usage — tokens, reasoning tokens, charged cost, web-search count", async () => {
+	it("returns only safe numeric usage — tokens, reasoning tokens, charged cost, web-search count — and the opaque generation id", async () => {
 		const fetchMock = stubFetch({
 			choices: [{ message: { content: JSON.stringify(structured) } }],
 			usage: {
@@ -302,7 +311,7 @@ describe("openrouter runStructuredResearch", () => {
 				is_byok: false,
 				api_key: "sk-or-must-not-leak",
 			},
-			id: "gen-secret-id",
+			id: "gen-opaque-id",
 		});
 		const result = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: true });
 		expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -314,7 +323,8 @@ describe("openrouter runStructuredResearch", () => {
 			webSearchRequests: 1,
 			webSearchRequestsConflict: false,
 		});
-		expect(JSON.stringify(result)).not.toMatch(/sk-or-|gen-secret-id|is_byok|upstream/);
+		expect(result.generationId).toBe("gen-opaque-id");
+		expect(JSON.stringify(result)).not.toMatch(/sk-or-|is_byok|upstream|api_key|cached_tokens|total_tokens/);
 	});
 
 	it("parses the Responses-style variant in full and reports absent fields as null", async () => {
@@ -373,10 +383,57 @@ describe("openrouter runStructuredResearch", () => {
 		expect(result.object).toEqual(structured);
 	});
 
-	it("rejects content that does not match the schema", async () => {
-		stubFetch({ choices: [{ message: { content: JSON.stringify({ summary: 1 }) } }] });
+	it("rejects content that does not match the schema as a typed error carrying the paid envelope, never the content", async () => {
+		const usage = { prompt_tokens: 6410, completion_tokens: 812, cost: 0.020047 };
+		stubFetch({
+			id: "gen-schema",
+			usage,
+			choices: [{ message: { content: JSON.stringify({ summary: 1, leaked: "SECRET-TEXT" }) } }],
+		});
 
-		await expect(openrouter.runStructuredResearch!({ prompt: "research", schema })).rejects.toThrow();
+		await expect(openrouter.runStructuredResearch!({ prompt: "research", schema })).rejects.toSatisfy(
+			(error: unknown) => {
+				expect(error).toBeInstanceOf(StructuredResearchResponseError);
+				const typed = error as StructuredResearchResponseError;
+				expect(typed.code).toBe("schema");
+				expect(typed.envelope).toEqual({
+					provider: "openrouter",
+					model: "openai/gpt-5-mini",
+					generationId: "gen-schema",
+					request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: null },
+					usage: {
+						inputTokens: 6410,
+						outputTokens: 812,
+						reasoningTokens: null,
+						costUsd: 0.020047,
+						webSearchRequests: null,
+						webSearchRequestsConflict: false,
+					},
+				});
+				expect(JSON.stringify({ ...typed, message: typed.message })).not.toContain("SECRET-TEXT");
+				return true;
+			},
+		);
+	});
+
+	it("rejects missing content and invalid JSON the same way, with the usage of the charged response", async () => {
+		stubFetch({ id: "gen-empty", usage: { cost: 0.01 }, choices: [{ message: { content: null } }] });
+		await expect(openrouter.runStructuredResearch!({ prompt: "research", schema })).rejects.toMatchObject({
+			name: "StructuredResearchResponseError",
+			code: "no-content",
+			envelope: { generationId: "gen-empty", usage: { costUsd: 0.01 } },
+		});
+		stubFetch({ id: "gen-garbage", usage: { cost: 0.02 }, choices: [{ message: { content: "{not json: SECRET" } }] });
+		await expect(openrouter.runStructuredResearch!({ prompt: "research", schema })).rejects.toSatisfy(
+			(error: unknown) => {
+				expect(error).toMatchObject({
+					code: "invalid-json",
+					envelope: { generationId: "gen-garbage", usage: { costUsd: 0.02 } },
+				});
+				expect((error as Error).message).not.toContain("SECRET");
+				return true;
+			},
+		);
 	});
 
 	it("surfaces a non-2xx response as an error without the credential", async () => {

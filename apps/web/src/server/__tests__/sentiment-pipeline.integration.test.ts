@@ -18,7 +18,9 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test stack");
 
 const {
+	candidatesFromMentions,
 	ensureAnalysis,
+	loadDetectableEntities,
 	runMentionBackfill,
 	runSentimentEnqueue,
 	runSentimentJob,
@@ -27,6 +29,7 @@ const {
 	SENTIMENT_MODEL,
 	SENTIMENT_TAXONOMY_VERSION,
 	sentimentClassificationResultSchema,
+	sentimentInputHash,
 } = await import("@workspace/lib/sentiment");
 const { explainSentimentEvidence, loadRunSources, loadSentimentEvidence, loadSentimentOverview } = await import(
 	"@/server/sentiment-load"
@@ -57,6 +60,7 @@ const RUN_CANARY_UNKNOWN = "5e970004-0000-4000-8000-00000000020c";
 const RUN_CANARY_RETRY = "5e970004-0000-4000-8000-00000000020d";
 const RUN_CANARY_RACE = "5e970004-0000-4000-8000-00000000020e";
 const RUN_CANARY_RACE2 = "5e970004-0000-4000-8000-00000000020f";
+const RUN_TERMINAL = "5e970004-0000-4000-8000-000000000210";
 const ALIAS_ANSWER = "Only the alias Alphaline shows up in this answer, nothing else does.";
 const ANSWER = "Alpha handles claims fast and fairly. Newco is also mentioned. Sent Pipe is fine.";
 
@@ -95,17 +99,8 @@ function fakeProvider(
 					score: key === "brand" ? 60 : 82,
 					category: "positive",
 					confidence: 0.9,
-					evidence: [
-						{
-							quote:
-								key === ALPHA
-									? "Alpha handles claims fast and fairly"
-									: key === NEWCO
-										? "Newco is also mentioned"
-										: "Sent Pipe is fine",
-							polarity: "positive",
-						},
-					],
+					// The answer segments into one anchor per sentence: Alpha, Newco, Sent Pipe.
+					evidence: [{ anchorId: key === ALPHA ? "s0001" : key === NEWCO ? "s0002" : "s0003", polarity: "positive" }],
 					aspects:
 						key === ALPHA
 							? [
@@ -114,7 +109,7 @@ function fakeProvider(
 										score: 85,
 										category: "positive",
 										confidence: 0.9,
-										evidence: [{ quote: "handles claims fast", polarity: "positive" }],
+										evidence: [{ anchorId: "s0001", polarity: "positive" }],
 									},
 								]
 							: [],
@@ -123,6 +118,7 @@ function fakeProvider(
 			return {
 				object: object as T,
 				modelVersion: SENTIMENT_MODEL,
+				generationId: "gen-it-001",
 				request: options.request,
 				usage:
 					options.usage ??
@@ -372,7 +368,8 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 			ALPHA,
 		]);
 		const span = evidence.rows[0].evidence[0];
-		expect(ANSWER.slice(span.start, span.end)).toBe("Alpha handles claims fast and fairly");
+		expect(ANSWER.slice(span.start, span.end)).toBe("Alpha handles claims fast and fairly.");
+		expect(span.quote).toBe("Alpha handles claims fast and fairly.");
 		expect(span.polarity).toBe("positive");
 	});
 
@@ -685,7 +682,7 @@ describe("IT-SNT-014 superseded mention lifecycle", () => {
 							score: 75,
 							category: "positive",
 							confidence: 0.9,
-							evidence: [{ quote: "Alphaline shows up", polarity: "positive" }],
+							evidence: [{ anchorId: "s0001", polarity: "positive" }],
 							aspects: [],
 						},
 					],
@@ -1369,6 +1366,208 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		expect(worker.claimed).toBe(true);
 		expect(await analysisRow(RUN_CANARY_RACE2)).toEqual({ status: "processing", error_code: null, attempts: 2 });
 		await client.query("UPDATE sentiment_analyses SET status = 'failed' WHERE id = $1", [analysis.id]);
+	});
+});
+
+describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (grounded evidence)", () => {
+	const TERMINAL_ANSWER = "Alpha settles claims slowly. Newco is fine. Sent Pipe is mentioned too.";
+	const terminalPayload = { ...payload, promptRunId: RUN_TERMINAL };
+	const usage = {
+		inputTokens: 6410,
+		outputTokens: 812,
+		reasoningTokens: 300,
+		costUsd: 0.020047,
+		webSearchRequests: 1,
+		webSearchRequestsConflict: false,
+	};
+	const request = { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 };
+
+	/** Answers every candidate; the Alpha entity cites one anchor twice with the same polarity, which the classifier refuses. */
+	function rejectingProvider(calls: { n: number }): Provider {
+		return {
+			...fakeProvider(),
+			id: "openrouter",
+			async runStructuredResearch<T>({ prompt, schema }: { prompt: string; schema: { parse: (v: unknown) => T } }) {
+				calls.n++;
+				const keys = [...prompt.matchAll(/^- key "([^"]+)"/gm)].map((m) => m[1]);
+				return {
+					object: schema.parse({
+						entities: keys.map((key) => ({
+							key,
+							score: 50,
+							category: "neutral",
+							confidence: 0.9,
+							evidence:
+								key === ALPHA
+									? [
+											{ anchorId: "s0001", polarity: "neutral" },
+											{ anchorId: "s0001", polarity: "neutral" },
+										]
+									: [{ anchorId: key === NEWCO ? "s0002" : "s0003", polarity: "neutral" }],
+							aspects: [],
+						})),
+					}),
+					modelVersion: SENTIMENT_MODEL,
+					generationId: "gen-terminal-01",
+					usage,
+					request,
+				};
+			},
+		} as unknown as Provider;
+	}
+
+	const failedEvents = () =>
+		client.query<{ estimated_cost_usd: string | null; provider: string; model: string }>(
+			`SELECT estimated_cost_usd, provider, model FROM usage_events
+			 WHERE brand_id = $1 AND prompt_id = $2 AND event_type = 'sentiment_classification_failed' AND created_at > now() - interval '5 minutes'
+			 ORDER BY created_at`,
+			[BRAND, PROMPT],
+		);
+	const row = async () =>
+		(
+			await client.query<{
+				status: string;
+				input_hash: string | null;
+				error_code: string | null;
+				error_message: string | null;
+				attempts: number;
+			}>(
+				"SELECT status, input_hash, error_code, error_message, attempts FROM sentiment_analyses WHERE prompt_run_id = $1 AND classifier_version = $2",
+				[RUN_TERMINAL, SENTIMENT_CLASSIFIER_VERSION],
+			)
+		).rows[0];
+
+	it("one paid call: the analysis fails with the exact input hash and the bounded diagnostic, the charged cost is attributed once, nothing is observed", {
+		timeout: 120_000,
+	}, async () => {
+		await insertRun(RUN_TERMINAL, PROMPT, { choices: [{ message: { content: TERMINAL_ANSWER } }] }, 5);
+		await runMentionBackfill({ apply: true, brandId: BRAND });
+		const before = (await failedEvents()).rows.length;
+		const calls = { n: 0 };
+		const outcome = await runSentimentJob(terminalPayload, { resolveProvider: () => rejectingProvider(calls) });
+		expect(calls.n).toBe(1);
+		expect(outcome).toMatchObject({
+			status: "terminal-validation-failure",
+			code: "evidence-duplicate",
+			requestSent: true,
+			envelope: { generationId: "gen-terminal-01", usage: { costUsd: 0.020047 }, request },
+			diagnostic: {
+				stage: "evidence",
+				reason: "evidence-duplicate",
+				entityKey: ALPHA,
+				evidenceIndex: 1,
+				anchorId: "s0001",
+			},
+		});
+		const entities = await loadDetectableEntities(BRAND, "historical");
+		const expectedHash = sentimentInputHash(
+			TERMINAL_ANSWER,
+			candidatesFromMentions(await loadMentions(RUN_TERMINAL), entities),
+		);
+		const failed = await row();
+		expect(failed).toMatchObject({
+			status: "failed",
+			input_hash: expectedHash,
+			error_code: "evidence-duplicate",
+			attempts: 1,
+		});
+		const message = failed.error_message ?? "";
+		const diagnosticJson = message.slice(message.indexOf(" diagnostic=") + " diagnostic=".length);
+		expect(
+			message.startsWith(`validation evidence-duplicate (SentimentValidationError) via openrouter/${SENTIMENT_MODEL}`),
+		).toBe(true);
+		expect(JSON.parse(diagnosticJson)).toMatchObject({
+			stage: "evidence",
+			reason: "evidence-duplicate",
+			entityKey: ALPHA,
+			generationId: "gen-terminal-01",
+		});
+		expect(Buffer.byteLength(diagnosticJson, "utf8")).toBeLessThanOrEqual(512);
+		for (const forbidden of ["settles claims slowly", TERMINAL_ANSWER, "sk-or-", "Bearer"]) {
+			expect(JSON.stringify(failed)).not.toContain(forbidden);
+		}
+		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_TERMINAL])).toBe(0);
+		const events = (await failedEvents()).rows.slice(before);
+		expect(events).toEqual([{ estimated_cost_usd: "0.020047", provider: "openrouter", model: SENTIMENT_MODEL }]);
+	});
+
+	it("the same input under the same versions is skipped without a claim or a request, by the job and by the enqueue inventory", {
+		timeout: 120_000,
+	}, async () => {
+		const calls = { n: 0 };
+		const before = await row();
+		expect(await runSentimentJob(terminalPayload, { resolveProvider: () => rejectingProvider(calls) })).toMatchObject({
+			status: "skipped",
+			reason: expect.stringContaining("terminal validation failure evidence-duplicate"),
+		});
+		expect(calls.n).toBe(0);
+		expect(await row()).toEqual(before);
+		const sent: string[] = [];
+		const sender = {
+			send: async (_queue: string, data: { promptRunId: string }) => {
+				sent.push(data.promptRunId);
+				return `job-${sent.length}`;
+			},
+		};
+		// The brand carries many eligible runs from earlier tests; the limit must not stop the scan before this run.
+		const inventory = await runSentimentEnqueue({ enqueue: { limit: 100_000 }, sender, brandId: BRAND });
+		expect(inventory.limitReached).toBe(false);
+		expect(inventory.counts.terminalFailed).toBe(1);
+		expect(sent.length).toBe(inventory.counts.accepted);
+		expect(sent).not.toContain(RUN_TERMINAL);
+		expect(await row()).toEqual(before);
+	});
+
+	it("a transient provider failure keeps the retry path: the job throws, the failed row carries no input hash and the next attempt classifies", {
+		timeout: 120_000,
+	}, async () => {
+		// A changed answer is a new input: the terminal mark no longer applies.
+		await client.query("UPDATE prompt_runs SET raw_output = $2 WHERE id = $1", [
+			RUN_TERMINAL,
+			JSON.stringify({ choices: [{ message: { content: `${TERMINAL_ANSWER} Updated.` } }] }),
+		]);
+		const flaky = {
+			...fakeProvider(),
+			id: "openrouter",
+			runStructuredResearch: async () => {
+				throw new Error("OpenRouter API error (503): upstream unavailable");
+			},
+		} as unknown as Provider;
+		await expect(runSentimentJob(terminalPayload, { resolveProvider: () => flaky })).rejects.toMatchObject({
+			name: "SentimentJobError",
+			code: "provider",
+			httpStatus: 503,
+		});
+		expect(await row()).toMatchObject({ status: "failed", input_hash: null, error_code: "provider", attempts: 2 });
+		const calls = { n: 0 };
+		const good = {
+			...fakeProvider(),
+			async runStructuredResearch<T>({ prompt, schema }: { prompt: string; schema: { parse: (v: unknown) => T } }) {
+				calls.n++;
+				const keys = [...prompt.matchAll(/^- key "([^"]+)"/gm)].map((m) => m[1]);
+				return {
+					object: schema.parse({
+						entities: keys.map((key, index) => ({
+							key,
+							score: 50,
+							category: "neutral",
+							confidence: 0.9,
+							evidence: [{ anchorId: `s000${index + 1}`, polarity: "neutral" }],
+							aspects: [],
+						})),
+					}),
+					modelVersion: SENTIMENT_MODEL,
+				};
+			},
+		} as unknown as Provider;
+		expect(await runSentimentJob(terminalPayload, { resolveProvider: () => good })).toMatchObject({
+			status: "classified",
+		});
+		expect(calls.n).toBe(1);
+		expect(await row()).toMatchObject({ status: "completed", error_code: null, attempts: 3 });
+		expect(await runSentimentJob(terminalPayload, { resolveProvider: () => rejectingProvider(calls) })).toEqual({
+			status: "already-completed",
+		});
 	});
 });
 

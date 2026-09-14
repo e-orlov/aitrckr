@@ -4,6 +4,7 @@ import { classifySentiment, validateSentimentResult } from "../classifier";
 import { competitorEntity, detectEntityMentions } from "../detector";
 import { GOLDEN_BRAND, GOLDEN_CASES } from "../golden/corpus";
 import { GOLDEN_GATES, goldenGatesPass, scoreGoldenCase, summarizeGolden } from "../golden/evaluate";
+import { goldenReference } from "../golden/reference";
 
 const brandEntityForGolden = {
 	key: GOLDEN_BRAND.key,
@@ -30,10 +31,24 @@ describe("GOLD-SNT-001 synthetic corpus", () => {
 		expect([...categories].sort()).toEqual(["mixed", "negative", "neutral", "positive"]);
 	});
 
-	it("every reference labelling passes the classifier validation (schema, identity, consistency, evidence)", () => {
+	it("every reference excerpt lies inside exactly one anchor and the anchored labelling passes the classifier validation", () => {
 		for (const goldenCase of GOLDEN_CASES) {
-			expect(() => validateSentimentResult(goldenCase.reference, args(goldenCase)), goldenCase.id).not.toThrow();
+			const reference = goldenReference(goldenCase);
+			expect(() => validateSentimentResult(reference, args(goldenCase)), goldenCase.id).not.toThrow();
+			const entities = validateSentimentResult(reference, args(goldenCase));
+			for (const entity of entities) {
+				for (const ev of [...entity.evidence, ...entity.aspects.flatMap((a) => a.evidence)]) {
+					expect(goldenCase.answer.slice(ev.start, ev.end), goldenCase.id).toBe(ev.quote);
+				}
+			}
 		}
+	});
+
+	it("the raw excerpt form of the labels is no longer accepted by the classifier contract", () => {
+		const first = GOLDEN_CASES[0];
+		expect(() => validateSentimentResult(first.reference, args(first))).toThrow(
+			expect.objectContaining({ code: "schema" }),
+		);
 	});
 
 	it("the deterministic detector finds every candidate entity in every answer", () => {
@@ -54,7 +69,7 @@ describe("GOLD-SNT-001 synthetic corpus", () => {
 			const provider = {
 				id: "fake",
 				runStructuredResearch: async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
-					object: schema.parse(goldenCase.reference),
+					object: schema.parse(goldenReference(goldenCase)),
 					modelVersion: "fake",
 				}),
 			} as unknown as Provider;
@@ -73,7 +88,7 @@ describe("GOLD-SNT-001 synthetic corpus", () => {
 	it("the evaluator fails the gates when a critical case is wrong or output is invalid", () => {
 		const critical = GOLDEN_CASES.find((c) => c.critical);
 		if (!critical) throw new Error("corpus has no critical case");
-		const flipped = validateSentimentResult(critical.reference, args(critical)).map((e) => ({
+		const flipped = validateSentimentResult(goldenReference(critical), args(critical)).map((e) => ({
 			...e,
 			category: e.category === "positive" ? ("negative" as const) : ("positive" as const),
 			score: e.category === "positive" ? 30 : 70,
