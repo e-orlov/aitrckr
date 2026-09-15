@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`CT-SNT-008 provider-facing prompt and schema snapshots > binds the request schema to this answer's anchor ids 1`] = `
+exports[`CT-SNT-008 provider-facing prompt and schema snapshots > binds the request schema to this answer's anchor ids and this request's entity keys 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
@@ -131,7 +131,11 @@ exports[`CT-SNT-008 provider-facing prompt and schema snapshots > binds the requ
             "type": "array",
           },
           "key": {
-            "minLength": 1,
+            "enum": [
+              "brand",
+              "c-huk",
+              "c-wgv",
+            ],
             "type": "string",
           },
           "score": {
@@ -166,6 +170,8 @@ exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the pr
 
 You will receive the ANSWER (a stored response, split into numbered segments) and a list of ENTITIES with fixed keys. Return one item per entity key — every listed key exactly once, no other keys. Your judgement must be based ONLY on the text of the ANSWER. You may use web search solely to recognise which company a name, abbreviation or domain refers to; never to look up reputation, reviews or facts and never to change a sentiment the ANSWER does not express itself.
 
+Entity keys are opaque identifiers. Return each "key" exactly as listed in ENTITIES, character for character — never the entity's name, alias, domain or a variation of the key. The output schema only accepts the listed keys.
+
 Score each entity on 0..100 for how the ANSWER portrays it:
 - 0 = maximally negative, 25 = clearly negative, 50 = neutral or balanced, 75 = clearly positive, 100 = unequivocal endorsement.
 Category must match the score exactly:
@@ -189,7 +195,7 @@ Aspects: additionally rate the entity on each aspect the ANSWER actually evaluat
 - "service" (Service): Customer support, claims handling, responsiveness, helpdesk, digital tools, advice quality. Synonyms: support, customer service, claims, helpdesk, hotline, beratung, kundenservice, schadenabwicklung, erreichbarkeit.
 - "other" (Other): Any other evaluated aspect (reputation, trust, ratings, financial strength, market position).
 
-Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]. For every entity and aspect item, list at most 3 evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity. Never invent ids, never quote or rewrite text. A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative (the same segment may carry both only when it states both sides).
+Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]; links, URLs and source lists have been removed from it, so every segment is natural language and a source reference is never evidence. For every entity and aspect item, list at most 3 evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity in words. Never invent ids, never quote or rewrite text. Within one evidence list, cite each segment id at most once, with the one polarity that segment carries for that item; the same segment may carry a different polarity in another item (for example positive for "price" and negative for "coverage"). A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative — the only case in which one segment may appear twice in one list, and only when it states both sides.
 
 ENTITIES:
 - key "brand": ARAG — the brand being tracked
@@ -204,4 +210,4 @@ ANSWER (segments; cite by id):
 """"
 `;
 
-exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"5cd194838f49b26ceed4287fd15450172b600adbf17dcbe5d4c59e1c430eeb25"`;
+exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"cea55575ed5157f40b7e3fbcba28f38c1d66fd0eccd1e32be63c58e56e4dc85c"`;

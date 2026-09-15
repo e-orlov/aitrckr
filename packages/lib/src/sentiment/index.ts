@@ -65,6 +65,7 @@ export {
 	type DetectedMention,
 	detectEntityMentions,
 	entityTerms,
+	mentionTerms,
 	normalizeDomainTerm,
 } from "./detector";
 export {
@@ -116,9 +117,27 @@ export {
 	splitExtremes,
 	viewVisibility,
 } from "./metrics";
-export { buildSentimentPrompt, renderAnchoredAnswer, SENTIMENT_EVIDENCE_RULES, SENTIMENT_SCORE_RULES } from "./prompt";
+export {
+	buildSentimentPrompt,
+	renderAnchoredAnswer,
+	SENTIMENT_EVIDENCE_RULES,
+	SENTIMENT_KEY_RULES,
+	SENTIMENT_SCORE_RULES,
+} from "./prompt";
 export { resolveSentimentProvider, SentimentProviderError } from "./provider";
 export { ensureSentimentQueue, SENTIMENT_QUEUE_OPTIONS, type SentimentQueueAdmin } from "./queue-setup";
+export {
+	type AnalyzableText,
+	analyzableText,
+	analyzeAnswerRanges,
+	type ExcludedRange,
+	type ExcludedRangeKind,
+	hasNaturalContent,
+	isExcludedOffset,
+	naturalSlices,
+	naturalTextOf,
+	type TextRange,
+} from "./ranges";
 export {
 	type AnalysisClaim,
 	type ClaimOptions,

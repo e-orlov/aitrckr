@@ -29,12 +29,18 @@ describe("CT-SNT-008 provider-facing prompt and schema snapshots", () => {
 		expect(prompt).toContain("[s0001] ARAG ist nicht teuer und bietet einen sehr guten Service.");
 	});
 
-	it("binds the request schema to this answer's anchor ids", () => {
+	it("binds the request schema to this answer's anchor ids and this request's entity keys", () => {
 		const ids = segmentAnswer(answer).map((anchor) => anchor.id);
-		const jsonSchema = z.toJSONSchema(sentimentClassificationResultSchemaFor(ids));
+		const jsonSchema = z.toJSONSchema(
+			sentimentClassificationResultSchemaFor(
+				ids,
+				candidates.map((c) => c.key),
+			),
+		);
 		expect(jsonSchema).toMatchSnapshot();
 		const serialized = JSON.stringify(jsonSchema);
 		expect(serialized).toContain('"enum":["s0001","s0002","s0003"]');
+		expect(serialized).toContain('"enum":["brand","c-huk","c-wgv"]');
 		expect(serialized).not.toContain('"quote"');
 	});
 });

@@ -49,7 +49,14 @@ const usage = {
 	webSearchRequests: 1,
 	webSearchRequestsConflict: false,
 };
-const request = { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 };
+const request = {
+	model: "openai/gpt-5-mini",
+	webSearch: true,
+	maxToolCalls: 1,
+	maxOutputTokens: 8000,
+	strictJsonSchema: true,
+	requireParameters: true,
+};
 
 /**
  * An answer in the pre-corrective shape whose brand excerpt is paraphrased —

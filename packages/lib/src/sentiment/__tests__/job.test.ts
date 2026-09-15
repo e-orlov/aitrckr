@@ -156,7 +156,14 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 					webSearchRequests: 1,
 					webSearchRequestsConflict: false,
 				},
-				request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+				request: {
+					model: "openai/gpt-5-mini",
+					webSearch: true,
+					maxToolCalls: 1,
+					maxOutputTokens: 8000,
+					strictJsonSchema: true,
+					requireParameters: true,
+				},
 			})),
 		});
 		const outcome = await runSentimentJob(payload, withUsage.d);
@@ -165,7 +172,14 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
 			usage: { costUsd: 0.0312, webSearchRequests: 1 },
-			request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+			request: {
+				model: "openai/gpt-5-mini",
+				webSearch: true,
+				maxToolCalls: 1,
+				maxOutputTokens: 8000,
+				strictJsonSchema: true,
+				requireParameters: true,
+			},
 		});
 		expect(withUsage.usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0312 })]);
 
@@ -472,7 +486,14 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 
 		const envelope = {
 			generationId: "gen-abc123",
-			request: { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+			request: {
+				model: SENTIMENT_MODEL,
+				webSearch: true,
+				maxToolCalls: 1,
+				maxOutputTokens: 8000,
+				strictJsonSchema: true,
+				requireParameters: true,
+			},
 			usage: {
 				inputTokens: 6410,
 				outputTokens: 812,

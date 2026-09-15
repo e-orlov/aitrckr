@@ -1030,6 +1030,8 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		webSearch: true,
 		maxToolCalls: 1,
 		maxOutputTokens: 8000,
+		strictJsonSchema: true,
+		requireParameters: true,
 	};
 	const usageOf = (over: Partial<StructuredResearchUsage>): StructuredResearchUsage => ({
 		inputTokens: 7000,
@@ -1380,7 +1382,14 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		webSearchRequests: 1,
 		webSearchRequestsConflict: false,
 	};
-	const request = { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 };
+	const request = {
+		model: SENTIMENT_MODEL,
+		webSearch: true,
+		maxToolCalls: 1,
+		maxOutputTokens: 8000,
+		strictJsonSchema: true,
+		requireParameters: true,
+	};
 
 	/** Answers every candidate; the Alpha entity cites one anchor twice with the same polarity, which the classifier refuses. */
 	function rejectingProvider(calls: { n: number }): Provider {
@@ -1401,7 +1410,7 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 								key === ALPHA
 									? [
 											{ anchorId: "s0001", polarity: "neutral" },
-											{ anchorId: "s0001", polarity: "neutral" },
+											{ anchorId: "s0001", polarity: "positive" },
 										]
 									: [{ anchorId: key === NEWCO ? "s0002" : "s0003", polarity: "neutral" }],
 							aspects: [],
@@ -1448,12 +1457,12 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		expect(calls.n).toBe(1);
 		expect(outcome).toMatchObject({
 			status: "terminal-validation-failure",
-			code: "evidence-duplicate",
+			code: "evidence-anchor-polarity-conflict",
 			requestSent: true,
 			envelope: { generationId: "gen-terminal-01", usage: { costUsd: 0.020047 }, request },
 			diagnostic: {
 				stage: "evidence",
-				reason: "evidence-duplicate",
+				reason: "evidence-anchor-polarity-conflict",
 				entityKey: ALPHA,
 				evidenceIndex: 1,
 				anchorId: "s0001",
@@ -1468,17 +1477,19 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		expect(failed).toMatchObject({
 			status: "failed",
 			input_hash: expectedHash,
-			error_code: "evidence-duplicate",
+			error_code: "evidence-anchor-polarity-conflict",
 			attempts: 1,
 		});
 		const message = failed.error_message ?? "";
 		const diagnosticJson = message.slice(message.indexOf(" diagnostic=") + " diagnostic=".length);
 		expect(
-			message.startsWith(`validation evidence-duplicate (SentimentValidationError) via openrouter/${SENTIMENT_MODEL}`),
+			message.startsWith(
+				`validation evidence-anchor-polarity-conflict (SentimentValidationError) via openrouter/${SENTIMENT_MODEL}`,
+			),
 		).toBe(true);
 		expect(JSON.parse(diagnosticJson)).toMatchObject({
 			stage: "evidence",
-			reason: "evidence-duplicate",
+			reason: "evidence-anchor-polarity-conflict",
 			entityKey: ALPHA,
 			generationId: "gen-terminal-01",
 		});
@@ -1498,7 +1509,7 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		const before = await row();
 		expect(await runSentimentJob(terminalPayload, { resolveProvider: () => rejectingProvider(calls) })).toMatchObject({
 			status: "skipped",
-			reason: expect.stringContaining("terminal validation failure evidence-duplicate"),
+			reason: expect.stringContaining("terminal validation failure evidence-anchor-polarity-conflict"),
 		});
 		expect(calls.n).toBe(0);
 		expect(await row()).toEqual(before);

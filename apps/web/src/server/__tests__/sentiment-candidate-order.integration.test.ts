@@ -11,12 +11,15 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SENTIMENT_DETECTOR_VERSION } from "@workspace/lib/sentiment";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const DATABASE_URL = process.env.DATABASE_URL;
+/** The seeded mention rows must be current for the detector under test, whatever its version. */
+const detectorVersionLiteral = `'${SENTIMENT_DETECTOR_VERSION}'`;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test stack");
 
 const here = fileURLToPath(new URL(".", import.meta.url));
@@ -99,7 +102,7 @@ async function seedLogicalData(client: pg.Client) {
 async function seedMentions(client: pg.Client, ids: { brand: string; alpha: string; beta: string }) {
 	await client.query(
 		`INSERT INTO sentiment_detections (prompt_run_id, brand_id, detector_version, status, mention_count, detected_at)
-		 VALUES ($1, $2, 'sent-detector-v1', 'mentions', 3, $3)`,
+		 VALUES ($1, $2, ${detectorVersionLiteral}, 'mentions', 3, $3)`,
 		[RUN, BRAND, DETECTED_AT],
 	);
 	const rows: [string, string, string, string | null, string][] = [
@@ -110,7 +113,7 @@ async function seedMentions(client: pg.Client, ids: { brand: string; alpha: stri
 	for (const [id, type, key, competitorId, name] of rows) {
 		await client.query(
 			`INSERT INTO prompt_run_entity_mentions (id, prompt_run_id, brand_id, entity_type, competitor_id, entity_key, entity_name, detector_version, matched_terms, detected_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent-detector-v1', '{}', $8)`,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, ${detectorVersionLiteral}, '{}', $8)`,
 			[id, RUN, BRAND, type, competitorId, key, name, DETECTED_AT],
 		);
 	}

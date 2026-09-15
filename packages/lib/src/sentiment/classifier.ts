@@ -7,6 +7,7 @@ import { type DiagnosticReason, type DiagnosticStage, diagnostic, safeGeneration
 import { type PaidResponseEnvelope, SentimentValidationError } from "./errors-validation";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
+import { type AnalyzableText, analyzableText, analyzeAnswerRanges } from "./ranges";
 import { normalizeText } from "./text";
 import {
 	type EvidencePolarity,
@@ -68,15 +69,21 @@ export interface SentimentClassification {
 export const SENTIMENT_MAX_OUTPUT_TOKENS = API_PROVIDER_MAX_OUTPUT_TOKENS.openrouter;
 
 /**
- * The exact classifier input in canonical form: the normalized answer body
- * and every candidate's identity (key, type, name, aliases) in a stable
- * order. A stored analysis is current only while this hash still matches,
- * so a roster, name or alias change makes the run eligible again instead of
- * being hidden behind an older completed analysis.
+ * The exact classifier input in canonical form: the normalized
+ * natural-language text of the answer (citation ranges elided, so a changed
+ * link destination is not a changed input) and every candidate's identity
+ * (key, type, name, aliases) in a stable order. A stored analysis is current
+ * only while this hash still matches, so a roster, name or alias change makes
+ * the run eligible again instead of being hidden behind an older completed
+ * analysis.
  */
-export function sentimentInputHash(answerBody: string, candidates: SentimentCandidate[]): string {
+export function sentimentInputHash(
+	answerBody: string,
+	candidates: SentimentCandidate[],
+	analysis: AnalyzableText = analyzeAnswerRanges(answerBody),
+): string {
 	const canonical = {
-		body: normalizeText(answerBody),
+		body: normalizeText(analyzableText(analysis)),
 		candidates: [...candidates]
 			.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 			.map((c) => ({
@@ -114,16 +121,31 @@ function fail(
 	);
 }
 
-/** One citation: known anchor, unique `(anchorId, polarity)`, two polarities on one anchor only for Mixed. */
+/**
+ * One evidence claim is identified by its entity, its target (the entity
+ * overall or one aspect), its anchor and its polarity. Identity decides
+ * de-duplication and conflicts; nothing about a claim is ever rewritten.
+ */
+function claimIdentity(where: EvidenceWhere, ref: SentimentEvidenceRef): string {
+	return `${where.entityKey}|${where.aspectKey ?? "overall"}|${ref.anchorId}|${ref.polarity}`;
+}
+
+/**
+ * One citation of one target: the anchor must belong to the answer; an
+ * identical claim (same target, anchor and polarity) is de-duplicated
+ * deterministically (the first occurrence stands); two different polarities on
+ * one anchor within one target are admissible only as the positive/negative
+ * pair of a Mixed target — any other differing pair is a contradiction.
+ */
 function resolveOneRef(
 	anchors: Map<string, EvidenceAnchor>,
 	ref: SentimentEvidenceRef,
 	index: number,
 	where: EvidenceWhere,
 	category: SentimentCategory,
-	seenPairs: Set<string>,
+	seenClaims: Set<string>,
 	polaritiesByAnchor: Map<string, Set<EvidencePolarity>>,
-): SentimentEvidence {
+): SentimentEvidence | null {
 	const anchor = anchors.get(ref.anchorId);
 	if (!anchor) {
 		fail("evidence-unknown-anchor", `${where.label}: anchor "${ref.anchorId}" is not part of the answer`, where, {
@@ -131,21 +153,17 @@ function resolveOneRef(
 			anchorId: /^s\d{4}$/.test(ref.anchorId) ? ref.anchorId : undefined,
 		});
 	}
-	const pair = `${ref.anchorId}:${ref.polarity}`;
-	if (seenPairs.has(pair)) {
-		fail("evidence-duplicate", `${where.label}: anchor "${ref.anchorId}" cited twice with the same polarity`, where, {
-			evidenceIndex: index,
-			anchorId: ref.anchorId,
-		});
-	}
-	seenPairs.add(pair);
+	const identity = claimIdentity(where, ref);
+	if (seenClaims.has(identity)) return null;
+	seenClaims.add(identity);
 	const polarities = polaritiesByAnchor.get(ref.anchorId) ?? new Set<EvidencePolarity>();
 	polarities.add(ref.polarity);
 	polaritiesByAnchor.set(ref.anchorId, polarities);
-	if (polarities.size > 1 && category !== "mixed") {
+	const mixedPair = polarities.size === 2 && polarities.has("positive") && polarities.has("negative");
+	if (polarities.size > 1 && !(category === "mixed" && mixedPair)) {
 		fail(
 			"evidence-anchor-polarity-conflict",
-			`${where.label}: anchor "${ref.anchorId}" cited with two polarities outside a mixed verdict`,
+			`${where.label}: anchor "${ref.anchorId}" cited with two polarities for one target outside a mixed verdict`,
 			where,
 			{ evidenceIndex: index, anchorId: ref.anchorId },
 		);
@@ -154,10 +172,11 @@ function resolveOneRef(
 }
 
 /**
- * Resolve cited anchors into stored evidence: every id must belong to this
- * answer, `(anchorId, polarity)` pairs are unique, one anchor may carry two
- * polarities only for a Mixed verdict, and Mixed needs a positive and a
- * negative citation. The stored form is the exact raw slice of the anchor.
+ * Resolve cited anchors into stored evidence for one target: every id must
+ * belong to this answer, identical claims collapse to one, one anchor may
+ * carry positive and negative only for a Mixed target, and Mixed needs a
+ * positive and a negative citation. The stored form is the exact raw slice of
+ * the anchor.
  */
 function resolveEvidence(
 	anchors: Map<string, EvidenceAnchor>,
@@ -166,10 +185,11 @@ function resolveEvidence(
 	category: SentimentCategory,
 ): SentimentEvidence[] {
 	const resolved: SentimentEvidence[] = [];
-	const seenPairs = new Set<string>();
+	const seenClaims = new Set<string>();
 	const polaritiesByAnchor = new Map<string, Set<EvidencePolarity>>();
 	refs.forEach((ref, index) => {
-		resolved.push(resolveOneRef(anchors, ref, index, where, category, seenPairs, polaritiesByAnchor));
+		const evidence = resolveOneRef(anchors, ref, index, where, category, seenClaims, polaritiesByAnchor);
+		if (evidence) resolved.push(evidence);
 	});
 	if (category === "mixed") {
 		const polarities = new Set(resolved.map((e) => e.polarity));
@@ -226,9 +246,16 @@ function validateAspects(
  */
 export function validateSentimentResult(
 	raw: unknown,
-	args: { answerBody: string; candidates: SentimentCandidate[]; anchors?: readonly EvidenceAnchor[] },
+	args: {
+		answerBody: string;
+		candidates: SentimentCandidate[];
+		anchors?: readonly EvidenceAnchor[];
+		analysis?: AnalyzableText;
+	},
 ): ValidatedEntitySentiment[] {
-	const anchors = anchorMap([...(args.anchors ?? segmentAnswer(args.answerBody))]);
+	const anchors = anchorMap([
+		...(args.anchors ?? segmentAnswer(args.answerBody, args.analysis ?? analyzeAnswerRanges(args.answerBody))),
+	]);
 	const parsed = sentimentClassificationResultSchema.safeParse(raw);
 	if (!parsed.success) {
 		fail("schema", parsed.error.issues[0]?.message ?? "invalid classifier output", { stage: "provider-schema" });
@@ -279,10 +306,10 @@ export interface SentimentClassifierDeps {
 }
 
 /** Anchors of the answer, computed before any request; an answer that cannot be represented is refused without spending. */
-function anchorsBeforeRequest(answerBody: string): EvidenceAnchor[] {
+function anchorsBeforeRequest(answerBody: string, analysis: AnalyzableText): EvidenceAnchor[] {
 	let anchors: EvidenceAnchor[];
 	try {
-		anchors = segmentAnswer(answerBody);
+		anchors = segmentAnswer(answerBody, analysis);
 	} catch (error) {
 		if (error instanceof SentimentValidationError) throw error.beforeRequest();
 		throw error;
@@ -297,6 +324,16 @@ function anchorsBeforeRequest(answerBody: string): EvidenceAnchor[] {
 	return anchors;
 }
 
+/** The citation/natural range analysis, computed before any request; a body the analysis cannot represent is refused without spending. */
+function rangesBeforeRequest(answerBody: string): AnalyzableText {
+	try {
+		return analyzeAnswerRanges(answerBody);
+	} catch (error) {
+		if (error instanceof SentimentValidationError) throw error.beforeRequest();
+		throw error;
+	}
+}
+
 type ResearchResult = Awaited<ReturnType<NonNullable<Provider["runStructuredResearch"]>>>;
 
 /**
@@ -308,6 +345,7 @@ async function requestClassification(
 	provider: Provider,
 	prompt: string,
 	anchorIds: string[],
+	entityKeys: string[],
 	signal: AbortSignal | undefined,
 ): Promise<ResearchResult> {
 	if (!provider.runStructuredResearch) {
@@ -316,7 +354,7 @@ async function requestClassification(
 	try {
 		return await provider.runStructuredResearch({
 			prompt,
-			schema: sentimentClassificationResultSchemaFor(anchorIds),
+			schema: sentimentClassificationResultSchemaFor(anchorIds, entityKeys),
 			webSearch: true,
 			signal,
 			maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,
@@ -355,12 +393,14 @@ export async function classifySentiment(
 			diagnostic("entity", "no-candidates"),
 		).beforeRequest();
 	}
-	const anchors = anchorsBeforeRequest(args.answerBody);
+	const analysis = rangesBeforeRequest(args.answerBody);
+	const anchors = anchorsBeforeRequest(args.answerBody, analysis);
 	const provider = deps.resolveProvider ? deps.resolveProvider() : resolveSentimentProvider();
 	const result = await requestClassification(
 		provider,
 		buildSentimentPrompt({ ...args, anchors }),
 		anchors.map((anchor) => anchor.id),
+		args.candidates.map((candidate) => candidate.key),
 		signal,
 	);
 	// From here on the provider has answered and charged: every rejection
@@ -380,13 +420,13 @@ export async function classifySentiment(
 			);
 		}
 		return {
-			entities: validateSentimentResult(result.object, { ...args, anchors }),
+			entities: validateSentimentResult(result.object, { ...args, anchors, analysis }),
 			provider: provider.id,
 			model: result.modelVersion ?? null,
 			webSearch: true,
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
-			inputHash: sentimentInputHash(args.answerBody, args.candidates),
+			inputHash: sentimentInputHash(args.answerBody, args.candidates, analysis),
 			usage: result.usage,
 			request: result.request,
 			generationId: envelope.generationId,

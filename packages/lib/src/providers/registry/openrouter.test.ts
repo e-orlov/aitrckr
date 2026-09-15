@@ -255,7 +255,14 @@ describe("openrouter runStructuredResearch", () => {
 			modelVersion: "openai/gpt-5-mini",
 			generationId: null,
 			usage: undefined,
-			request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: null },
+			request: {
+				model: "openai/gpt-5-mini",
+				webSearch: true,
+				maxToolCalls: 1,
+				maxOutputTokens: null,
+				strictJsonSchema: true,
+				requireParameters: true,
+			},
 		});
 	});
 
@@ -283,6 +290,8 @@ describe("openrouter runStructuredResearch", () => {
 			webSearch: true,
 			maxToolCalls: 1,
 			maxOutputTokens: 8000,
+			strictJsonSchema: true,
+			requireParameters: true,
 		});
 
 		const plain = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
@@ -293,6 +302,8 @@ describe("openrouter runStructuredResearch", () => {
 			webSearch: false,
 			maxToolCalls: null,
 			maxOutputTokens: null,
+			strictJsonSchema: true,
+			requireParameters: true,
 		});
 	});
 
@@ -400,7 +411,14 @@ describe("openrouter runStructuredResearch", () => {
 					provider: "openrouter",
 					model: "openai/gpt-5-mini",
 					generationId: "gen-schema",
-					request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: null },
+					request: {
+						model: "openai/gpt-5-mini",
+						webSearch: true,
+						maxToolCalls: 1,
+						maxOutputTokens: null,
+						strictJsonSchema: true,
+						requireParameters: true,
+					},
 					usage: {
 						inputTokens: 6410,
 						outputTokens: 812,

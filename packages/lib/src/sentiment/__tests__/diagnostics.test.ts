@@ -32,6 +32,7 @@ import {
 	EVIDENCE_MAX_ITEMS,
 	SENTIMENT_ASPECT_KEYS,
 	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 } from "../types";
@@ -95,7 +96,14 @@ describe("UT-SNT-DIAG bounded diagnostic", () => {
 			diagnostic("evidence", "evidence-unknown-anchor", { entityKey: "brand", evidenceIndex: 0, anchorId: "s0007" }),
 		).withEnvelope({
 			generationId: "gen-1",
-			request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+			request: {
+				model: "openai/gpt-5-mini",
+				webSearch: true,
+				maxToolCalls: 1,
+				maxOutputTokens: 8000,
+				strictJsonSchema: true,
+				requireParameters: true,
+			},
 			usage: {
 				inputTokens: 10,
 				outputTokens: 5,
@@ -176,7 +184,7 @@ function leakyProvider(): Provider & { logs: string[] } {
 										confidence: 0.9,
 										evidence: [
 											{ anchorId: "s0001", polarity: "positive" },
-											{ anchorId: "s0001", polarity: "positive" },
+											{ anchorId: "s0001", polarity: "neutral" },
 										],
 									},
 								],
@@ -201,7 +209,14 @@ function leakyProvider(): Provider & { logs: string[] } {
 						webSearchRequests: 1,
 						webSearchRequestsConflict: false,
 					},
-					request: { model: "openai/gpt-5-mini", webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+					request: {
+						model: "openai/gpt-5-mini",
+						webSearch: true,
+						maxToolCalls: 1,
+						maxOutputTokens: 8000,
+						strictJsonSchema: true,
+						requireParameters: true,
+					},
 				};
 			},
 		),
@@ -286,12 +301,12 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 
 		expect(outcome).toMatchObject({
 			status: "terminal-validation-failure",
-			code: "evidence-duplicate",
+			code: "evidence-anchor-polarity-conflict",
 			requestSent: true,
 			envelope: { generationId: "gen-opaque-7", usage: { costUsd: 0.02 } },
 			diagnostic: {
 				stage: "evidence",
-				reason: "evidence-duplicate",
+				reason: "evidence-anchor-polarity-conflict",
 				entityKey: "brand",
 				aspectKey: "price",
 				evidenceIndex: 1,
@@ -301,7 +316,7 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 		expect(deps.persist).not.toHaveBeenCalled();
 		expect(usage).toEqual([expect.objectContaining({ succeeded: false, actualCostUsd: 0.02 })]);
 		const row = marks[0] as { errorMessage: string; errorCode: string };
-		expect(row.errorCode).toBe("evidence-duplicate");
+		expect(row.errorCode).toBe("evidence-anchor-polarity-conflict");
 		const diagnosticJson = row.errorMessage.slice(row.errorMessage.indexOf("diagnostic=") + "diagnostic=".length);
 		expect(Buffer.byteLength(diagnosticJson, "utf8")).toBeLessThanOrEqual(DIAGNOSTIC_MAX_BYTES);
 		expect(sentimentDiagnosticSchema.safeParse(JSON.parse(diagnosticJson)).success).toBe(true);
@@ -327,13 +342,14 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 			evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+			detectorVersion: SENTIMENT_DETECTOR_VERSION,
 			provider: "openrouter",
 			model: "openai/gpt-5-mini",
 		};
 		const report = await runSentimentCanary({ contract, deps, deadlineMs: 1000, watchdogMs: 2000 });
 		expect(report.verdict).toEqual({
 			status: "reject",
-			reasons: [{ code: "validation", detail: "evidence-duplicate" }],
+			reasons: [{ code: "validation", detail: "evidence-anchor-polarity-conflict" }],
 		});
 		expect(report.outcome).toMatchObject({
 			status: "terminal-validation-failure",

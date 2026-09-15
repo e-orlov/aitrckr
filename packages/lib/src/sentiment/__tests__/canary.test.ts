@@ -6,7 +6,12 @@
  * runs against fakes — no network.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../../providers/types";
+import {
+	type Provider,
+	type StructuredResearchRequestSummary,
+	StructuredResearchResponseError,
+	type StructuredResearchUsage,
+} from "../../providers/types";
 import { SENTIMENT_EVIDENCE_VERSION } from "../anchors";
 import {
 	acceptCanaryRunId,
@@ -26,7 +31,7 @@ import {
 import type { DetectableEntity } from "../detector";
 import type { SentimentJobDeps } from "../job";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
-import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION } from "../types";
+import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_DETECTOR_VERSION, SENTIMENT_TAXONOMY_VERSION } from "../types";
 
 const FROZEN = "bf1347c3-7161-457c-91d6-0173d601659e";
 const PROMPT = "e32b0973-3b13-46c2-84dc-f29a6e5c41a2";
@@ -67,6 +72,7 @@ const contract: SentimentCanaryContract = {
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+	detectorVersion: SENTIMENT_DETECTOR_VERSION,
 	provider: "openrouter",
 	model: "openai/gpt-5-mini",
 };
@@ -111,6 +117,8 @@ const goodRequest: StructuredResearchRequestSummary = {
 	webSearch: true,
 	maxToolCalls: 1,
 	maxOutputTokens: 8000,
+	strictJsonSchema: true,
+	requireParameters: true,
 };
 
 /** Real job core over fakes: only the provider is swapped. */
@@ -162,13 +170,27 @@ function goodProvider(
 ): Provider {
 	return {
 		id: "openrouter",
-		runStructuredResearch: vi.fn(async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
-			object: schema.parse(answer),
-			modelVersion: "openai/gpt-5-mini",
-			generationId: "gen-good-001",
-			...("usage" in meta ? { usage: meta.usage } : {}),
-			...("request" in meta ? { request: meta.request } : {}),
-		})),
+		runStructuredResearch: vi.fn(
+			async ({ schema }: { schema: { safeParse: (v: unknown) => { success: boolean; data?: unknown } } }) => {
+				const parsed = schema.safeParse(answer);
+				if (!parsed.success) {
+					throw new StructuredResearchResponseError("schema", {
+						provider: "openrouter",
+						model: "openai/gpt-5-mini",
+						generationId: "gen-good-001",
+						request: ("request" in meta ? meta.request : undefined) as StructuredResearchRequestSummary,
+						usage: "usage" in meta ? meta.usage : undefined,
+					});
+				}
+				return {
+					object: parsed.data,
+					modelVersion: "openai/gpt-5-mini",
+					generationId: "gen-good-001",
+					...("usage" in meta ? { usage: meta.usage } : {}),
+					...("request" in meta ? { request: meta.request } : {}),
+				};
+			},
+		),
 	} as unknown as Provider;
 }
 
@@ -276,6 +298,7 @@ describe("canary contract", () => {
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 			evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+			detectorVersion: SENTIMENT_DETECTOR_VERSION,
 			provider: "openrouter",
 			model: "openai/gpt-5-mini",
 		});
@@ -385,6 +408,7 @@ describe("canary preflight refuses before any request", () => {
 					classifierVersion: "sent-classifier-v0",
 					taxonomyVersion: "sent-aspects-v0",
 					evidenceVersion: "sent-evidence-v0",
+					detectorVersion: "sent-detector-v1",
 					provider: "openai-api",
 					model: "openai/gpt-5.6-luna",
 				},
@@ -393,9 +417,15 @@ describe("canary preflight refuses before any request", () => {
 			"contract-classifier-version",
 			"contract-taxonomy-version",
 			"contract-evidence-version",
+			"contract-detector-version",
 			"contract-provider",
 			"contract-model",
 		]);
+	});
+
+	it("a contract authored before the detector version existed is refused at parse time, before any store or provider dependency", () => {
+		const { detectorVersion: _omitted, ...legacy } = contract;
+		expect(() => parseSentimentCanaryContract(legacy)).toThrow(expect.objectContaining({ code: "invalid-contract" }));
 	});
 
 	it("input hash or prompt hash frozen against another candidate set or prompt template", async () => {
@@ -548,11 +578,18 @@ describe("canary verdict after the one call", () => {
 				usage: goodUsage,
 				request: { model: "openai/gpt-5.6-luna", webSearch: false, maxToolCalls: null, maxOutputTokens: 4000 },
 			}),
-			["request-model", "request-web-search", "request-max-tool-calls", "request-max-tokens"],
+			[
+				"request-model",
+				"request-web-search",
+				"request-max-tool-calls",
+				"request-max-tokens",
+				"request-structured-output",
+				"request-require-parameters",
+			],
 		);
 	});
 
-	it("rejects an unexpected entity in the answer: the classifier refuses it, nothing is written, the attempt is one paid failure", async () => {
+	it("rejects an unexpected entity in the answer at the request schema itself: nothing is written, the attempt is one paid failure", async () => {
 		const extra = {
 			entities: [
 				...goodAnswer.entities,
@@ -567,22 +604,22 @@ describe("canary verdict after the one call", () => {
 			],
 		};
 		const { report, marks, deps, usage } = await rejected(goodProvider(undefined, extra), ["validation"]);
-		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "validation", detail: "unknown-entity" }] });
+		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "validation", detail: "schema" }] });
 		expect(deps.persist).not.toHaveBeenCalled();
 		// The rejected answer is terminal for this input and the paid response is accounted for in the report.
 		expect(marks).toEqual([
 			expect.objectContaining({
 				status: "failed",
-				errorCode: "unknown-entity",
+				errorCode: "schema",
 				inputHash: frozenDigests.classifierInputHash,
 			}),
 		]);
 		expect(usage).toEqual([expect.objectContaining({ succeeded: false, actualCostUsd: goodUsage.costUsd })]);
 		expect(report.outcome).toEqual({
 			status: "terminal-validation-failure",
-			code: "unknown-entity",
+			code: "schema",
 			requestSent: true,
-			diagnostic: expect.objectContaining({ stage: "entity", reason: "unknown-entity", entityKey: "c-huk" }),
+			diagnostic: expect.objectContaining({ stage: "provider-schema", reason: "schema" }),
 			envelope: { generationId: "gen-good-001", request: goodRequest, usage: goodUsage },
 		});
 		expect(JSON.stringify(report)).not.toContain("Preis-Leistungs");
@@ -822,7 +859,14 @@ describe("E1: the post-call gate runs before persistence", () => {
 				usage: goodUsage,
 				request: { model: "openai/gpt-5.6-luna", webSearch: false, maxToolCalls: 2, maxOutputTokens: 4000 },
 			}),
-			["request-model", "request-web-search", "request-max-tool-calls", "request-max-tokens"],
+			[
+				"request-model",
+				"request-web-search",
+				"request-max-tool-calls",
+				"request-max-tokens",
+				"request-structured-output",
+				"request-require-parameters",
+			],
 		);
 	});
 

@@ -4,7 +4,7 @@ import { z } from "zod";
  * Bump to make every stored run eligible for one deterministic re-detection
  * (matching rules, normalization or boundary changes).
  */
-export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v1";
+export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v2";
 
 /**
  * Bump to invalidate every stored analysis and make every mentioned run
@@ -12,7 +12,7 @@ export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v1";
  * change). Rows with another version stay auditable and are ignored at read
  * time.
  */
-export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v2";
+export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v3";
 
 /**
  * Versioned separately from the classifier: a later taxonomy must never
@@ -166,9 +166,16 @@ function aspectResultSchemaFor(anchorIds?: readonly string[]) {
 	});
 }
 
-function entityResultSchemaFor(anchorIds?: readonly string[]) {
+/**
+ * The entity key is bound to the exact opaque candidate keys when they are
+ * known (the request schema), so a display name, alias or variation can never
+ * be a schema-valid answer; parsing a stored or replayed result binds by shape
+ * only and the local allowlist decides.
+ */
+function entityResultSchemaFor(anchorIds?: readonly string[], entityKeys?: readonly string[]) {
+	const key = entityKeys && entityKeys.length > 0 ? z.enum(entityKeys as [string, ...string[]]) : z.string().min(1);
 	return z.strictObject({
-		key: z.string().min(1),
+		key,
 		score: z.number().int().min(0).max(100),
 		category: z.enum(SENTIMENT_CATEGORIES),
 		confidence: z.number().min(0).max(1),
@@ -179,13 +186,14 @@ function entityResultSchemaFor(anchorIds?: readonly string[]) {
 
 /**
  * Strict contract for the classifier's structured answer, bound to one
- * answer's anchor ids: an id outside the answer fails the provider-side
- * schema before it can reach local validation. Unknown keys, categories or
- * aspects are validation errors and are never coerced into a stored Neutral
- * or `other`.
+ * answer's anchor ids and one request's candidate keys: an id outside the
+ * answer or a key outside the candidates fails the provider-side schema
+ * before it can reach local validation. Unknown keys, categories or aspects
+ * are validation errors and are never coerced into a stored Neutral or
+ * `other`.
  */
-export function sentimentClassificationResultSchemaFor(anchorIds: readonly string[]) {
-	return z.strictObject({ entities: z.array(entityResultSchemaFor(anchorIds)).min(1) });
+export function sentimentClassificationResultSchemaFor(anchorIds: readonly string[], entityKeys: readonly string[]) {
+	return z.strictObject({ entities: z.array(entityResultSchemaFor(anchorIds, entityKeys)).min(1) });
 }
 
 /** The same contract without the per-answer id binding (anchor ids by pattern only). */

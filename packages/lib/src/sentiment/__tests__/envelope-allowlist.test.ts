@@ -23,6 +23,7 @@ import { runSentimentJob, type SentimentJobDeps } from "../job";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
 import {
 	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_MODEL,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
@@ -88,7 +89,14 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			const error = new SentimentValidationError("schema", "rejected");
 			(error as { envelope: unknown }).envelope = {
 				generationId: "gen-1",
-				request: { model, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+				request: {
+					model,
+					webSearch: true,
+					maxToolCalls: 1,
+					maxOutputTokens: 8000,
+					strictJsonSchema: true,
+					requireParameters: true,
+				},
 				usage: null,
 			};
 			return sanitizeSentimentError(error).envelope?.request ?? null;
@@ -98,6 +106,8 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			webSearch: true,
 			maxToolCalls: 1,
 			maxOutputTokens: 8000,
+			strictJsonSchema: true,
+			requireParameters: true,
 		});
 		for (const model of [
 			SECRET,
@@ -118,7 +128,14 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			const error = new SentimentValidationError("schema", "rejected");
 			(error as { envelope: unknown }).envelope = {
 				generationId: "gen-1",
-				request: { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+				request: {
+					model: SENTIMENT_MODEL,
+					webSearch: true,
+					maxToolCalls: 1,
+					maxOutputTokens: 8000,
+					strictJsonSchema: true,
+					requireParameters: true,
+				},
 				usage,
 			};
 			return sanitizeSentimentError(error).envelope?.usage ?? null;
@@ -127,7 +144,15 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			const error = new SentimentValidationError("schema", "rejected");
 			(error as { envelope: unknown }).envelope = {
 				generationId: "gen-1",
-				request: { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000, ...fields },
+				request: {
+					model: SENTIMENT_MODEL,
+					webSearch: true,
+					maxToolCalls: 1,
+					maxOutputTokens: 8000,
+					strictJsonSchema: true,
+					requireParameters: true,
+					...fields,
+				},
 				usage: null,
 			};
 			return sanitizeSentimentError(error).envelope?.request ?? null;
@@ -178,7 +203,7 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			].sort(),
 		);
 		expect(Object.keys(requestOf({ headers: { Authorization: BEARER } }) ?? {}).sort()).toEqual(
-			["maxOutputTokens", "maxToolCalls", "model", "webSearch"].sort(),
+			["maxOutputTokens", "maxToolCalls", "model", "webSearch", "strictJsonSchema", "requireParameters"].sort(),
 		);
 	});
 });
@@ -319,6 +344,7 @@ describe("H2 no arbitrary string of a hostile envelope reaches any surface", () 
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 			evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+			detectorVersion: SENTIMENT_DETECTOR_VERSION,
 			provider: "openrouter",
 			model: SENTIMENT_MODEL,
 		};

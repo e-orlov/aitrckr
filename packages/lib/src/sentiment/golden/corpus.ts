@@ -81,6 +81,14 @@ export const GOLDEN_DUNHILL: SentimentCandidate = {
 	name: "Dunhill Schutz",
 	aliases: ["Dunhill"],
 };
+/** Beltra under a production-shaped opaque key: the reference must echo the key, never the name. */
+export const GOLDEN_BELTRA_UUID: SentimentCandidate = {
+	key: "6f0c3c0a-1a1b-4c2d-9e3f-000000000042",
+	entityType: "competitor",
+	competitorId: "6f0c3c0a-1a1b-4c2d-9e3f-000000000042",
+	name: "Beltra",
+	aliases: [],
+};
 
 /**
  * Excerpt polarity in the reference labels: a plain string takes the
@@ -873,12 +881,14 @@ export const GOLDEN_CASES: GoldenCase[] = [
 		},
 	},
 	{
-		id: "g35-de-domain-mention",
+		id: "g35-de-prose-mention-beside-domain",
 		lang: "de",
-		answer: "Details zu den Tarifen finden Sie auf arvo.example; dort ist auch der Tarifrechner verlinkt.",
+		answer: "Details zu den Tarifen von Arvo finden Sie auf arvo.example; dort ist auch der Tarifrechner verlinkt.",
 		candidates: [GOLDEN_BRAND],
 		expected: { brand: { category: "neutral", scoreRange: [50, 50] } },
-		reference: { entities: [e("brand", 50, "neutral", ["Details zu den Tarifen finden Sie auf arvo.example"])] },
+		reference: {
+			entities: [e("brand", 50, "neutral", ["Details zu den Tarifen von Arvo finden Sie auf arvo.example"])],
+		},
 	},
 	{
 		id: "g36-en-conditional-recommendation",
@@ -1001,6 +1011,188 @@ export const GOLDEN_CASES: GoldenCase[] = [
 		expected: { "c-corvex": { category: "neutral", scoreRange: [50, 50] } },
 		reference: {
 			entities: [e("c-corvex", 50, "neutral", ["the policies sold by Corvex covers lawyer and court fees"])],
+		},
+	},
+	// Round 7: citation ranges are not answer text. Entities that occur only as a
+	// URL, a link destination or a source-list entry are not candidates of these cases.
+	{
+		id: "g43-de-bare-urls-are-not-mentions",
+		lang: "de",
+		critical: true,
+		answer:
+			"Arvo antwortet auf Anfragen meist innerhalb eines Tages. Mehr Informationen unter arvo.example und https://beltra.example/tarife?utm_source=openai.",
+		candidates: [GOLDEN_BRAND],
+		expected: { brand: { category: "positive", scoreRange: [60, 90], aspects: { service: { category: "positive" } } } },
+		reference: {
+			entities: [
+				e(
+					"brand",
+					72,
+					"positive",
+					["Arvo antwortet auf Anfragen meist innerhalb eines Tages."],
+					[a("service", 75, "positive", ["Arvo antwortet auf Anfragen meist innerhalb eines Tages."])],
+				),
+			],
+		},
+	},
+	{
+		id: "g44-de-linked-names-inside-prose",
+		lang: "de",
+		answer:
+			"Der Tarif von [Arvo](https://arvo.example/tarif) ist günstig, aber [Corvex](https://corvex.example) bietet den größeren Leistungsumfang.",
+		candidates: [GOLDEN_BRAND, GOLDEN_CORVEX],
+		expected: {
+			brand: { category: "positive", scoreRange: [55, 80], aspects: { price: { category: "positive" } } },
+			"c-corvex": { category: "positive", scoreRange: [55, 85], aspects: { coverage: { category: "positive" } } },
+		},
+		reference: {
+			entities: [
+				e("brand", 65, "positive", ["ist günstig"], [a("price", 70, "positive", ["ist günstig"])]),
+				e(
+					"c-corvex",
+					70,
+					"positive",
+					["bietet den größeren Leistungsumfang"],
+					[a("coverage", 75, "positive", ["bietet den größeren Leistungsumfang"])],
+				),
+			],
+		},
+	},
+	{
+		id: "g45-en-source-list-is-not-a-mention",
+		lang: "en",
+		critical: true,
+		answer:
+			"Beltra is the cheapest option we found for tenants.\n\nSources:\n- [Arvo](https://arvo.example)\n- https://corvex.example/pricing\n[1]: https://dunhill.example",
+		candidates: [GOLDEN_BELTRA],
+		expected: {
+			"c-beltra": { category: "positive", scoreRange: [60, 90], aspects: { price: { category: "positive" } } },
+		},
+		reference: {
+			entities: [
+				e(
+					"c-beltra",
+					75,
+					"positive",
+					["Beltra is the cheapest option we found for tenants."],
+					[a("price", 80, "positive", ["Beltra is the cheapest option we found for tenants."])],
+				),
+			],
+		},
+	},
+	{
+		id: "g46-en-inline-citations-after-sentences",
+		lang: "en",
+		answer:
+			"Dunhill Schutz applies a three-month waiting period to every new policy. ([dunhill.example](https://dunhill.example/faq?utm_source=openai))\nArvo waives the waiting period for customers switching from another insurer. ([arvo.example](https://arvo.example/switch?utm_source=openai))",
+		candidates: [GOLDEN_BRAND, GOLDEN_DUNHILL],
+		expected: {
+			brand: { category: "positive", scoreRange: [55, 85], aspects: { coverage: { category: "positive" } } },
+			"c-dunhill": { category: "negative", scoreRange: [20, 49], aspects: { coverage: { category: "negative" } } },
+		},
+		reference: {
+			entities: [
+				e(
+					"brand",
+					70,
+					"positive",
+					["Arvo waives the waiting period for customers switching from another insurer."],
+					[
+						a("coverage", 72, "positive", [
+							"Arvo waives the waiting period for customers switching from another insurer.",
+						]),
+					],
+				),
+				e(
+					"c-dunhill",
+					35,
+					"negative",
+					["Dunhill Schutz applies a three-month waiting period to every new policy."],
+					[a("coverage", 35, "negative", ["Dunhill Schutz applies a three-month waiting period to every new policy."])],
+				),
+			],
+		},
+	},
+	{
+		id: "g47-en-one-sentence-two-aspects-opposite-polarity",
+		lang: "en",
+		critical: true,
+		answer: "Corvex is cheap but its coverage is riddled with exclusions.",
+		candidates: [GOLDEN_CORVEX],
+		expected: {
+			"c-corvex": {
+				category: "mixed",
+				scoreRange: [50, 50],
+				aspects: { price: { category: "positive" }, coverage: { category: "negative" } },
+			},
+		},
+		reference: {
+			entities: [
+				e(
+					"c-corvex",
+					50,
+					"mixed",
+					[
+						"Corvex is cheap but its coverage is riddled with exclusions.",
+						"Corvex is cheap but its coverage is riddled with exclusions.",
+					],
+					[
+						a("price", 75, "positive", ["Corvex is cheap but its coverage is riddled with exclusions."]),
+						a("coverage", 25, "negative", ["Corvex is cheap but its coverage is riddled with exclusions."]),
+					],
+				),
+			],
+		},
+	},
+	{
+		id: "g48-de-mixed-aspect-on-one-anchor",
+		lang: "de",
+		answer: "Der Kundenservice von Arvo ist freundlich, aber langsam.",
+		candidates: [GOLDEN_BRAND],
+		expected: { brand: { category: "mixed", scoreRange: [50, 50], aspects: { service: { category: "mixed" } } } },
+		reference: {
+			entities: [
+				e(
+					"brand",
+					50,
+					"mixed",
+					[
+						"Der Kundenservice von Arvo ist freundlich, aber langsam.",
+						"Der Kundenservice von Arvo ist freundlich, aber langsam.",
+					],
+					[
+						a("service", 50, "mixed", [
+							"Der Kundenservice von Arvo ist freundlich, aber langsam.",
+							"Der Kundenservice von Arvo ist freundlich, aber langsam.",
+						]),
+					],
+				),
+			],
+		},
+	},
+	{
+		id: "g49-en-opaque-competitor-key",
+		lang: "en",
+		critical: true,
+		answer: "Beltra rejected the claim without explanation and took weeks to answer.",
+		candidates: [GOLDEN_BELTRA_UUID],
+		expected: {
+			[GOLDEN_BELTRA_UUID.key]: {
+				category: "negative",
+				scoreRange: [5, 40],
+				aspects: { service: { category: "negative" } },
+			},
+		},
+		reference: {
+			entities: [
+				e(
+					GOLDEN_BELTRA_UUID.key,
+					20,
+					"negative",
+					["Beltra rejected the claim without explanation and took weeks to answer."],
+					[a("service", 15, "negative", ["Beltra rejected the claim without explanation and took weeks to answer."])],
+				),
+			],
 		},
 	},
 ];

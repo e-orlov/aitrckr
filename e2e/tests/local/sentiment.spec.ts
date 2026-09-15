@@ -19,8 +19,8 @@ const BRAND_ID = "sent-e2e";
 const BRAND_NAME = "Sentiment E2E";
 const BRAND_URL = brandUrl(BRAND_ID, TEST_ORG_SLUG);
 const PAGE_URL = `${BRAND_URL}/sentiment`;
-const DETECTOR = "sent-detector-v1";
-const CLASSIFIER = "sent-classifier-v2";
+const DETECTOR = "sent-detector-v2";
+const CLASSIFIER = "sent-classifier-v3";
 const TAXONOMY = "sent-aspects-v1";
 
 const uuid = (block: string, n: number) => `5e970004-0000-4000-8000-${block}${String(n).padStart(12 - block.length, "0")}`;

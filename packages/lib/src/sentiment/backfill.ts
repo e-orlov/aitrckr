@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { and, asc, eq, gt, isNull, or } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import { promptRunEntityMentions, promptRuns, sentimentAnalyses, sentimentDetections } from "../db/schema";
 import { sentimentInputHash } from "./classifier";
@@ -18,7 +18,12 @@ import {
 import { extractAnswerBody, normalizeText } from "./text";
 import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_DETECTOR_VERSION } from "./types";
 
-/** Resume position in the (created_at, id) keyset scan over prompt_runs. */
+/**
+ * Resume position in the (created_at, id) keyset scan over prompt_runs.
+ * `createdAt` is the timestamp exactly as Postgres renders it (microseconds
+ * kept): a JavaScript `Date` would round it to milliseconds and make the next
+ * page re-read the row the cursor points at.
+ */
 export interface RunCursor {
 	createdAt: string;
 	id: string;
@@ -52,6 +57,8 @@ export interface MentionBackfillCounts {
 	withoutMentions: number;
 	/** Runs whose current-version receipt and mention rows already matched the detector. */
 	alreadyCurrent: number;
+	/** Runs that carry only receipts of an older detector version (their projection is stale and gets rewritten). */
+	staleDetectorVersion: number;
 	/** Runs whose receipt and mention rows were (or would be) written or refreshed. */
 	written: number;
 	/** Mention rows detected in total. */
@@ -76,10 +83,7 @@ async function scanRuns(cursor: RunCursor | null, brandId: string | undefined, l
 	const after =
 		cursor === null
 			? undefined
-			: or(
-					gt(promptRuns.createdAt, new Date(cursor.createdAt)),
-					and(eq(promptRuns.createdAt, new Date(cursor.createdAt)), gt(promptRuns.id, cursor.id)),
-				);
+			: sql`(${promptRuns.createdAt}, ${promptRuns.id}) > (${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`;
 	return db
 		.select({
 			id: promptRuns.id,
@@ -88,7 +92,7 @@ async function scanRuns(cursor: RunCursor | null, brandId: string | undefined, l
 			model: promptRuns.model,
 			rawOutput: promptRuns.rawOutput,
 			competitorsMentioned: promptRuns.competitorsMentioned,
-			createdAt: promptRuns.createdAt,
+			createdAt: sql<string>`${promptRuns.createdAt}::text`,
 		})
 		.from(promptRuns)
 		.where(and(after, brandId ? eq(promptRuns.brandId, brandId) : undefined))
@@ -122,7 +126,7 @@ async function scanAllRuns(
 		pages++;
 		for (const run of rows) {
 			if (!(await onRun(run))) return { cursor, partial: true };
-			cursor = { createdAt: run.createdAt.toISOString(), id: run.id };
+			cursor = { createdAt: run.createdAt, id: run.id };
 		}
 		if (rows.length < pageSize) return { cursor, partial: false };
 	}
@@ -168,13 +172,17 @@ function reconcileLegacyNames(run: ScannedRun, entities: DetectableEntity[], sta
  * projection `loadMentions` serves. Superseded rows are history and do not
  * count either way.
  */
-async function detectionIsCurrent(runId: string, status: string, detectedKeys: string[]): Promise<boolean> {
-	const receipt = await db.query.sentimentDetections.findFirst({
-		where: and(
-			eq(sentimentDetections.promptRunId, runId),
-			eq(sentimentDetections.detectorVersion, SENTIMENT_DETECTOR_VERSION),
-		),
+async function detectionIsCurrent(
+	runId: string,
+	status: string,
+	detectedKeys: string[],
+	counts: MentionBackfillCounts,
+): Promise<boolean> {
+	const receipts = await db.query.sentimentDetections.findMany({
+		where: eq(sentimentDetections.promptRunId, runId),
 	});
+	const receipt = receipts.find((row) => row.detectorVersion === SENTIMENT_DETECTOR_VERSION);
+	if (!receipt && receipts.length > 0) counts.staleDetectorVersion++;
 	if (!receipt || receipt.status !== status || receipt.mentionCount !== detectedKeys.length) return false;
 	const active = await db
 		.select({ key: promptRunEntityMentions.entityKey, version: promptRunEntityMentions.detectorVersion })
@@ -203,6 +211,7 @@ async function processMentionRun(run: ScannedRun, state: MentionScanState, apply
 			run.id,
 			result.status,
 			detected.map((m) => m.key),
+			counts,
 		)
 	) {
 		counts.alreadyCurrent++;
@@ -232,6 +241,7 @@ export async function runMentionBackfill(args: {
 		withMentions: 0,
 		withoutMentions: 0,
 		alreadyCurrent: 0,
+		staleDetectorVersion: 0,
 		written: 0,
 		mentionRows: 0,
 		legacyMatched: 0,
@@ -262,6 +272,8 @@ export interface SentimentEnqueueInventory {
 	eligibleStale: number;
 	/** Runs without a current-version detection receipt (mention backfill has not covered them). */
 	notScanned: number;
+	/** Of `notScanned`: runs that carry a receipt of an older detector version only — the mention reprojection must run first. */
+	staleDetector: number;
 	/** Runs whose current-version receipt says no entity was found or no text was extractable (no call needed). */
 	noMentions: number;
 	/** Runs with an analysis of another classifier version only (stale, auditable). */
@@ -295,18 +307,15 @@ async function classifyRunEligibility(
 	entitiesByBrand: Map<string, DetectableEntity[]>,
 ): Promise<RunEligibility> {
 	counts.scanned++;
-	const receipt = await db.query.sentimentDetections.findFirst({
-		where: and(
-			eq(sentimentDetections.promptRunId, run.id),
-			eq(sentimentDetections.detectorVersion, SENTIMENT_DETECTOR_VERSION),
-		),
-	});
+	const receipts = await db.query.sentimentDetections.findMany({ where: eq(sentimentDetections.promptRunId, run.id) });
+	const receipt = receipts.find((row) => row.detectorVersion === SENTIMENT_DETECTOR_VERSION);
 	const analyses = await db.query.sentimentAnalyses.findMany({ where: eq(sentimentAnalyses.promptRunId, run.id) });
 	const current = analyses.find((row) => row.classifierVersion === SENTIMENT_CLASSIFIER_VERSION);
 	if (!current && analyses.length > 0) counts.staleVersionOnly++;
 
 	if (!receipt) {
 		counts.notScanned++;
+		if (receipts.length > 0) counts.staleDetector++;
 		return "not-scanned";
 	}
 	const body = extractAnswerBody(run.rawOutput, run.provider, run.model);
@@ -372,6 +381,7 @@ export async function runSentimentEnqueue(args: {
 		terminalFailed: 0,
 		eligibleStale: 0,
 		notScanned: 0,
+		staleDetector: 0,
 		noMentions: 0,
 		staleVersionOnly: 0,
 		attempted: 0,
