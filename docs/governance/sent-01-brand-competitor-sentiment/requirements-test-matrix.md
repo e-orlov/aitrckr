@@ -153,8 +153,30 @@ classifier and a canary could accept an answer it cannot reconcile against the p
 loosely (H2 → field-by-field allowlist: locked model or no request summary at all, safe integers, finite cost,
 booleans).
 
+Corrective round 6 (task SENT-EVIDENCE-EXCERPTS-01, after production acceptance of g486e8e2c found the deviation): the
+evidence card showed one ±160-character window around the *first* cited span, so with anchored evidence (up to three
+sentence-length anchors spread over the answer) 27 of the first 75 live spans were truncated in the `<mark>` (data exact,
+presentation wrong). **Evidence rendering contract:** every stored span is rendered in full —
+`rendered highlighted text === answerBody.slice(start, end)` — never truncated, dropped, paraphrased, merged into another
+span or re-derived from normalized text. A pure, deterministic planner (`apps/web/src/lib/sentiment-excerpts.ts`) builds
+one raw-offset window per span (`EXCERPT_RADIUS` 160 each side, grown outward only to a word/sentence boundary within
+`EXCERPT_BOUNDARY_REACH` 40, clamped to the answer, never cutting a span or a surrogate pair), merges overlapping or
+touching windows, keeps distant ones apart (one span → one excerpt, three distant anchors → three excerpts, never one
+range from first to last), shows an ellipsis only where stored text is skipped, and is independent of input order;
+malformed or out-of-range spans are refused (loader leaves them unhighlighted and logs the observation id only). The card
+renders every group at once with `<mark>` per highlight (`data-polarity`), "Evidence n of N" and a visible gap when there
+are several, one deep link per answer; no tooltip/carousel/horizontal scroll; no classifier, prompt, version, schema,
+scoring, queue or data change. Separate semantic finding recorded (CP1): one live aspect was inferred from a citation
+URL only — `SENT-CITATION-EXCLUSION DECISION REQUIRED`, out of this PR's scope.
+
 | Test ID | Required proof | Where | Status |
 |---|---|---|---|
+| UT-SNT-EXC-001 | RED→GREEN: three distant anchors of one answer are each highlighted exactly once as the raw slice; the rendered text of every group equals the raw slice (marks stripped) | `apps/web/src/components/sentiment/__tests__/evidence-visibility.test.tsx` (RED commit abcab90b against the old single window) | PASS |
+| UT-SNT-EXC-002 | Planner matrix: one span (window bounds, word boundaries, ellipses); overlapping and touching windows merge, distant stay apart; three distant spans → three groups ≪ whole answer; shuffled/reversed input → byte-identical result; spans at answer start/end; Unicode/surrogates/CRLF with no split pair; identical boundaries with two polarities → one highlight carrying both; malformed/out-of-range spans throw `RangeError` (`isExactEvidenceSpan` false) | `apps/web/src/lib/__tests__/sentiment-excerpts.test.ts` (8) | PASS |
+| IT-SNT-EXC-001 | Real Postgres: one observation with three distant anchors → loader returns three excerpt groups, every highlight equals the raw slice, groups are exact slices, total shown < answer; overview loader tests updated to groups; Top/Bottom allocation and ordering unchanged (IT-SNT-007) | `apps/web/src/server/__tests__/sentiment-evidence-excerpts.integration.test.ts` (RED abcab90b), `sentiment-overview.integration.test.ts` | PASS |
+| ST-SNT-EXC-001…004 | Storybook: single span (one excerpt, no numbering), adjacent spans (one shared excerpt, two marks in order), three distant spans (three numbered excerpts, negative mark, card shorter than the fictional answer), Mixed on one anchor (one mark with both polarities), DOM order = raw offset order, one deep link per card, no model label; dark; 375 px without horizontal overflow | `apps/web/src/stories/sentiment.stories.tsx` (`EvidenceShapes`, `EvidenceShapesDark`, `EvidenceShapesNarrow`), fixtures via the real planner | PASS |
+| E2E-SNT-EXC-001 | Playwright on the seeded stack: Alpha's top answer carries three distant spans → three excerpts, three marks (texts exact, negative polarity attribute), "Evidence 1 of 3" … "3 of 3", offsets ascending, card shorter than the stored answer, single-span items keep one excerpt, one deep link; B7 re-pinned on a single-span item | `e2e/tests/local/sentiment.spec.ts` | PASS |
+| OPS-SNT-003 | Production oracle made environment-aware: inactive-competitor and synthetic-exclusion checks derive from the database / an explicit flag and are reported as SKIP (never FAIL) where the fixture is absent; live span counts are dynamic; every span must be rendered as a `<mark>`; excerpt groups must be exact raw slices containing their highlights and never the whole answer | operator driver `~/.elmo-task-evidence/sent-01/evidence-excerpts-01/scripts/sent01-evidence-verify.local.mts` | PASS (rehearsal + production read-only) |
 | UT-SNT-001 | Score/category boundaries, Mixed vs Neutral, null behaviour, round-once | `packages/lib/src/sentiment/__tests__/metrics.test.ts` | PASS |
 | UT-SNT-002 | Canonical T/M/C/P/U/X/N formulas using the mandated fixture | same (`UT-SNT-002 canonical fixture`) + Storybook `Default` + integration `IT-SNT-006` | PASS |
 | UT-SNT-003 | Entity detection with aliases, domains, Unicode boundaries, repetition, citation-only exclusion | `__tests__/detector.test.ts` | PASS |
