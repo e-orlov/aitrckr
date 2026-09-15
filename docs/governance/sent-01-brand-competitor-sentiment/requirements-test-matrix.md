@@ -169,8 +169,51 @@ are several, one deep link per answer; no tooltip/carousel/horizontal scroll; no
 scoring, queue or data change. Separate semantic finding recorded (CP1): one live aspect was inferred from a citation
 URL only — `SENT-CITATION-EXCLUSION DECISION REQUIRED`, out of this PR's scope.
 
+Corrective round 7 (task SENT-CITATION-EXCLUSION-01, after the first live day on g486e8e2c): the read-only forensic
+of three terminal failures and the CP1 citation finding established three distinct structural causes. (1) **Citation-only
+occurrences**: the detector scanned the whole normalized body including URL tokens and Markdown link destinations and the
+segmenter had no notion of citation ranges, so an entity present only as a citation domain (`([adac.de](https://…))`,
+isolated as its own anchor because it follows sentence-final punctuation) became a mention, a forced candidate and the
+only citable anchor for a coverage aspect. (2) **`unknown-entity` ×2**: the request JSON Schema typed the entity `key` as an
+unconstrained string, so strict structured output legally returned the display name `ARAG` for the candidate whose opaque
+key is `brand`; the local allowlist rejected it (correctly, fail-closed). Citation exclusion does not touch this failure.
+(3) **`evidence-anchor-polarity-conflict`**: the diagnostic (`aspectKey = null`, `evidenceIndex = 1`, anchor `s0004`, a
+natural-language segment) proves the provider cited one segment twice with two polarity labels inside one entity's
+*overall* evidence list under a non-Mixed verdict; the validator was already target-scoped (a segment carrying different
+polarities for different aspects is accepted), so the rejection was correct and no product-semantics change is needed.
+
+**Frozen semantics (round 7).** *Mentions*: an entity is mentioned only when its name or an allowed alias occurs in the
+natural-language text of the answer. Not mentions: bare URLs and domains, Markdown link destinations, standalone Markdown
+links and source-list entries, reference/footnote markers and link definitions, source lines, a name or alias that occurs
+only inside a hostname, path, query or citation label, any other technical representation of a source. A prose mention
+beside an inline citation is kept; an entity present in prose and in citation metadata counts once, from the prose;
+citations stay a separate analytical layer and never weigh on sentiment. *Evidence*: anchors are natural-language ranges
+only; a citation fragment is never an anchor, never an anchor edge and never renders to the provider; a citation inside a
+sentence stays inside the anchor's raw slice (`quote === answerBody.slice(start, end)` is preserved; offsets are never
+taken from a normalized copy) but is elided from the text the provider reads. *Entity keys*: the request schema carries a
+per-request `enum` of the exact opaque candidate keys (strict), the prompt states that keys are echoed verbatim, the request
+sets `provider.require_parameters`, and the local allowlist remains the second boundary; no alias-to-key repair, no fuzzy
+matching. *Evidence polarity*: a claim is identified by `{ entity, target (overall | aspect), anchor, polarity }`; identical
+claims within one target are de-duplicated deterministically; one anchor may carry different polarities for different
+targets; positive and negative on one anchor within one target are admissible only under Mixed for that exact target;
+any other differing pair on one anchor within one target stays a terminal validation failure; evidence is never dropped,
+rewritten or re-labelled. One shared deterministic range analysis (`ranges.ts`) feeds the detector, candidate
+construction, the segmenter, the input hash, the prompt, the canary inspect/preflight/boundary and the backfill.
+
+**Version impact (round 7).** Detector `sent-detector-v1 → v2` (citation ranges excluded; domains are not mention terms),
+evidence contract `sent-evidence-v1 → v2` (natural-language anchors, elided rendering), classifier
+`sent-classifier-v2 → v3` (entity-key enum, prompt rules, rendering, input hash over analyzable text); aspect taxonomy
+`sent-aspects-v1` unchanged; the canary contract gains `detectorVersion` and an old contract is refused at parse time. No
+schema migration: versions are text columns; old rows stay for audit and are invisible to the current projection.
+
 | Test ID | Required proof | Where | Status |
 |---|---|---|---|
+| UT-SNT-CIT-001 | RED→GREEN detector: bare domain/URL, Markdown source line, URL path/query carrying an alias, standalone linked brand in a source list → no mention; natural sentence → mention; prose beside an inline URL kept; prose + citation duplicate → one entity; Unicode/CRLF/punctuation/Markdown keep raw offsets; reversed/shuffled roster → byte-identical result | `packages/lib/src/sentiment/__tests__/citation-ranges.test.ts`, `detector.test.ts` | RED pending |
+| UT-SNT-CIT-002 | RED→GREEN anchors: citation-only fragments are not anchors and not anchor edges; natural anchors stay exact raw slices; an excluded fragment cannot be cited as evidence; changing a citation URL leaves input hash and prompt digest unchanged; rendered anchor text carries no URL; UI excerpt planner still shows every admissible span | `__tests__/citation-ranges.test.ts`, `anchors.test.ts`, `classifier.test.ts`, `apps/web/src/lib/__tests__/sentiment-excerpts.test.ts` | RED pending |
+| UT-SNT-CIT-003 | RED→GREEN live reproducers (sanitized, synthetic): display name `ARAG` for key `brand` → `unknown-entity` with the old schema; the serialized request JSON Schema has no exact-key enum before the fix and the enum after; same anchor with different polarities for different aspects passes (regression); same target/non-Mixed differing pair still rejected; Mixed with dual evidence passes; identical claims de-duplicated; no silent repair | `__tests__/live-reproducers.test.ts`, `provider.test.ts`, `prompt-snapshot.test.ts` | RED pending |
+| CT-SNT-CIT-001 | Canary contract carries `detectorVersion`; old contract (without it or with `sent-detector-v1`) refused before any store/provider dependency; `inspect` emits it; request summary must report strict `json_schema` + `require_parameters` | `canary.test.ts`, `sentiment-canary-driver.test.ts` | RED pending |
+| IT-SNT-CIT-001 | Real Postgres: URL-only competitor mention row exists under detector v1 → new reprojection deletes it (unreferenced) or supersedes it (referenced), prose entity remains with its id, receipt/version updated, second apply = 0 writes, interrupted batch resumes without duplicates, input hash/prompt digest reproducible, stale v2 analysis excluded from current metrics while physically kept, no queue enqueue, exact-enum request contract, three sanitized live reproducers through the job core, no paid usage event on a pre-request refusal, charged cost attributed on a post-response rejection | `apps/web/src/server/__tests__/sentiment-citation-exclusion.integration.test.ts` | RED pending |
+| GOLD-SNT-CIT-001 | Golden corpus cases for bare URLs, Markdown links, source lists, inline citations, cross-aspect polarity, Mixed overall/aspect and opaque keys; reference labels validate 100 % | `golden/corpus.ts`, `__tests__/golden.test.ts` | pending |
 | UT-SNT-EXC-001 | RED→GREEN: three distant anchors of one answer are each highlighted exactly once as the raw slice; the rendered text of every group equals the raw slice (marks stripped) | `apps/web/src/components/sentiment/__tests__/evidence-visibility.test.tsx` (RED commit abcab90b against the old single window) | PASS |
 | UT-SNT-EXC-002 | Planner matrix: one span (window bounds, word boundaries, ellipses); overlapping and touching windows merge, distant stay apart; three distant spans → three groups ≪ whole answer; shuffled/reversed input → byte-identical result; spans at answer start/end; Unicode/surrogates/CRLF with no split pair; identical boundaries with two polarities → one highlight carrying both; malformed/out-of-range spans throw `RangeError` (`isExactEvidenceSpan` false) | `apps/web/src/lib/__tests__/sentiment-excerpts.test.ts` (8) | PASS |
 | IT-SNT-EXC-001 | Real Postgres: one observation with three distant anchors → loader returns three excerpt groups, every highlight equals the raw slice, groups are exact slices, total shown < answer; overview loader tests updated to groups; Top/Bottom allocation and ordering unchanged (IT-SNT-007) | `apps/web/src/server/__tests__/sentiment-evidence-excerpts.integration.test.ts` (RED abcab90b), `sentiment-overview.integration.test.ts` | PASS |
