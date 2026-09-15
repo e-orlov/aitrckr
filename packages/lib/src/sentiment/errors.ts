@@ -134,6 +134,8 @@ function safeEnvelope(value: unknown): PaidResponseEnvelope | null {
 						webSearch: r.webSearch === true,
 						maxToolCalls: countOrNull(r.maxToolCalls),
 						maxOutputTokens: countOrNull(r.maxOutputTokens),
+						strictJsonSchema: r.strictJsonSchema === true,
+						requireParameters: r.requireParameters === true,
 					}
 				: null,
 		usage: u

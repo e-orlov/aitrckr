@@ -55,7 +55,14 @@ const usage = {
 	webSearchRequests: 1,
 	webSearchRequestsConflict: false,
 };
-const request = { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 };
+const request = {
+	model: SENTIMENT_MODEL,
+	webSearch: true,
+	maxToolCalls: 1,
+	maxOutputTokens: 8000,
+	strictJsonSchema: true,
+	requireParameters: true,
+};
 const answered = {
 	entities: [
 		{

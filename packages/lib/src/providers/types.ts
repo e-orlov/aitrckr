@@ -71,6 +71,10 @@ export interface StructuredResearchRequestSummary {
 	maxToolCalls: number | null;
 	/** `max_tokens` sent with the request; `null` when the provider default applied. */
 	maxOutputTokens: number | null;
+	/** `response_format.json_schema.strict` was sent as `true`; absent when the summary predates the flag. */
+	strictJsonSchema?: boolean;
+	/** `provider.require_parameters` was sent as `true` (routing may not drop a request parameter); absent when the summary predates the flag. */
+	requireParameters?: boolean;
 }
 
 export interface StructuredResearchResult<T> {

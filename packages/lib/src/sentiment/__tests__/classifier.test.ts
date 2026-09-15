@@ -130,13 +130,15 @@ describe("UT-SNT-006 evidence and consistency validation", () => {
 		}
 	});
 
-	it("forbids the same (anchor, polarity) twice and two polarities on one anchor outside a Mixed verdict", () => {
+	it("collapses the same (anchor, polarity) claim to one and forbids two polarities on one anchor outside a Mixed verdict", () => {
 		const duplicate = structuredClone(good);
 		duplicate.entities[0].evidence = [
 			{ anchorId: "s0001", polarity: "positive" },
 			{ anchorId: "s0001", polarity: "positive" },
 		];
-		expect(() => validate(duplicate)).toThrow(expect.objectContaining({ code: "evidence-duplicate" }));
+		expect(validate(duplicate)[0].evidence).toEqual([
+			{ quote: "ARAG ist nicht teuer und bietet einen sehr guten Service.", start: 0, end: 57, polarity: "positive" },
+		]);
 		const conflict = structuredClone(good);
 		conflict.entities[0].evidence = [
 			{ anchorId: "s0001", polarity: "positive" },

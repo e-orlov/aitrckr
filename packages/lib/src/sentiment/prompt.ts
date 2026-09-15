@@ -24,7 +24,9 @@ Rules:
 - Different entities in the same answer may have different sentiment; repeated mentions of one entity are one observation.
 - Confidence is 0..1 for how unambiguous the evidence is.`;
 
-export const SENTIMENT_EVIDENCE_RULES = `Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]; links, URLs and source lists have been removed from it, so every segment is natural language and a source reference is never evidence. For every entity and aspect item, list at most ${EVIDENCE_MAX_ITEMS} evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity in words. Never invent ids, never quote or rewrite text. A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative (the same segment may carry both only when it states both sides).`;
+export const SENTIMENT_EVIDENCE_RULES = `Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]; links, URLs and source lists have been removed from it, so every segment is natural language and a source reference is never evidence. For every entity and aspect item, list at most ${EVIDENCE_MAX_ITEMS} evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity in words. Never invent ids, never quote or rewrite text. Within one evidence list, cite each segment id at most once, with the one polarity that segment carries for that item; the same segment may carry a different polarity in another item (for example positive for "price" and negative for "coverage"). A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative — the only case in which one segment may appear twice in one list, and only when it states both sides.`;
+
+export const SENTIMENT_KEY_RULES = `Entity keys are opaque identifiers. Return each "key" exactly as listed in ENTITIES, character for character — never the entity's name, alias, domain or a variation of the key. The output schema only accepts the listed keys.`;
 
 export function aspectTaxonomyText(): string {
 	return SENTIMENT_ASPECT_KEYS.map((key) => {
@@ -63,6 +65,8 @@ export function buildSentimentPrompt(args: {
 	return `You are an analyst measuring how an AI assistant's stored answer portrays specific insurance companies.
 
 You will receive the ANSWER (a stored response, split into numbered segments) and a list of ENTITIES with fixed keys. Return one item per entity key — every listed key exactly once, no other keys. Your judgement must be based ONLY on the text of the ANSWER. You may use web search solely to recognise which company a name, abbreviation or domain refers to; never to look up reputation, reviews or facts and never to change a sentiment the ANSWER does not express itself.
+
+${SENTIMENT_KEY_RULES}
 
 ${SENTIMENT_SCORE_RULES}
 

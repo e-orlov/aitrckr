@@ -184,13 +184,25 @@ export function parseOpenRouterUsage(usage: unknown): StructuredResearchUsage | 
 
 /** The verifiable part of a request body, read back from what is about to be sent. */
 function summarizeRequest(body: Record<string, unknown>): StructuredResearchRequestSummary {
+	const responseFormat = body.response_format as { type?: unknown; json_schema?: { strict?: unknown } } | undefined;
+	const routing = body.provider as { require_parameters?: unknown } | undefined;
 	return {
 		model: String(body.model),
 		webSearch: Array.isArray(body.tools) && body.tools.length > 0,
 		maxToolCalls: typeof body.max_tool_calls === "number" ? body.max_tool_calls : null,
 		maxOutputTokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
+		strictJsonSchema: responseFormat?.type === "json_schema" && responseFormat.json_schema?.strict === true,
+		requireParameters: routing?.require_parameters === true,
 	};
 }
+
+/**
+ * OpenRouter routing may otherwise fall back to a provider that ignores a
+ * request parameter it does not support; a structured call depends on
+ * `response_format` and the server tool being honoured, so routing is
+ * restricted to providers that support every parameter sent.
+ */
+const STRICT_ROUTING = Object.freeze({ require_parameters: true });
 
 export const openrouter: Provider = {
 	id: "openrouter",
@@ -219,6 +231,7 @@ export const openrouter: Provider = {
 				type: "json_schema",
 				json_schema: { name: "research_output", strict: true, schema: jsonSchema },
 			},
+			provider: { ...STRICT_ROUTING },
 			...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
 			...(webSearch ? webSearchRequestFields() : {}),
 		};

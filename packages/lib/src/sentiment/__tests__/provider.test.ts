@@ -104,11 +104,13 @@ describe("CT-SNT-002 sentiment provider lock", () => {
 			"max_tool_calls",
 			"messages",
 			"model",
+			"provider",
 			"response_format",
 			"tool_choice",
 			"tools",
 		]);
 		expect(body.response_format).toMatchObject({ type: "json_schema", json_schema: { strict: true } });
+		expect(body.provider).toEqual({ require_parameters: true });
 		expect(body.tools).toEqual([
 			expect.objectContaining({
 				type: "openrouter:web_search",
@@ -167,6 +169,8 @@ describe("CT-SNT-002 sentiment provider lock", () => {
 			webSearch: true,
 			maxToolCalls: 1,
 			maxOutputTokens: 8000,
+			strictJsonSchema: true,
+			requireParameters: true,
 		});
 		// The classification carries the bounded verbatim excerpts and the opaque generation id by
 		// contract, never the raw payload, provider field names, the prompt, headers or credentials.

@@ -88,7 +88,14 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			const error = new SentimentValidationError("schema", "rejected");
 			(error as { envelope: unknown }).envelope = {
 				generationId: "gen-1",
-				request: { model, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+				request: {
+					model,
+					webSearch: true,
+					maxToolCalls: 1,
+					maxOutputTokens: 8000,
+					strictJsonSchema: true,
+					requireParameters: true,
+				},
 				usage: null,
 			};
 			return sanitizeSentimentError(error).envelope?.request ?? null;
@@ -98,6 +105,8 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			webSearch: true,
 			maxToolCalls: 1,
 			maxOutputTokens: 8000,
+			strictJsonSchema: true,
+			requireParameters: true,
 		});
 		for (const model of [
 			SECRET,
@@ -118,7 +127,14 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			const error = new SentimentValidationError("schema", "rejected");
 			(error as { envelope: unknown }).envelope = {
 				generationId: "gen-1",
-				request: { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 },
+				request: {
+					model: SENTIMENT_MODEL,
+					webSearch: true,
+					maxToolCalls: 1,
+					maxOutputTokens: 8000,
+					strictJsonSchema: true,
+					requireParameters: true,
+				},
 				usage,
 			};
 			return sanitizeSentimentError(error).envelope?.usage ?? null;
@@ -127,7 +143,15 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			const error = new SentimentValidationError("schema", "rejected");
 			(error as { envelope: unknown }).envelope = {
 				generationId: "gen-1",
-				request: { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000, ...fields },
+				request: {
+					model: SENTIMENT_MODEL,
+					webSearch: true,
+					maxToolCalls: 1,
+					maxOutputTokens: 8000,
+					strictJsonSchema: true,
+					requireParameters: true,
+					...fields,
+				},
 				usage: null,
 			};
 			return sanitizeSentimentError(error).envelope?.request ?? null;
@@ -178,7 +202,7 @@ describe("H2 the paid-response envelope is a strict allowlist", () => {
 			].sort(),
 		);
 		expect(Object.keys(requestOf({ headers: { Authorization: BEARER } }) ?? {}).sort()).toEqual(
-			["maxOutputTokens", "maxToolCalls", "model", "webSearch"].sort(),
+			["maxOutputTokens", "maxToolCalls", "model", "webSearch", "strictJsonSchema", "requireParameters"].sort(),
 		);
 	});
 });

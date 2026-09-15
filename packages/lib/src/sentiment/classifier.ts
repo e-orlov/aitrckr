@@ -121,16 +121,31 @@ function fail(
 	);
 }
 
-/** One citation: known anchor, unique `(anchorId, polarity)`, two polarities on one anchor only for Mixed. */
+/**
+ * One evidence claim is identified by its entity, its target (the entity
+ * overall or one aspect), its anchor and its polarity. Identity decides
+ * de-duplication and conflicts; nothing about a claim is ever rewritten.
+ */
+function claimIdentity(where: EvidenceWhere, ref: SentimentEvidenceRef): string {
+	return `${where.entityKey}|${where.aspectKey ?? "overall"}|${ref.anchorId}|${ref.polarity}`;
+}
+
+/**
+ * One citation of one target: the anchor must belong to the answer; an
+ * identical claim (same target, anchor and polarity) is de-duplicated
+ * deterministically (the first occurrence stands); two different polarities on
+ * one anchor within one target are admissible only as the positive/negative
+ * pair of a Mixed target — any other differing pair is a contradiction.
+ */
 function resolveOneRef(
 	anchors: Map<string, EvidenceAnchor>,
 	ref: SentimentEvidenceRef,
 	index: number,
 	where: EvidenceWhere,
 	category: SentimentCategory,
-	seenPairs: Set<string>,
+	seenClaims: Set<string>,
 	polaritiesByAnchor: Map<string, Set<EvidencePolarity>>,
-): SentimentEvidence {
+): SentimentEvidence | null {
 	const anchor = anchors.get(ref.anchorId);
 	if (!anchor) {
 		fail("evidence-unknown-anchor", `${where.label}: anchor "${ref.anchorId}" is not part of the answer`, where, {
@@ -138,21 +153,17 @@ function resolveOneRef(
 			anchorId: /^s\d{4}$/.test(ref.anchorId) ? ref.anchorId : undefined,
 		});
 	}
-	const pair = `${ref.anchorId}:${ref.polarity}`;
-	if (seenPairs.has(pair)) {
-		fail("evidence-duplicate", `${where.label}: anchor "${ref.anchorId}" cited twice with the same polarity`, where, {
-			evidenceIndex: index,
-			anchorId: ref.anchorId,
-		});
-	}
-	seenPairs.add(pair);
+	const identity = claimIdentity(where, ref);
+	if (seenClaims.has(identity)) return null;
+	seenClaims.add(identity);
 	const polarities = polaritiesByAnchor.get(ref.anchorId) ?? new Set<EvidencePolarity>();
 	polarities.add(ref.polarity);
 	polaritiesByAnchor.set(ref.anchorId, polarities);
-	if (polarities.size > 1 && category !== "mixed") {
+	const mixedPair = polarities.size === 2 && polarities.has("positive") && polarities.has("negative");
+	if (polarities.size > 1 && !(category === "mixed" && mixedPair)) {
 		fail(
 			"evidence-anchor-polarity-conflict",
-			`${where.label}: anchor "${ref.anchorId}" cited with two polarities outside a mixed verdict`,
+			`${where.label}: anchor "${ref.anchorId}" cited with two polarities for one target outside a mixed verdict`,
 			where,
 			{ evidenceIndex: index, anchorId: ref.anchorId },
 		);
@@ -161,10 +172,11 @@ function resolveOneRef(
 }
 
 /**
- * Resolve cited anchors into stored evidence: every id must belong to this
- * answer, `(anchorId, polarity)` pairs are unique, one anchor may carry two
- * polarities only for a Mixed verdict, and Mixed needs a positive and a
- * negative citation. The stored form is the exact raw slice of the anchor.
+ * Resolve cited anchors into stored evidence for one target: every id must
+ * belong to this answer, identical claims collapse to one, one anchor may
+ * carry positive and negative only for a Mixed target, and Mixed needs a
+ * positive and a negative citation. The stored form is the exact raw slice of
+ * the anchor.
  */
 function resolveEvidence(
 	anchors: Map<string, EvidenceAnchor>,
@@ -173,10 +185,11 @@ function resolveEvidence(
 	category: SentimentCategory,
 ): SentimentEvidence[] {
 	const resolved: SentimentEvidence[] = [];
-	const seenPairs = new Set<string>();
+	const seenClaims = new Set<string>();
 	const polaritiesByAnchor = new Map<string, Set<EvidencePolarity>>();
 	refs.forEach((ref, index) => {
-		resolved.push(resolveOneRef(anchors, ref, index, where, category, seenPairs, polaritiesByAnchor));
+		const evidence = resolveOneRef(anchors, ref, index, where, category, seenClaims, polaritiesByAnchor);
+		if (evidence) resolved.push(evidence);
 	});
 	if (category === "mixed") {
 		const polarities = new Set(resolved.map((e) => e.polarity));
@@ -332,6 +345,7 @@ async function requestClassification(
 	provider: Provider,
 	prompt: string,
 	anchorIds: string[],
+	entityKeys: string[],
 	signal: AbortSignal | undefined,
 ): Promise<ResearchResult> {
 	if (!provider.runStructuredResearch) {
@@ -340,7 +354,7 @@ async function requestClassification(
 	try {
 		return await provider.runStructuredResearch({
 			prompt,
-			schema: sentimentClassificationResultSchemaFor(anchorIds),
+			schema: sentimentClassificationResultSchemaFor(anchorIds, entityKeys),
 			webSearch: true,
 			signal,
 			maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,
@@ -386,6 +400,7 @@ export async function classifySentiment(
 		provider,
 		buildSentimentPrompt({ ...args, anchors }),
 		anchors.map((anchor) => anchor.id),
+		args.candidates.map((candidate) => candidate.key),
 		signal,
 	);
 	// From here on the provider has answered and charged: every rejection

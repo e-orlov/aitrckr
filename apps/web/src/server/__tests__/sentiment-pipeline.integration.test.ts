@@ -1030,6 +1030,8 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		webSearch: true,
 		maxToolCalls: 1,
 		maxOutputTokens: 8000,
+		strictJsonSchema: true,
+		requireParameters: true,
 	};
 	const usageOf = (over: Partial<StructuredResearchUsage>): StructuredResearchUsage => ({
 		inputTokens: 7000,
@@ -1380,7 +1382,14 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		webSearchRequests: 1,
 		webSearchRequestsConflict: false,
 	};
-	const request = { model: SENTIMENT_MODEL, webSearch: true, maxToolCalls: 1, maxOutputTokens: 8000 };
+	const request = {
+		model: SENTIMENT_MODEL,
+		webSearch: true,
+		maxToolCalls: 1,
+		maxOutputTokens: 8000,
+		strictJsonSchema: true,
+		requireParameters: true,
+	};
 
 	/** Answers every candidate; the Alpha entity cites one anchor twice with the same polarity, which the classifier refuses. */
 	function rejectingProvider(calls: { n: number }): Provider {

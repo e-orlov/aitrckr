@@ -124,6 +124,8 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"request-web-search",
 	"request-max-tool-calls",
 	"request-max-tokens",
+	"request-structured-output",
+	"request-require-parameters",
 	"usage-missing",
 	"web-search-count-conflict",
 	"web-search-count-unknown",
@@ -455,6 +457,8 @@ function requestReasons(
 	if (request.webSearch !== true) reasons.push({ code: "request-web-search" });
 	if (request.maxToolCalls !== limits.maxToolCalls) reasons.push({ code: "request-max-tool-calls" });
 	if (request.maxOutputTokens !== limits.maxOutputTokens) reasons.push({ code: "request-max-tokens" });
+	if (request.strictJsonSchema !== true) reasons.push({ code: "request-structured-output" });
+	if (request.requireParameters !== true) reasons.push({ code: "request-require-parameters" });
 	return reasons;
 }
 
@@ -502,9 +506,10 @@ function entityKeysMatch(contract: SentimentCanaryContract, entityKeys: string[]
 
 /**
  * The post-call contract: exactly one attempt and one provider request, the
- * request carried the locked model, web search, the tool budget and the
- * output cap, the provider reported usage that fits every threshold, and the
- * classification covers exactly the frozen entities.
+ * request carried the locked model, web search, the tool budget, the output
+ * cap, strict JSON-schema output and strict parameter routing, the provider
+ * reported usage that fits every threshold, and the classification covers
+ * exactly the frozen entities.
  */
 export function evaluateSentimentCanary(
 	contract: SentimentCanaryContract,

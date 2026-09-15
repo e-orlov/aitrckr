@@ -72,16 +72,15 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 
 	it("the request schema binds the entity key to the exact candidate keys (strict enum), not to any string", () => {
 		const ids = segmentAnswer(brandAnswer).map((a) => a.id);
-		const json = z.toJSONSchema(sentimentClassificationResultSchemaFor(ids, ["brand"])) as {
-			properties: { entities: { items: { properties: { key: Record<string, unknown> } } } };
-		};
+		type Shape = { properties: { entities: { items: { properties: { key: Record<string, unknown> } } } } };
+		const json = z.toJSONSchema(sentimentClassificationResultSchemaFor(ids, ["brand"])) as unknown as Shape;
 		expect(json.properties.entities.items.properties.key).toEqual({ type: "string", enum: ["brand"] });
 		const multi = z.toJSONSchema(
 			sentimentClassificationResultSchemaFor(
 				ids,
 				three.map((c) => c.key),
 			),
-		) as typeof json;
+		) as unknown as Shape;
 		expect(multi.properties.entities.items.properties.key.enum).toEqual(three.map((c) => c.key));
 	});
 
