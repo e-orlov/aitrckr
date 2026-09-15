@@ -1483,7 +1483,9 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		const message = failed.error_message ?? "";
 		const diagnosticJson = message.slice(message.indexOf(" diagnostic=") + " diagnostic=".length);
 		expect(
-			message.startsWith(`validation evidence-anchor-polarity-conflict (SentimentValidationError) via openrouter/${SENTIMENT_MODEL}`),
+			message.startsWith(
+				`validation evidence-anchor-polarity-conflict (SentimentValidationError) via openrouter/${SENTIMENT_MODEL}`,
+			),
 		).toBe(true);
 		expect(JSON.parse(diagnosticJson)).toMatchObject({
 			stage: "evidence",
