@@ -24,7 +24,7 @@ Rules:
 - Different entities in the same answer may have different sentiment; repeated mentions of one entity are one observation.
 - Confidence is 0..1 for how unambiguous the evidence is.`;
 
-export const SENTIMENT_EVIDENCE_RULES = `Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]. For every entity and aspect item, list at most ${EVIDENCE_MAX_ITEMS} evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity. Never invent ids, never quote or rewrite text. A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative (the same segment may carry both only when it states both sides).`;
+export const SENTIMENT_EVIDENCE_RULES = `Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]; links, URLs and source lists have been removed from it, so every segment is natural language and a source reference is never evidence. For every entity and aspect item, list at most ${EVIDENCE_MAX_ITEMS} evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity in words. Never invent ids, never quote or rewrite text. A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative (the same segment may carry both only when it states both sides).`;
 
 export function aspectTaxonomyText(): string {
 	return SENTIMENT_ASPECT_KEYS.map((key) => {
@@ -40,9 +40,9 @@ export function aspectTaxonomyText(): string {
  * allowed only to disambiguate identities; it may never add, replace or
  * correct sentiment that the stored answer does not express.
  */
-/** The answer as the model receives it: every anchor once, in order, prefixed by its id. */
+/** The answer as the model receives it: every anchor once, in order, prefixed by its id — natural language only, citations elided. */
 export function renderAnchoredAnswer(anchors: readonly EvidenceAnchor[]): string {
-	return anchors.map((anchor) => `[${anchor.id}] ${anchor.text}`).join("\n");
+	return anchors.map((anchor) => `[${anchor.id}] ${anchor.naturalText}`).join("\n");
 }
 
 export function buildSentimentPrompt(args: {

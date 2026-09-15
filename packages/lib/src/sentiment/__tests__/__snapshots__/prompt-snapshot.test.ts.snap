@@ -189,7 +189,7 @@ Aspects: additionally rate the entity on each aspect the ANSWER actually evaluat
 - "service" (Service): Customer support, claims handling, responsiveness, helpdesk, digital tools, advice quality. Synonyms: support, customer service, claims, helpdesk, hotline, beratung, kundenservice, schadenabwicklung, erreichbarkeit.
 - "other" (Other): Any other evaluated aspect (reputation, trust, ratings, financial strength, market position).
 
-Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]. For every entity and aspect item, list at most 3 evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity. Never invent ids, never quote or rewrite text. A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative (the same segment may carry both only when it states both sides).
+Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]; links, URLs and source lists have been removed from it, so every segment is natural language and a source reference is never evidence. For every entity and aspect item, list at most 3 evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity in words. Never invent ids, never quote or rewrite text. A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative (the same segment may carry both only when it states both sides).
 
 ENTITIES:
 - key "brand": ARAG — the brand being tracked
@@ -204,4 +204,4 @@ ANSWER (segments; cite by id):
 """"
 `;
 
-exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"5cd194838f49b26ceed4287fd15450172b600adbf17dcbe5d4c59e1c430eeb25"`;
+exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"f891cbc5f1365753b2010acdfd4334d3fd3f7cd0e8b1b66a2281d9a7d9e002b6"`;

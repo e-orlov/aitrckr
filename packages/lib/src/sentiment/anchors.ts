@@ -1,10 +1,20 @@
 import { SentimentValidationError } from "./errors-validation";
+import {
+	type AnalyzableText,
+	analyzeAnswerRanges,
+	hasNaturalContent,
+	isExcludedOffset,
+	naturalSlices,
+	naturalTextOf,
+} from "./ranges";
 import { EVIDENCE_QUOTE_MAX_LENGTH } from "./types";
 
 /**
  * Version of the evidence contract between the classifier and the provider:
- * the answer is handed over as ordered, identified segments and the model
- * cites segment ids, never text. Frozen into the canary contract.
+ * the answer is handed over as ordered, identified natural-language segments
+ * (citation ranges are never segments and are elided from what the model
+ * reads) and the model cites segment ids, never text. Frozen into the canary
+ * contract.
  */
 export const SENTIMENT_EVIDENCE_VERSION = "sent-evidence-v1";
 
@@ -16,7 +26,10 @@ export interface EvidenceAnchor {
 	id: string;
 	start: number;
 	end: number;
+	/** The exact raw slice `answerBody.slice(start, end)` — what is stored as evidence. */
 	text: string;
+	/** The natural-language text of the slice with citation ranges elided — what the provider reads. */
+	naturalText: string;
 }
 
 const ANCHOR_ID = /^s\d{4}$/;
@@ -96,13 +109,14 @@ function wordBefore(text: string, index: number): string {
 	return text.slice(from, index).toLowerCase();
 }
 
-/** Sentence boundaries inside one line, as end offsets relative to the line. */
-function sentenceEnds(line: string): number[] {
+/** Sentence boundaries inside one line, as end offsets relative to the line; punctuation inside a citation range never ends a sentence. */
+function sentenceEnds(line: string, lineStart: number, analysis: AnalyzableText): number[] {
 	const ends: number[] = [];
 	for (const match of line.matchAll(SENTENCE_END)) {
 		const at = match.index;
 		const end = at + match[0].length;
 		const punctuationStart = at;
+		if (isExcludedOffset(analysis, lineStart + at)) continue;
 		// A sentence does not end where the text continues in lower case ("slower… but", "z. B. günstig").
 		const next = line.slice(end).match(/\S/u)?.[0];
 		if (next !== undefined && /\p{Ll}/u.test(next)) continue;
@@ -126,16 +140,28 @@ interface Span {
 	marker?: { start: number; end: number };
 }
 
-/** Trim whitespace and a leading Markdown marker; returns null when nothing citable is left. */
-function contentSpan(text: string, start: number, end: number): Span | null {
+/**
+ * Trim whitespace and a leading Markdown marker, then shrink the span to its
+ * natural-language extent: a citation at either edge is cut off, a citation
+ * inside stays inside the raw slice. Returns null when no natural-language
+ * content is left.
+ */
+function contentSpan(text: string, start: number, end: number, analysis: AnalyzableText): Span | null {
 	let s = start;
 	let e = end;
 	while (s < e && WHITESPACE.test(text[s])) s += 1;
 	const marker = LINE_MARKER.exec(text.slice(s, e));
 	const markerRange = marker ? { start: s, end: s + marker[0].length } : undefined;
 	if (marker) s += marker[0].length;
+	const slices = naturalSlices(analysis, { start: s, end: e }).filter((slice) =>
+		CONTENT.test(text.slice(slice.start, slice.end)),
+	);
+	if (slices.length === 0) return null;
+	s = Math.max(s, slices[0].start);
+	e = Math.min(e, slices[slices.length - 1].end);
+	while (s < e && WHITESPACE.test(text[s])) s += 1;
 	while (e > s && WHITESPACE.test(text[e - 1])) e -= 1;
-	if (s >= e || !CONTENT.test(text.slice(s, e))) return null;
+	if (s >= e || !hasNaturalContent(analysis, { start: s, end: e })) return null;
 	return markerRange ? { start: s, end: e, marker: markerRange } : { start: s, end: e };
 }
 
@@ -171,12 +197,19 @@ function hardCut(text: string, from: number, limit: number): number {
 	return cut;
 }
 
+/** A cut inside a citation range moves to the range's start, or past its end when the range begins at the cursor. */
+function outsideExcluded(analysis: AnalyzableText, cursor: number, cut: number): number {
+	const inside = analysis.excluded.find((range) => range.start < cut && cut < range.end);
+	if (!inside) return cut;
+	return inside.start > cursor + 1 ? inside.start : inside.end;
+}
+
 /**
  * Split one over-long span deterministically: prefer the last soft boundary
  * before the limit, then the last whitespace, then a hard cut that never
- * breaks a surrogate pair or a mark.
+ * breaks a surrogate pair, a mark or a citation range.
  */
-function splitLongSpan(text: string, start: number, end: number): Span[] {
+function splitLongSpan(text: string, start: number, end: number, analysis: AnalyzableText): Span[] {
 	const pieces: Span[] = [];
 	let cursor = start;
 	while (end - cursor > EVIDENCE_QUOTE_MAX_LENGTH) {
@@ -184,11 +217,12 @@ function splitLongSpan(text: string, start: number, end: number): Span[] {
 		let cut = lastBoundaryCut(text, cursor, limit);
 		if (cut === -1) cut = lastWhitespaceCut(text, cursor, limit);
 		if (cut === -1) cut = hardCut(text, cursor, limit);
-		const piece = contentSpan(text, cursor, cut);
+		cut = Math.min(end, outsideExcluded(analysis, cursor, cut));
+		const piece = contentSpan(text, cursor, cut, analysis);
 		if (piece) pieces.push(piece);
 		cursor = cut;
 	}
-	const last = contentSpan(text, cursor, end);
+	const last = contentSpan(text, cursor, end, analysis);
 	if (last) pieces.push(last);
 	return pieces;
 }
@@ -196,16 +230,23 @@ function splitLongSpan(text: string, start: number, end: number): Span[] {
 /**
  * Deterministic segmentation of a raw answer into citable anchors: line by
  * line (CRLF/LF/CR), sentence by sentence (German/English abbreviations,
- * numbers and URLs do not end a sentence), each span trimmed of whitespace
- * and list markers, over-long spans split at safe boundaries, ids assigned in
- * answer order. Two environments holding the same answer produce the same
- * anchors; nothing depends on locale, time, storage or randomness.
+ * numbers and URLs do not end a sentence), each span trimmed of whitespace,
+ * list markers and edge citations, over-long spans split at safe boundaries,
+ * ids assigned in answer order. Citation ranges (`analyzeAnswerRanges`) are
+ * never anchors: a source line yields none, a trailing `([domain](url))` is
+ * cut off, a citation inside a sentence stays inside the raw slice but is
+ * elided from `naturalText`. Two environments holding the same answer produce
+ * the same anchors; nothing depends on locale, time, storage or randomness.
  *
  * Invariants (checked here and in tests): `text === answerBody.slice(start,
  * end)`, every span ≤ `EVIDENCE_QUOTE_MAX_LENGTH`, spans are ordered and do
- * not overlap, and every letter or digit of the answer lies inside a span.
+ * not overlap, every span holds natural-language content, and every letter or
+ * digit of the answer lies inside a span or inside a citation range.
  */
-export function segmentAnswer(answerBody: string): EvidenceAnchor[] {
+export function segmentAnswer(
+	answerBody: string,
+	analysis: AnalyzableText = analyzeAnswerRanges(answerBody),
+): EvidenceAnchor[] {
 	const spans: Span[] = [];
 	let lineStart = 0;
 	const lines: { start: number; end: number }[] = [];
@@ -218,13 +259,13 @@ export function segmentAnswer(answerBody: string): EvidenceAnchor[] {
 	for (const line of lines) {
 		const text = answerBody.slice(line.start, line.end);
 		let from = 0;
-		for (const end of [...sentenceEnds(text), text.length]) {
+		for (const end of [...sentenceEnds(text, line.start, analysis), text.length]) {
 			if (end <= from) continue;
-			const span = contentSpan(answerBody, line.start + from, line.start + end);
+			const span = contentSpan(answerBody, line.start + from, line.start + end, analysis);
 			from = end;
 			if (!span) continue;
 			if (span.end - span.start > EVIDENCE_QUOTE_MAX_LENGTH)
-				spans.push(...splitLongSpan(answerBody, span.start, span.end));
+				spans.push(...splitLongSpan(answerBody, span.start, span.end, analysis));
 			else spans.push(span);
 		}
 	}
@@ -240,26 +281,29 @@ export function segmentAnswer(answerBody: string): EvidenceAnchor[] {
 		start: span.start,
 		end: span.end,
 		text: answerBody.slice(span.start, span.end),
+		naturalText: naturalTextOf(analysis, span),
 	}));
 	assertCoverage(
 		answerBody,
 		anchors,
 		spans.flatMap((span) => (span.marker ? [span.marker] : [])),
+		analysis,
 	);
 	return anchors;
 }
 
 /**
  * Every letter or digit of the answer must be inside an anchor — except the
- * digits/letters of a stripped list marker, which are markup — and anchors
- * must be ordered and non-overlapping.
+ * digits/letters of a stripped list marker and the citation ranges, which are
+ * not answer content — and anchors must be ordered and non-overlapping.
  */
 function assertCoverage(
 	answerBody: string,
 	anchors: EvidenceAnchor[],
 	markers: { start: number; end: number }[],
+	analysis: AnalyzableText,
 ): void {
-	const isMarkup = (i: number) => markers.some((m) => i >= m.start && i < m.end);
+	const isMarkup = (i: number) => markers.some((m) => i >= m.start && i < m.end) || isExcludedOffset(analysis, i);
 	const uncovered = (from: number, to: number) => {
 		for (let i = from; i < to; i += 1) if (CONTENT.test(answerBody[i]) && !isMarkup(i)) return true;
 		return false;

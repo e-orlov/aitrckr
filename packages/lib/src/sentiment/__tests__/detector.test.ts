@@ -27,12 +27,13 @@ const renamed = competitorEntity({
 const all = [brand, huk, das, wgv, ruv, renamed];
 
 describe("UT-SNT-003 deterministic mention detection", () => {
-	it("finds names, aliases and domains case-insensitively with one row per entity", () => {
+	it("finds names and aliases case-insensitively with one row per entity; a domain is a source, not a term", () => {
 		const text =
 			"Die HUK bietet günstigen Schutz; auch huk.de listet Tarife. ARAG und arag.de ebenso. HUK-COBURG erneut.";
 		const found = detectEntityMentions(text, all);
 		expect(found.map((m) => m.key)).toEqual(["brand", "c-huk"]);
-		expect(found[1].matchedTerms).toEqual(["huk-coburg", "huk", "huk.de"]);
+		expect(found[1].matchedTerms).toEqual(["huk-coburg", "huk"]);
+		expect(detectEntityMentions("Tarife auf huk.de und arag.de vergleichen.", all)).toEqual([]);
 	});
 
 	it("respects Unicode token boundaries", () => {

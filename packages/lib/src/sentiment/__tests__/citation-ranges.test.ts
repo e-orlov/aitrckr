@@ -10,6 +10,7 @@ import { segmentAnswer } from "../anchors";
 import { sentimentInputHash, validateSentimentResult } from "../classifier";
 import { brandEntity, competitorEntity, detectEntityMentions } from "../detector";
 import { buildSentimentPrompt } from "../prompt";
+import { analyzableText, analyzeAnswerRanges, naturalTextOf } from "../ranges";
 import type { SentimentCandidate } from "../types";
 
 const brand = brandEntity({ name: "ARAG", aliases: [], website: "https://arag.de/", additionalDomains: ["arag.com"] });
@@ -21,7 +22,13 @@ const keys = (text: string, entities = roster) => detectEntityMentions(text, ent
 const candidatesFor = (...entityKeys: string[]): SentimentCandidate[] =>
 	roster
 		.filter((e) => entityKeys.includes(e.key))
-		.map((e) => ({ key: e.key, entityType: e.entityType, competitorId: e.competitorId, name: e.name, aliases: e.aliases }));
+		.map((e) => ({
+			key: e.key,
+			entityType: e.entityType,
+			competitorId: e.competitorId,
+			name: e.name,
+			aliases: e.aliases,
+		}));
 
 const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -45,7 +52,10 @@ describe("UT-SNT-CIT-001 citation-only occurrences are not mentions", () => {
 
 	it("a natural sentence creates the mention, also beside an inline citation, and the citation adds no second term", () => {
 		expect(keys("Die ARAG bietet Rechtsschutz ohne Wartezeit an.")).toEqual(["brand"]);
-		const inline = detectEntityMentions("Die ARAG bietet Rechtsschutz an ([Quelle](https://arag.de/produkte)).", roster);
+		const inline = detectEntityMentions(
+			"Die ARAG bietet Rechtsschutz an ([Quelle](https://arag.de/produkte)).",
+			roster,
+		);
 		expect(inline.map((m) => m.key)).toEqual(["brand"]);
 		expect(inline[0].matchedTerms).toEqual(["arag"]);
 		const duplicate = detectEntityMentions("ADAC ist eine gute Wahl. ([adac.de](https://www.adac.de/))", roster);
@@ -54,7 +64,8 @@ describe("UT-SNT-CIT-001 citation-only occurrences are not mentions", () => {
 	});
 
 	it("an entity present in prose and in citation metadata counts exactly once", () => {
-		const text = "HUK-COBURG ist günstig. ([huk.de](https://huk.de/x)) Die HUK punktet beim Service. Quelle: https://huk.de";
+		const text =
+			"HUK-COBURG ist günstig. ([huk.de](https://huk.de/x)) Die HUK punktet beim Service. Quelle: https://huk.de";
 		const found = detectEntityMentions(text, roster);
 		expect(found.map((m) => m.key)).toEqual(["c-huk"]);
 		expect(found[0].matchedTerms).toEqual(["huk-coburg", "huk"]);
@@ -68,7 +79,9 @@ describe("UT-SNT-CIT-001 citation-only occurrences are not mentions", () => {
 		expect(keys(crlf)).toEqual(expected);
 		expect(keys(lf, [...roster].reverse())).toEqual(expected);
 		expect(keys(lf, [huk, brand, adac])).toEqual(expected);
-		expect(JSON.stringify(detectEntityMentions(lf, roster))).toBe(JSON.stringify(detectEntityMentions(crlf, [adac, huk, brand])));
+		expect(JSON.stringify(detectEntityMentions(lf, roster))).toBe(
+			JSON.stringify(detectEntityMentions(crlf, [adac, huk, brand])),
+		);
 	});
 });
 
@@ -78,7 +91,11 @@ describe("UT-SNT-CIT-002 citation fragments are never anchors, edges, evidence o
 
 	it("a trailing inline citation and a source list are not anchors; natural anchors stay exact raw slices", () => {
 		const anchors = segmentAnswer(answer);
-		expect(anchors.map((a) => a.text)).toEqual(["Satz eins über die ARAG.", "Satz zwei über die HUK-COBURG.", "Quellen:"]);
+		expect(anchors.map((a) => a.text)).toEqual([
+			"Satz eins über die ARAG.",
+			"Satz zwei über die HUK-COBURG.",
+			"Quellen:",
+		]);
 		for (const anchor of anchors) expect(answer.slice(anchor.start, anchor.end)).toBe(anchor.text);
 		for (const anchor of anchors) expect(anchor.text).not.toMatch(/https?:|\]\(/u);
 	});
@@ -117,7 +134,9 @@ describe("UT-SNT-CIT-002 citation fragments are never anchors, edges, evidence o
 		const b = "Die ARAG ist günstig. ([arag.de](https://arag.de/b?utm_source=other))";
 		const candidates = candidatesFor("brand");
 		expect(sentimentInputHash(a, candidates)).toBe(sentimentInputHash(b, candidates));
-		expect(sha(buildSentimentPrompt({ answerBody: a, candidates }))).toBe(sha(buildSentimentPrompt({ answerBody: b, candidates })));
+		expect(sha(buildSentimentPrompt({ answerBody: a, candidates }))).toBe(
+			sha(buildSentimentPrompt({ answerBody: b, candidates })),
+		);
 		// A change in the natural text still changes both.
 		const c = "Die ARAG ist teuer. ([arag.de](https://arag.de/a?utm_source=openai))";
 		expect(sentimentInputHash(a, candidates)).not.toBe(sentimentInputHash(c, candidates));
@@ -133,7 +152,8 @@ describe("UT-SNT-CIT-002 citation fragments are never anchors, edges, evidence o
 	});
 
 	it("keeps Unicode, CRLF, punctuation and Markdown emphasis from breaking raw offsets around citations", () => {
-		const body = "**Kurz gesagt:** Die ARAG ist gut 👍. ([arag.de](https://arag.de))\r\n- Die HUK-COBURG „punktet“ beim Service. ([huk.de](https://huk.de/))\r\n";
+		const body =
+			"**Kurz gesagt:** Die ARAG ist gut 👍. ([arag.de](https://arag.de))\r\n- Die HUK-COBURG „punktet“ beim Service. ([huk.de](https://huk.de/))\r\n";
 		const anchors = segmentAnswer(body);
 		expect(anchors.map((a) => a.text)).toEqual([
 			"**Kurz gesagt:** Die ARAG ist gut 👍.",
@@ -141,5 +161,86 @@ describe("UT-SNT-CIT-002 citation fragments are never anchors, edges, evidence o
 		]);
 		for (const anchor of anchors) expect(body.slice(anchor.start, anchor.end)).toBe(anchor.text);
 		expect(keys(body)).toEqual(["brand", "c-huk"]);
+	});
+});
+
+describe("analyzeAnswerRanges — the one shared range analysis", () => {
+	const kinds = (body: string) =>
+		analyzeAnswerRanges(body).excluded.map((r) => `${r.kind}:${body.slice(r.start, r.end)}`);
+
+	it("classifies URLs, e-mails, bare domains, Markdown links, reference markers, link definitions and source lines", () => {
+		expect(kinds("Die Tarife stehen auf https://arag.de/x, www.huk.de und info@adac.de.")).toEqual([
+			"url:https://arag.de/x",
+			"url:www.huk.de",
+			"url:info@adac.de",
+		]);
+		expect(kinds("Tarife auf arag.de vergleichen.")).toEqual(["url:arag.de"]);
+		expect(kinds("Die ARAG ([arag.de](https://arag.de)) ist gut.")).toEqual([
+			"markdown-link:([arag.de](https://arag.de))",
+		]);
+		expect(kinds("Mehr dazu[1] und hier[^2].")).toEqual(["citation-marker:[1]", "citation-marker:[^2]"]);
+		expect(kinds("[1]: https://arag.de/quelle")).toEqual(["link-definition:[1]: https://arag.de/quelle"]);
+		expect(kinds("Quelle: [ARAG](https://arag.de)")).toEqual(["source-line:Quelle: [ARAG](https://arag.de)"]);
+		expect(kinds("Siehe https://arag.de/x und www.huk.de.")).toEqual([
+			"source-line:Siehe https://arag.de/x und www.huk.de.",
+		]);
+		expect(kinds("- [ADAC](https://adac.de)")).toEqual(["source-line:- [ADAC](https://adac.de)"]);
+	});
+
+	it("keeps a natural-text link label inside prose but never its destination", () => {
+		const body = "Der Tarif von [ARAG Rechtsschutz](https://arag.de/tarif) kostet wenig.";
+		const analysis = analyzeAnswerRanges(body);
+		expect(analysis.excluded.map((r) => body.slice(r.start, r.end))).toEqual(["[", "](https://arag.de/tarif)"]);
+		expect(analysis.natural.map((r) => body.slice(r.start, r.end))).toEqual([
+			"Der Tarif von ",
+			"ARAG Rechtsschutz",
+			" kostet wenig.",
+		]);
+		expect(keys(body)).toEqual(["brand"]);
+	});
+
+	it("does not mistake abbreviations, dotted names, decimals or a missing space for domains", () => {
+		for (const body of [
+			"z.B. die D.A.S. ist teuer",
+			"Prämie 19.90 Euro",
+			"Am 3.Mai",
+			"gut.Auch e.g. i.e. vs. Dr.Müller",
+		]) {
+			expect(analyzeAnswerRanges(body).excluded).toEqual([]);
+		}
+		expect(
+			keys("Vergleich: D.A.S. gegen ARAG", [
+				brand,
+				competitorEntity({ id: "c-das", name: "D.A.S.", aliases: [], domains: ["das.de"] }),
+			]),
+		).toEqual(["brand", "c-das"]);
+	});
+
+	it("is ordered, non-overlapping, idempotent and independent of roster or line-ending style", () => {
+		const body = "A ([x.de](https://x.de)) B.\r\n- https://y.de\n[1]: https://z.de\nC[1] D.";
+		const analysis = analyzeAnswerRanges(body);
+		let cursor = 0;
+		for (const range of [...analysis.excluded, ...analysis.natural].sort((a, b) => a.start - b.start)) {
+			expect(range.start).toBeGreaterThanOrEqual(cursor);
+			expect(range.end).toBeGreaterThan(range.start);
+			cursor = range.end;
+		}
+		expect(cursor).toBe(body.length);
+		expect(analyzeAnswerRanges(body)).toEqual(analysis);
+		expect(analyzeAnswerRanges(analyzableText(analysis)).excluded).toEqual([]);
+	});
+
+	it("renders natural text without citations and inserts a space only where an elided citation joined two words", () => {
+		const a = analyzeAnswerRanges("Foo([x.de](https://x.de))bar und [Quelle](https://q.de) baz.");
+		expect(naturalTextOf(a, { start: 0, end: a.body.length })).toBe("Foo bar und baz.");
+		const b = analyzeAnswerRanges("Die ARAG ([arag.de](https://arag.de)) ist gut.");
+		expect(naturalTextOf(b, { start: 0, end: b.body.length })).toBe("Die ARAG ist gut.");
+	});
+
+	it("handles an empty body and a body that is only citations", () => {
+		expect(analyzeAnswerRanges("")).toEqual({ body: "", excluded: [], natural: [] });
+		const only = analyzeAnswerRanges("https://arag.de\n[ADAC](https://adac.de)");
+		expect(only.natural.map((r) => only.body.slice(r.start, r.end))).toEqual(["\n"]);
+		expect(segmentAnswer("https://arag.de\n[ADAC](https://adac.de)")).toEqual([]);
 	});
 });

@@ -1,3 +1,4 @@
+import { type AnalyzableText, analyzeAnswerRanges } from "./ranges";
 import { isWordChar, normalizeText } from "./text";
 import { BRAND_ENTITY_KEY, SENTIMENT_DETECTOR_VERSION, sortSentimentEntities } from "./types";
 
@@ -53,13 +54,23 @@ export function containsBoundedTerm(normalizedText: string, normalizedTerm: stri
 	return false;
 }
 
-/** All terms an entity can be recognized by, normalized and deduplicated. */
-export function entityTerms(entity: DetectableEntity): string[] {
+/**
+ * The terms that make an entity *mentioned*: its name and aliases, normalized
+ * and deduplicated. Owned domains are deliberately not among them — a domain
+ * is a source reference, never a statement about the entity.
+ */
+export function mentionTerms(entity: DetectableEntity): string[] {
 	const terms = new Set<string>();
 	for (const raw of [entity.name, ...entity.aliases]) {
 		const term = normalizeText(raw);
 		if (term.length >= MIN_TERM_LENGTH) terms.add(term);
 	}
+	return [...terms];
+}
+
+/** Every term an entity can be recognized by — names, aliases and owned domains — for legacy-name reconciliation. */
+export function entityTerms(entity: DetectableEntity): string[] {
+	const terms = new Set<string>(mentionTerms(entity));
 	for (const raw of entity.domains) {
 		const term = normalizeDomainTerm(raw);
 		if (term.length >= MIN_TERM_LENGTH) terms.add(term);
@@ -68,17 +79,25 @@ export function entityTerms(entity: DetectableEntity): string[] {
 }
 
 /**
- * Deterministic, version `sent-detector-v1`: one mention per entity present in
- * the answer body, regardless of how often it appears. Entities are matched
- * on name, aliases and owned domains after the shared normalization, with
- * token boundaries; the result is in the canonical entity order.
+ * Deterministic, version `sent-detector-v2`: one mention per entity whose name
+ * or alias occurs in the natural-language text of the answer, regardless of
+ * how often it appears. URLs, link destinations, standalone links, source
+ * lines and reference markers are not scanned (`analyzeAnswerRanges`), so a
+ * citation domain or a name inside a path never counts; the result is in the
+ * canonical entity order.
  */
-export function detectEntityMentions(answerBody: string, entities: DetectableEntity[]): DetectedMention[] {
-	const text = normalizeText(answerBody);
-	if (text.length === 0) return [];
+export function detectEntityMentions(
+	answerBody: string,
+	entities: DetectableEntity[],
+	analysis: AnalyzableText = analyzeAnswerRanges(answerBody),
+): DetectedMention[] {
+	const naturalTexts = analysis.natural
+		.map((range) => normalizeText(answerBody.slice(range.start, range.end)))
+		.filter((text) => text.length > 0);
+	if (naturalTexts.length === 0) return [];
 	const mentions: DetectedMention[] = [];
 	for (const entity of entities) {
-		const matched = entityTerms(entity).filter((term) => containsBoundedTerm(text, term));
+		const matched = mentionTerms(entity).filter((term) => naturalTexts.some((text) => containsBoundedTerm(text, term)));
 		if (matched.length === 0) continue;
 		mentions.push({
 			key: entity.key,

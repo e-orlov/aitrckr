@@ -7,6 +7,7 @@ import { type DiagnosticReason, type DiagnosticStage, diagnostic, safeGeneration
 import { type PaidResponseEnvelope, SentimentValidationError } from "./errors-validation";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
+import { type AnalyzableText, analyzableText, analyzeAnswerRanges } from "./ranges";
 import { normalizeText } from "./text";
 import {
 	type EvidencePolarity,
@@ -68,15 +69,21 @@ export interface SentimentClassification {
 export const SENTIMENT_MAX_OUTPUT_TOKENS = API_PROVIDER_MAX_OUTPUT_TOKENS.openrouter;
 
 /**
- * The exact classifier input in canonical form: the normalized answer body
- * and every candidate's identity (key, type, name, aliases) in a stable
- * order. A stored analysis is current only while this hash still matches,
- * so a roster, name or alias change makes the run eligible again instead of
- * being hidden behind an older completed analysis.
+ * The exact classifier input in canonical form: the normalized
+ * natural-language text of the answer (citation ranges elided, so a changed
+ * link destination is not a changed input) and every candidate's identity
+ * (key, type, name, aliases) in a stable order. A stored analysis is current
+ * only while this hash still matches, so a roster, name or alias change makes
+ * the run eligible again instead of being hidden behind an older completed
+ * analysis.
  */
-export function sentimentInputHash(answerBody: string, candidates: SentimentCandidate[]): string {
+export function sentimentInputHash(
+	answerBody: string,
+	candidates: SentimentCandidate[],
+	analysis: AnalyzableText = analyzeAnswerRanges(answerBody),
+): string {
 	const canonical = {
-		body: normalizeText(answerBody),
+		body: normalizeText(analyzableText(analysis)),
 		candidates: [...candidates]
 			.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 			.map((c) => ({
@@ -226,9 +233,16 @@ function validateAspects(
  */
 export function validateSentimentResult(
 	raw: unknown,
-	args: { answerBody: string; candidates: SentimentCandidate[]; anchors?: readonly EvidenceAnchor[] },
+	args: {
+		answerBody: string;
+		candidates: SentimentCandidate[];
+		anchors?: readonly EvidenceAnchor[];
+		analysis?: AnalyzableText;
+	},
 ): ValidatedEntitySentiment[] {
-	const anchors = anchorMap([...(args.anchors ?? segmentAnswer(args.answerBody))]);
+	const anchors = anchorMap([
+		...(args.anchors ?? segmentAnswer(args.answerBody, args.analysis ?? analyzeAnswerRanges(args.answerBody))),
+	]);
 	const parsed = sentimentClassificationResultSchema.safeParse(raw);
 	if (!parsed.success) {
 		fail("schema", parsed.error.issues[0]?.message ?? "invalid classifier output", { stage: "provider-schema" });
@@ -279,10 +293,10 @@ export interface SentimentClassifierDeps {
 }
 
 /** Anchors of the answer, computed before any request; an answer that cannot be represented is refused without spending. */
-function anchorsBeforeRequest(answerBody: string): EvidenceAnchor[] {
+function anchorsBeforeRequest(answerBody: string, analysis: AnalyzableText): EvidenceAnchor[] {
 	let anchors: EvidenceAnchor[];
 	try {
-		anchors = segmentAnswer(answerBody);
+		anchors = segmentAnswer(answerBody, analysis);
 	} catch (error) {
 		if (error instanceof SentimentValidationError) throw error.beforeRequest();
 		throw error;
@@ -295,6 +309,16 @@ function anchorsBeforeRequest(answerBody: string): EvidenceAnchor[] {
 		).beforeRequest();
 	}
 	return anchors;
+}
+
+/** The citation/natural range analysis, computed before any request; a body the analysis cannot represent is refused without spending. */
+function rangesBeforeRequest(answerBody: string): AnalyzableText {
+	try {
+		return analyzeAnswerRanges(answerBody);
+	} catch (error) {
+		if (error instanceof SentimentValidationError) throw error.beforeRequest();
+		throw error;
+	}
 }
 
 type ResearchResult = Awaited<ReturnType<NonNullable<Provider["runStructuredResearch"]>>>;
@@ -355,7 +379,8 @@ export async function classifySentiment(
 			diagnostic("entity", "no-candidates"),
 		).beforeRequest();
 	}
-	const anchors = anchorsBeforeRequest(args.answerBody);
+	const analysis = rangesBeforeRequest(args.answerBody);
+	const anchors = anchorsBeforeRequest(args.answerBody, analysis);
 	const provider = deps.resolveProvider ? deps.resolveProvider() : resolveSentimentProvider();
 	const result = await requestClassification(
 		provider,
@@ -380,13 +405,13 @@ export async function classifySentiment(
 			);
 		}
 		return {
-			entities: validateSentimentResult(result.object, { ...args, anchors }),
+			entities: validateSentimentResult(result.object, { ...args, anchors, analysis }),
 			provider: provider.id,
 			model: result.modelVersion ?? null,
 			webSearch: true,
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
-			inputHash: sentimentInputHash(args.answerBody, args.candidates),
+			inputHash: sentimentInputHash(args.answerBody, args.candidates, analysis),
 			usage: result.usage,
 			request: result.request,
 			generationId: envelope.generationId,

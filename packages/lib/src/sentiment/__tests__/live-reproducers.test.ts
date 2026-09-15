@@ -15,14 +15,25 @@ import { type SentimentCandidate, sentimentClassificationResultSchemaFor } from 
 const brandOnly: SentimentCandidate[] = [
 	{ key: "brand", entityType: "brand", competitorId: null, name: "ARAG", aliases: [] },
 ];
-const brandAnswer =
-	"ARAG bietet einen Mietrechtsschutz ohne Wartezeit an. Die Prämie ist vergleichsweise günstig.";
+const brandAnswer = "ARAG bietet einen Mietrechtsschutz ohne Wartezeit an. Die Prämie ist vergleichsweise günstig.";
 
 /** Live shape 3: three candidates; the conflict arose in the competitor's overall evidence list. */
 const three: SentimentCandidate[] = [
 	{ key: "brand", entityType: "brand", competitorId: null, name: "ARAG", aliases: [] },
-	{ key: "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c", entityType: "competitor", competitorId: "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c", name: "WGV", aliases: [] },
-	{ key: "c8c99a71-eaa9-46a5-9e48-ede16f090241", entityType: "competitor", competitorId: "c8c99a71-eaa9-46a5-9e48-ede16f090241", name: "HUK-COBURG", aliases: ["HUK"] },
+	{
+		key: "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c",
+		entityType: "competitor",
+		competitorId: "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c",
+		name: "WGV",
+		aliases: [],
+	},
+	{
+		key: "c8c99a71-eaa9-46a5-9e48-ede16f090241",
+		entityType: "competitor",
+		competitorId: "c8c99a71-eaa9-46a5-9e48-ede16f090241",
+		name: "HUK-COBURG",
+		aliases: ["HUK"],
+	},
 ];
 const HUK = "c8c99a71-eaa9-46a5-9e48-ede16f090241";
 const WGV = "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c";
@@ -46,7 +57,11 @@ afterEach(() => {
 
 describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name instead of the opaque key", () => {
 	it("reproduces the live rejection: key ARAG for candidate brand is unknown-entity, never repaired", () => {
-		const result = { entities: [entity("ARAG", { score: 70, category: "positive", evidence: [{ anchorId: "s0001", polarity: "positive" }] })] };
+		const result = {
+			entities: [
+				entity("ARAG", { score: 70, category: "positive", evidence: [{ anchorId: "s0001", polarity: "positive" }] }),
+			],
+		};
 		expect(() => validateSentimentResult(result, { answerBody: brandAnswer, candidates: brandOnly })).toThrow(
 			expect.objectContaining({
 				code: "unknown-entity",
@@ -61,7 +76,12 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 			properties: { entities: { items: { properties: { key: Record<string, unknown> } } } };
 		};
 		expect(json.properties.entities.items.properties.key).toEqual({ type: "string", enum: ["brand"] });
-		const multi = z.toJSONSchema(sentimentClassificationResultSchemaFor(ids, three.map((c) => c.key))) as typeof json;
+		const multi = z.toJSONSchema(
+			sentimentClassificationResultSchemaFor(
+				ids,
+				three.map((c) => c.key),
+			),
+		) as typeof json;
 		expect(multi.properties.entities.items.properties.key.enum).toEqual(three.map((c) => c.key));
 	});
 
@@ -79,7 +99,13 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 					{
 						message: {
 							content: JSON.stringify({
-								entities: [entity("brand", { score: 70, category: "positive", evidence: [{ anchorId: "s0001", polarity: "positive" }] })],
+								entities: [
+									entity("brand", {
+										score: 70,
+										category: "positive",
+										evidence: [{ anchorId: "s0001", polarity: "positive" }],
+									}),
+								],
 							}),
 						},
 					},
@@ -92,7 +118,13 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 		const result = await classifySentiment({ answerBody: brandAnswer, candidates: brandOnly });
 
 		const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string) as {
-			response_format: { type: string; json_schema: { strict: boolean; schema: { properties: { entities: { items: { properties: { key: { enum?: string[] } } } } } } } };
+			response_format: {
+				type: string;
+				json_schema: {
+					strict: boolean;
+					schema: { properties: { entities: { items: { properties: { key: { enum?: string[] } } } } } };
+				};
+			};
 			provider?: { require_parameters?: boolean };
 		};
 		expect(body.response_format.type).toBe("json_schema");
@@ -131,7 +163,13 @@ describe("UT-SNT-CIT-003 live failure 3 — evidence-anchor-polarity-conflict is
 		expect(() => validate({ entities })).toThrow(
 			expect.objectContaining({
 				code: "evidence-anchor-polarity-conflict",
-				diagnostic: expect.objectContaining({ stage: "evidence", entityKey: HUK, aspectKey: null, evidenceIndex: 1, anchorId: "s0004" }),
+				diagnostic: expect.objectContaining({
+					stage: "evidence",
+					entityKey: HUK,
+					aspectKey: null,
+					evidenceIndex: 1,
+					anchorId: "s0004",
+				}),
 			}),
 		);
 	});
@@ -146,12 +184,27 @@ describe("UT-SNT-CIT-003 live failure 3 — evidence-anchor-polarity-conflict is
 				{ anchorId: "s0003", polarity: "negative" },
 			],
 			aspects: [
-				{ key: "price", score: 75, category: "positive", confidence: 0.8, evidence: [{ anchorId: "s0003", polarity: "positive" }] },
-				{ key: "service", score: 25, category: "negative", confidence: 0.8, evidence: [{ anchorId: "s0003", polarity: "negative" }] },
+				{
+					key: "price",
+					score: 75,
+					category: "positive",
+					confidence: 0.8,
+					evidence: [{ anchorId: "s0003", polarity: "positive" }],
+				},
+				{
+					key: "service",
+					score: 25,
+					category: "negative",
+					confidence: 0.8,
+					evidence: [{ anchorId: "s0003", polarity: "negative" }],
+				},
 			],
 		});
 		const validated = validate({ entities });
-		expect(validated[2].aspects.map((a) => `${a.key}:${a.evidence[0].polarity}`)).toEqual(["price:positive", "service:negative"]);
+		expect(validated[2].aspects.map((a) => `${a.key}:${a.evidence[0].polarity}`)).toEqual([
+			"price:positive",
+			"service:negative",
+		]);
 	});
 
 	it("a Mixed target with one positive and one negative citation on the same anchor passes", () => {
@@ -185,7 +238,12 @@ describe("UT-SNT-CIT-003 live failure 3 — evidence-anchor-polarity-conflict is
 		expect(() => validate({ entities })).toThrow(
 			expect.objectContaining({
 				code: "evidence-anchor-polarity-conflict",
-				diagnostic: expect.objectContaining({ stage: "evidence", entityKey: HUK, aspectKey: "price", anchorId: "s0003" }),
+				diagnostic: expect.objectContaining({
+					stage: "evidence",
+					entityKey: HUK,
+					aspectKey: "price",
+					anchorId: "s0003",
+				}),
 			}),
 		);
 	});
@@ -201,7 +259,9 @@ describe("UT-SNT-CIT-003 live failure 3 — evidence-anchor-polarity-conflict is
 			],
 		});
 		const validated = validate({ entities });
-		expect(validated[2].evidence).toEqual([expect.objectContaining({ polarity: "positive", start: expect.any(Number) })]);
+		expect(validated[2].evidence).toEqual([
+			expect.objectContaining({ polarity: "positive", start: expect.any(Number) }),
+		]);
 		expect(validated[2].evidence).toHaveLength(1);
 	});
 
