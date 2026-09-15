@@ -31,7 +31,7 @@ import {
 import type { DetectableEntity } from "../detector";
 import type { SentimentJobDeps } from "../job";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
-import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION } from "../types";
+import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_DETECTOR_VERSION, SENTIMENT_TAXONOMY_VERSION } from "../types";
 
 const FROZEN = "bf1347c3-7161-457c-91d6-0173d601659e";
 const PROMPT = "e32b0973-3b13-46c2-84dc-f29a6e5c41a2";
@@ -72,6 +72,7 @@ const contract: SentimentCanaryContract = {
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+	detectorVersion: SENTIMENT_DETECTOR_VERSION,
 	provider: "openrouter",
 	model: "openai/gpt-5-mini",
 };
@@ -297,6 +298,7 @@ describe("canary contract", () => {
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 			evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+			detectorVersion: SENTIMENT_DETECTOR_VERSION,
 			provider: "openrouter",
 			model: "openai/gpt-5-mini",
 		});
@@ -406,6 +408,7 @@ describe("canary preflight refuses before any request", () => {
 					classifierVersion: "sent-classifier-v0",
 					taxonomyVersion: "sent-aspects-v0",
 					evidenceVersion: "sent-evidence-v0",
+					detectorVersion: "sent-detector-v1",
 					provider: "openai-api",
 					model: "openai/gpt-5.6-luna",
 				},
@@ -414,9 +417,15 @@ describe("canary preflight refuses before any request", () => {
 			"contract-classifier-version",
 			"contract-taxonomy-version",
 			"contract-evidence-version",
+			"contract-detector-version",
 			"contract-provider",
 			"contract-model",
 		]);
+	});
+
+	it("a contract authored before the detector version existed is refused at parse time, before any store or provider dependency", () => {
+		const { detectorVersion: _omitted, ...legacy } = contract;
+		expect(() => parseSentimentCanaryContract(legacy)).toThrow(expect.objectContaining({ code: "invalid-contract" }));
 	});
 
 	it("input hash or prompt hash frozen against another candidate set or prompt template", async () => {

@@ -29,6 +29,7 @@ import {
 } from "./store";
 import {
 	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_MODEL,
 	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_TAXONOMY_VERSION,
@@ -82,6 +83,8 @@ export const sentimentCanaryContractSchema = z.strictObject({
 	taxonomyVersion: z.string().min(1),
 	/** The provider-facing evidence contract (anchored segments); frozen like the other versions. */
 	evidenceVersion: z.string().min(1),
+	/** The mention detector that produced the frozen entity set; a contract from an older detector is refused at parse time. */
+	detectorVersion: z.string().min(1),
 	provider: z.string().min(1),
 	model: z.string().min(1),
 });
@@ -94,6 +97,7 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"contract-classifier-version",
 	"contract-taxonomy-version",
 	"contract-evidence-version",
+	"contract-detector-version",
 	"contract-provider",
 	"contract-model",
 	"run-not-found",
@@ -310,6 +314,7 @@ export interface SentimentCanaryRunDescription {
 	classifierVersion: string;
 	taxonomyVersion: string;
 	evidenceVersion: string;
+	detectorVersion: string;
 	provider: string;
 	model: string;
 }
@@ -362,6 +367,7 @@ export async function inspectSentimentCanaryRun(
 		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 		taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 		evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+		detectorVersion: SENTIMENT_DETECTOR_VERSION,
 		provider: SENTIMENT_PROVIDER_ID,
 		model: SENTIMENT_MODEL,
 	};
@@ -380,6 +386,7 @@ function contractVersionReasons(contract: SentimentCanaryContract): SentimentCan
 		reasons.push({ code: "contract-classifier-version" });
 	if (contract.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION) reasons.push({ code: "contract-taxonomy-version" });
 	if (contract.evidenceVersion !== SENTIMENT_EVIDENCE_VERSION) reasons.push({ code: "contract-evidence-version" });
+	if (contract.detectorVersion !== SENTIMENT_DETECTOR_VERSION) reasons.push({ code: "contract-detector-version" });
 	if (contract.provider !== SENTIMENT_PROVIDER_ID) reasons.push({ code: "contract-provider" });
 	if (contract.model !== SENTIMENT_MODEL) reasons.push({ code: "contract-model" });
 	return reasons;

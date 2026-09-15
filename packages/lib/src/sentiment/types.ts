@@ -4,7 +4,7 @@ import { z } from "zod";
  * Bump to make every stored run eligible for one deterministic re-detection
  * (matching rules, normalization or boundary changes).
  */
-export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v1";
+export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v2";
 
 /**
  * Bump to invalidate every stored analysis and make every mentioned run
@@ -12,7 +12,7 @@ export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v1";
  * change). Rows with another version stay auditable and are ignored at read
  * time.
  */
-export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v2";
+export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v3";
 
 /**
  * Versioned separately from the classifier: a later taxonomy must never

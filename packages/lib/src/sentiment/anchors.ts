@@ -16,7 +16,7 @@ import { EVIDENCE_QUOTE_MAX_LENGTH } from "./types";
  * reads) and the model cites segment ids, never text. Frozen into the canary
  * contract.
  */
-export const SENTIMENT_EVIDENCE_VERSION = "sent-evidence-v1";
+export const SENTIMENT_EVIDENCE_VERSION = "sent-evidence-v2";
 
 /** Hard cap on anchors per answer; a longer answer is refused before any call. */
 export const ANCHOR_MAX_COUNT = 400;

@@ -52,6 +52,8 @@ export interface MentionBackfillCounts {
 	withoutMentions: number;
 	/** Runs whose current-version receipt and mention rows already matched the detector. */
 	alreadyCurrent: number;
+	/** Runs that carry only receipts of an older detector version (their projection is stale and gets rewritten). */
+	staleDetectorVersion: number;
 	/** Runs whose receipt and mention rows were (or would be) written or refreshed. */
 	written: number;
 	/** Mention rows detected in total. */
@@ -168,13 +170,17 @@ function reconcileLegacyNames(run: ScannedRun, entities: DetectableEntity[], sta
  * projection `loadMentions` serves. Superseded rows are history and do not
  * count either way.
  */
-async function detectionIsCurrent(runId: string, status: string, detectedKeys: string[]): Promise<boolean> {
-	const receipt = await db.query.sentimentDetections.findFirst({
-		where: and(
-			eq(sentimentDetections.promptRunId, runId),
-			eq(sentimentDetections.detectorVersion, SENTIMENT_DETECTOR_VERSION),
-		),
+async function detectionIsCurrent(
+	runId: string,
+	status: string,
+	detectedKeys: string[],
+	counts: MentionBackfillCounts,
+): Promise<boolean> {
+	const receipts = await db.query.sentimentDetections.findMany({
+		where: eq(sentimentDetections.promptRunId, runId),
 	});
+	const receipt = receipts.find((row) => row.detectorVersion === SENTIMENT_DETECTOR_VERSION);
+	if (!receipt && receipts.length > 0) counts.staleDetectorVersion++;
 	if (!receipt || receipt.status !== status || receipt.mentionCount !== detectedKeys.length) return false;
 	const active = await db
 		.select({ key: promptRunEntityMentions.entityKey, version: promptRunEntityMentions.detectorVersion })
@@ -203,6 +209,7 @@ async function processMentionRun(run: ScannedRun, state: MentionScanState, apply
 			run.id,
 			result.status,
 			detected.map((m) => m.key),
+			counts,
 		)
 	) {
 		counts.alreadyCurrent++;
@@ -232,6 +239,7 @@ export async function runMentionBackfill(args: {
 		withMentions: 0,
 		withoutMentions: 0,
 		alreadyCurrent: 0,
+		staleDetectorVersion: 0,
 		written: 0,
 		mentionRows: 0,
 		legacyMatched: 0,
@@ -262,6 +270,8 @@ export interface SentimentEnqueueInventory {
 	eligibleStale: number;
 	/** Runs without a current-version detection receipt (mention backfill has not covered them). */
 	notScanned: number;
+	/** Of `notScanned`: runs that carry a receipt of an older detector version only — the mention reprojection must run first. */
+	staleDetector: number;
 	/** Runs whose current-version receipt says no entity was found or no text was extractable (no call needed). */
 	noMentions: number;
 	/** Runs with an analysis of another classifier version only (stale, auditable). */
@@ -295,18 +305,15 @@ async function classifyRunEligibility(
 	entitiesByBrand: Map<string, DetectableEntity[]>,
 ): Promise<RunEligibility> {
 	counts.scanned++;
-	const receipt = await db.query.sentimentDetections.findFirst({
-		where: and(
-			eq(sentimentDetections.promptRunId, run.id),
-			eq(sentimentDetections.detectorVersion, SENTIMENT_DETECTOR_VERSION),
-		),
-	});
+	const receipts = await db.query.sentimentDetections.findMany({ where: eq(sentimentDetections.promptRunId, run.id) });
+	const receipt = receipts.find((row) => row.detectorVersion === SENTIMENT_DETECTOR_VERSION);
 	const analyses = await db.query.sentimentAnalyses.findMany({ where: eq(sentimentAnalyses.promptRunId, run.id) });
 	const current = analyses.find((row) => row.classifierVersion === SENTIMENT_CLASSIFIER_VERSION);
 	if (!current && analyses.length > 0) counts.staleVersionOnly++;
 
 	if (!receipt) {
 		counts.notScanned++;
+		if (receipts.length > 0) counts.staleDetector++;
 		return "not-scanned";
 	}
 	const body = extractAnswerBody(run.rawOutput, run.provider, run.model);
@@ -372,6 +379,7 @@ export async function runSentimentEnqueue(args: {
 		terminalFailed: 0,
 		eligibleStale: 0,
 		notScanned: 0,
+		staleDetector: 0,
 		noMentions: 0,
 		staleVersionOnly: 0,
 		attempted: 0,

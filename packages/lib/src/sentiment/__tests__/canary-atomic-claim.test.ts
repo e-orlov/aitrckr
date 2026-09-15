@@ -25,7 +25,12 @@ import {
 	type StoredMention,
 	type StoredRunForSentiment,
 } from "../store";
-import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION, type SentimentAnalysisStatus } from "../types";
+import {
+	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
+	SENTIMENT_TAXONOMY_VERSION,
+	type SentimentAnalysisStatus,
+} from "../types";
 
 const RUN = "bf1347c3-7161-457c-91d6-0173d601659e";
 const WGV = "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c";
@@ -60,6 +65,7 @@ const contract = parseSentimentCanaryContract({
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+	detectorVersion: SENTIMENT_DETECTOR_VERSION,
 	provider: "openrouter",
 	model: "openai/gpt-5-mini",
 });

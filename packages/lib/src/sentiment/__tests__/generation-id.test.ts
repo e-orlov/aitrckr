@@ -22,6 +22,7 @@ import { runSentimentJob, type SentimentJobDeps } from "../job";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
 import {
 	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_MODEL,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
@@ -141,6 +142,7 @@ const contract: SentimentCanaryContract = {
 	classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+	detectorVersion: SENTIMENT_DETECTOR_VERSION,
 	provider: "openrouter",
 	model: SENTIMENT_MODEL,
 };

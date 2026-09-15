@@ -32,6 +32,7 @@ import {
 	EVIDENCE_MAX_ITEMS,
 	SENTIMENT_ASPECT_KEYS,
 	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 } from "../types";
@@ -341,6 +342,7 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 			evidenceVersion: SENTIMENT_EVIDENCE_VERSION,
+			detectorVersion: SENTIMENT_DETECTOR_VERSION,
 			provider: "openrouter",
 			model: "openai/gpt-5-mini",
 		};
