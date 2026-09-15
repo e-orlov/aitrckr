@@ -106,11 +106,14 @@ test.describe("Local features", () => {
     await page.waitForURL(/\/app$/, { timeout: 30_000 });
   });
 
-  test("stock Elmo branding is used", async ({ page }) => {
+  test("stock branding is used", async ({ page }) => {
     await page.goto(`${brandUrl()}`);
 
-    // The Elmo wordmark, not a whitelabel icon + name.
-    await expect(page.getByText("elmo", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+    // The wordmark, not a whitelabel icon + name, and it leads home.
+    const mark = page.locator('a[data-sidebar="menu-button"]', { hasText: "aitrckr" }).first();
+    await expect(mark).toBeVisible({ timeout: 30_000 });
+    await expect(mark).toHaveAttribute("href", "/app");
+    await expect(mark).not.toContainText("elmo");
     // Self-hosters get the version and project links a whitelabel build hides.
     await expect(page.locator('a[href="https://github.com/elmohq/elmo"]')).toBeVisible();
   });
