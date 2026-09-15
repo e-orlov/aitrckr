@@ -95,6 +95,8 @@ const BARE_DOMAIN_TLDS = new Set([
 	"ai",
 	"edu",
 	"gov",
+	"test",
+	"example",
 ]);
 
 /**
@@ -173,12 +175,16 @@ function isWordChar(char: string | undefined): boolean {
 	return char !== undefined && /[\p{L}\p{N}]/u.test(char);
 }
 
+/**
+ * A link label shaped like a host or URL. Inside a Markdown link the TLD
+ * allowlist is not needed: a whitespace-free `name.tld[/…]` label is a
+ * source reference whatever its suffix.
+ */
 function isDomainLike(text: string): boolean {
 	const trimmed = text.trim();
 	if (trimmed.length === 0) return false;
 	if (/^(?:https?:\/\/|www\.)/iu.test(trimmed)) return true;
-	const match = new RegExp(`^${BARE_DOMAIN.source}$`, "iu").exec(trimmed);
-	return match !== null && BARE_DOMAIN_TLDS.has(match[1].toLowerCase());
+	return new RegExp(`^${BARE_DOMAIN.source}$`, "iu").test(trimmed);
 }
 
 /** A link label that says nothing about an entity: empty, a URL/domain, a reference marker or a source label. */

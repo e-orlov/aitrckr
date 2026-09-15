@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { Provider } from "../../providers/types";
+import { segmentAnswer } from "../anchors";
 import { classifySentiment, validateSentimentResult } from "../classifier";
 import { competitorEntity, detectEntityMentions } from "../detector";
-import { GOLDEN_BRAND, GOLDEN_CASES } from "../golden/corpus";
+import {
+	GOLDEN_BELTRA,
+	GOLDEN_BELTRA_UUID,
+	GOLDEN_BRAND,
+	GOLDEN_CASES,
+	GOLDEN_CORVEX,
+	GOLDEN_DUNHILL,
+} from "../golden/corpus";
 import { GOLDEN_GATES, goldenGatesPass, scoreGoldenCase, summarizeGolden } from "../golden/evaluate";
 import { goldenReference } from "../golden/reference";
+import { sentimentClassificationResultSchemaFor } from "../types";
 
 const brandEntityForGolden = {
 	key: GOLDEN_BRAND.key,
@@ -49,6 +58,48 @@ describe("GOLD-SNT-001 synthetic corpus", () => {
 		expect(() => validateSentimentResult(first.reference, args(first))).toThrow(
 			expect.objectContaining({ code: "schema" }),
 		);
+	});
+
+	it("GOLD-SNT-CIT-001: against the whole roster the detector finds exactly the candidates — never an entity that occurs only as a URL, link destination or source entry", () => {
+		const roster = [
+			brandEntityForGolden,
+			...[GOLDEN_BELTRA, GOLDEN_CORVEX, GOLDEN_DUNHILL, GOLDEN_BELTRA_UUID].map((c) =>
+				competitorEntity({
+					id: c.key,
+					name: c.name,
+					aliases: c.aliases,
+					domains: [`${c.name.split(" ")[0].toLowerCase()}.example`],
+				}),
+			),
+		];
+		for (const goldenCase of GOLDEN_CASES.filter((c) => c.id >= "g43")) {
+			const wanted = goldenCase.candidates.map((c) => c.key);
+			const found = detectEntityMentions(goldenCase.answer, roster)
+				.map((m) => m.key)
+				// Beltra is on the roster twice (two keys, one name) so both keys fire on prose mentions of it.
+				.filter((key) => key !== GOLDEN_BELTRA.key || wanted.includes(GOLDEN_BELTRA.key))
+				.filter((key) => key !== GOLDEN_BELTRA_UUID.key || wanted.includes(GOLDEN_BELTRA_UUID.key));
+			expect(found.sort(), goldenCase.id).toEqual([...wanted].sort());
+		}
+	});
+
+	it("GOLD-SNT-CIT-001: the request schema of every case accepts only the exact candidate keys", () => {
+		for (const goldenCase of GOLDEN_CASES) {
+			const ids = segmentAnswer(goldenCase.answer).map((anchor) => anchor.id);
+			const schema = sentimentClassificationResultSchemaFor(
+				ids,
+				goldenCase.candidates.map((c) => c.key),
+			);
+			const reference = goldenReference(goldenCase);
+			expect(schema.safeParse(reference).success, goldenCase.id).toBe(true);
+			const byName = {
+				entities: reference.entities.map((entity) => ({
+					...entity,
+					key: goldenCase.candidates.find((c) => c.key === entity.key)?.name ?? entity.key,
+				})),
+			};
+			expect(schema.safeParse(byName).success, goldenCase.id).toBe(false);
+		}
 	});
 
 	it("the deterministic detector finds every candidate entity in every answer", () => {

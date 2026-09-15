@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { and, asc, eq, gt, isNull, or } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import { promptRunEntityMentions, promptRuns, sentimentAnalyses, sentimentDetections } from "../db/schema";
 import { sentimentInputHash } from "./classifier";
@@ -18,7 +18,12 @@ import {
 import { extractAnswerBody, normalizeText } from "./text";
 import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_DETECTOR_VERSION } from "./types";
 
-/** Resume position in the (created_at, id) keyset scan over prompt_runs. */
+/**
+ * Resume position in the (created_at, id) keyset scan over prompt_runs.
+ * `createdAt` is the timestamp exactly as Postgres renders it (microseconds
+ * kept): a JavaScript `Date` would round it to milliseconds and make the next
+ * page re-read the row the cursor points at.
+ */
 export interface RunCursor {
 	createdAt: string;
 	id: string;
@@ -78,10 +83,7 @@ async function scanRuns(cursor: RunCursor | null, brandId: string | undefined, l
 	const after =
 		cursor === null
 			? undefined
-			: or(
-					gt(promptRuns.createdAt, new Date(cursor.createdAt)),
-					and(eq(promptRuns.createdAt, new Date(cursor.createdAt)), gt(promptRuns.id, cursor.id)),
-				);
+			: sql`(${promptRuns.createdAt}, ${promptRuns.id}) > (${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`;
 	return db
 		.select({
 			id: promptRuns.id,
@@ -90,7 +92,7 @@ async function scanRuns(cursor: RunCursor | null, brandId: string | undefined, l
 			model: promptRuns.model,
 			rawOutput: promptRuns.rawOutput,
 			competitorsMentioned: promptRuns.competitorsMentioned,
-			createdAt: promptRuns.createdAt,
+			createdAt: sql<string>`${promptRuns.createdAt}::text`,
 		})
 		.from(promptRuns)
 		.where(and(after, brandId ? eq(promptRuns.brandId, brandId) : undefined))
@@ -124,7 +126,7 @@ async function scanAllRuns(
 		pages++;
 		for (const run of rows) {
 			if (!(await onRun(run))) return { cursor, partial: true };
-			cursor = { createdAt: run.createdAt.toISOString(), id: run.id };
+			cursor = { createdAt: run.createdAt, id: run.id };
 		}
 		if (rows.length < pageSize) return { cursor, partial: false };
 	}
