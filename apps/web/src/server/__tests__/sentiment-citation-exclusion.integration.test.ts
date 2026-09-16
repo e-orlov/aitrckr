@@ -56,6 +56,7 @@ const RUN_LIVE_KEY = "5e970007-0000-4000-8000-000000000206";
 const RUN_LIVE_BYPASS = "5e970007-0000-4000-8000-000000000207";
 const RUN_LIVE_POLARITY = "5e970007-0000-4000-8000-000000000208";
 const RUN_CANARY = "5e970007-0000-4000-8000-000000000209";
+const RUN_LIVE_BYPASS_POLARITY = "5e970007-0000-4000-8000-00000000020a";
 const OLD_DETECTOR = "sent-detector-v1";
 const OLD_CLASSIFIER = "sent-classifier-v2";
 
@@ -134,6 +135,9 @@ function fakeProvider(
 		},
 	} as unknown as Provider;
 }
+
+/** The anchor of each candidate's own sentence in PROSE_ANSWER: s0001 Alpha, s0002 Beta, s0003 the brand. */
+const ownAnchor = (key: string) => (key === ALPHA ? "s0001" : key === BETA ? "s0002" : "s0003");
 
 const goodEntity = (key: string, anchorId: string) => ({
 	key,
@@ -227,6 +231,7 @@ beforeAll(async () => {
 	await insertRun(RUN_LIVE_KEY, PROSE_ANSWER, 40);
 	await insertRun(RUN_LIVE_BYPASS, PROSE_ANSWER, 30);
 	await insertRun(RUN_LIVE_POLARITY, PROSE_ANSWER, 20);
+	await insertRun(RUN_LIVE_BYPASS_POLARITY, PROSE_ANSWER, 15);
 	await insertRun(RUN_CANARY, PROSE_ANSWER, 10);
 	await insertLegacyProjection(RUN_REFERENCED, true);
 	await insertLegacyProjection(RUN_UNREFERENCED, false);
@@ -250,8 +255,8 @@ describe("IT-SNT-CIT-001 mention reprojection under detector v2", () => {
 		expect(overview.entities.find((e) => e.key === BETA)?.mentions ?? 0).toBe(0);
 		const inventory = await runSentimentEnqueue({ enqueue: false, brandId: BRAND });
 		expect(inventory.counts).toMatchObject({
-			scanned: 9,
-			notScanned: 9,
+			scanned: 10,
+			notScanned: 10,
 			staleDetector: 2,
 			staleVersionOnly: 1,
 			eligible: 0,
@@ -264,7 +269,7 @@ describe("IT-SNT-CIT-001 mention reprojection under detector v2", () => {
 			[BRAND, ALPHA],
 		);
 		const dry = await runMentionBackfill({ apply: false, brandId: BRAND });
-		expect(dry.counts).toMatchObject({ scanned: 9, staleDetectorVersion: 2, written: 9, alreadyCurrent: 0 });
+		expect(dry.counts).toMatchObject({ scanned: 10, staleDetectorVersion: 2, written: 10, alreadyCurrent: 0 });
 		expect(
 			await count("sentiment_detections", "brand_id = $1 AND detector_version = $2", [
 				BRAND,
@@ -273,7 +278,7 @@ describe("IT-SNT-CIT-001 mention reprojection under detector v2", () => {
 		).toBe(0);
 
 		const apply = await runMentionBackfill({ apply: true, brandId: BRAND });
-		expect(apply.counts).toMatchObject({ written: 9, alreadyCurrent: 0 });
+		expect(apply.counts).toMatchObject({ written: 10, alreadyCurrent: 0 });
 
 		const beta = await client.query<{ prompt_run_id: string; superseded_at: Date | null; detector_version: string }>(
 			"SELECT prompt_run_id, superseded_at, detector_version FROM prompt_run_entity_mentions WHERE brand_id = $1 AND entity_key = $2 AND prompt_run_id IN ($3, $4)",
@@ -308,7 +313,7 @@ describe("IT-SNT-CIT-001 mention reprojection under detector v2", () => {
 			[BRAND],
 		);
 		const again = await runMentionBackfill({ apply: true, brandId: BRAND });
-		expect(again.counts).toMatchObject({ scanned: 9, written: 0, alreadyCurrent: 9, staleDetectorVersion: 0 });
+		expect(again.counts).toMatchObject({ scanned: 10, written: 0, alreadyCurrent: 10, staleDetectorVersion: 0 });
 		const after = await client.query(
 			"SELECT id, detector_version, superseded_at FROM prompt_run_entity_mentions WHERE brand_id = $1 ORDER BY id",
 			[BRAND],
@@ -325,13 +330,13 @@ describe("IT-SNT-CIT-001 mention reprojection under detector v2", () => {
 			aspect: "overall",
 			timezone: "UTC",
 		});
-		expect(overview.coverage).toMatchObject({ responsesDetected: 9, responsesWithMentions: 9 });
+		expect(overview.coverage).toMatchObject({ responsesDetected: 10, responsesWithMentions: 10 });
 		expect(overview.coverage.analyses.completed).toBe(0);
 		const alpha = overview.entities.find((e) => e.key === ALPHA);
 		const beta = overview.entities.find((e) => e.key === BETA);
-		expect(alpha?.mentions).toBe(9);
+		expect(alpha?.mentions).toBe(10);
 		expect(alpha?.classified).toBe(0);
-		expect(beta?.mentions).toBe(5);
+		expect(beta?.mentions).toBe(6);
 		expect(beta?.classified).toBe(0);
 	});
 
@@ -344,8 +349,8 @@ describe("IT-SNT-CIT-001 mention reprojection under detector v2", () => {
 		).toBe(0);
 		const inventory = await runSentimentEnqueue({ enqueue: false, brandId: BRAND });
 		expect(inventory.counts).toMatchObject({
-			scanned: 9,
-			eligible: 9,
+			scanned: 10,
+			eligible: 10,
 			notScanned: 0,
 			staleDetector: 0,
 			staleVersionOnly: 1,
@@ -371,14 +376,14 @@ describe("IT-SNT-CIT-001 mention reprojection under detector v2", () => {
 		const { decodeRunCursor } = await import("@workspace/lib/sentiment");
 		const rest = await runMentionBackfill({ apply: true, brandId: BRAND, cursor: decodeRunCursor(first.nextCursor) });
 		expect(rest.partial).toBe(false);
-		expect(first.counts.scanned + rest.counts.scanned).toBe(9);
+		expect(first.counts.scanned + rest.counts.scanned).toBe(10);
 		expect(first.counts.alreadyCurrent + rest.counts.alreadyCurrent).toBe(0);
 		expect(
 			await count("sentiment_detections", "brand_id = $1 AND detector_version = $2", [
 				BRAND,
 				SENTIMENT_DETECTOR_VERSION,
 			]),
-		).toBe(9);
+		).toBe(10);
 		const perRun = await client.query<{ n: number }>(
 			"SELECT count(*)::int AS n FROM prompt_run_entity_mentions WHERE brand_id = $1 AND superseded_at IS NULL GROUP BY prompt_run_id, entity_key HAVING count(*) > 1",
 			[BRAND],
@@ -407,7 +412,7 @@ describe("IT-SNT-CIT-001 digests and request contract", () => {
 		let sent: z.ZodType | null = null;
 		const outcome = await runSentimentJob(payload(RUN_ENUM), {
 			resolveProvider: () =>
-				fakeProvider((keys) => ({ entities: keys.map((key, i) => goodEntity(key, `s000${i + 1}`)) }), {
+				fakeProvider((keys) => ({ entities: keys.map((key) => goodEntity(key, ownAnchor(key))) }), {
 					onSchema: (schema) => {
 						sent = schema;
 					},
@@ -415,9 +420,12 @@ describe("IT-SNT-CIT-001 digests and request contract", () => {
 		});
 		expect(outcome).toMatchObject({ status: "classified", entities: 3, entityKeys: ["brand", ALPHA, BETA] });
 		const json = z.toJSONSchema(sent as unknown as z.ZodType) as unknown as {
-			properties: { entities: { items: { properties: { key: { enum?: string[] } } } } };
+			properties: { entities: { items: { anyOf: { properties: { key: { enum?: string[] } } }[] } } };
 		};
-		expect(json.properties.entities.items.properties.key.enum).toEqual(["brand", ALPHA, BETA]);
+		expect(json.properties.entities.items.anyOf).toHaveLength(4);
+		for (const branch of json.properties.entities.items.anyOf) {
+			expect(branch.properties.key.enum).toEqual(["brand", ALPHA, BETA]);
+		}
 		const row = await client.query<{ status: string; classifier_version: string; input_hash: string | null }>(
 			"SELECT status, classifier_version, input_hash FROM sentiment_analyses WHERE prompt_run_id = $1",
 			[RUN_ENUM],
@@ -448,7 +456,7 @@ describe("IT-SNT-CIT-001 the three live failure shapes through the job core", ()
 			resolveProvider: () =>
 				fakeProvider(
 					(keys) => ({
-						entities: keys.map((key, i) => goodEntity(key === "brand" ? "Citebrand" : key, `s000${i + 1}`)),
+						entities: keys.map((key) => goodEntity(key === "brand" ? "Citebrand" : key, ownAnchor(key))),
 					}),
 					{ costUsd: 0.016477 },
 				),
@@ -480,7 +488,7 @@ describe("IT-SNT-CIT-001 the three live failure shapes through the job core", ()
 			resolveProvider: () =>
 				fakeProvider(
 					(keys) => ({
-						entities: keys.map((key, i) => goodEntity(key === "brand" ? "Citebrand" : key, `s000${i + 1}`)),
+						entities: keys.map((key) => goodEntity(key === "brand" ? "Citebrand" : key, ownAnchor(key))),
 					}),
 					{ bypass: true, costUsd: 0.016744 },
 				),
@@ -498,36 +506,37 @@ describe("IT-SNT-CIT-001 the three live failure shapes through the job core", ()
 		expect(usage.rows[0]).toEqual({ event_type: "sentiment_classification_failed", estimated_cost_usd: "0.016744" });
 	});
 
-	it("one anchor with two labels inside one non-Mixed overall list is terminal; identical claims are collapsed instead", async () => {
+	it("one anchor with two labels inside one non-Mixed overall list is structurally impossible: refused by the request schema, and locally when the provider ignored it", async () => {
+		const twoLabels = (keys: string[]) => ({
+			entities: keys.map((key) =>
+				key === BETA
+					? {
+							...goodEntity(key, "s0002"),
+							evidence: [
+								{ anchorId: "s0002", polarity: "positive" },
+								{ anchorId: "s0002", polarity: "negative" },
+							],
+						}
+					: goodEntity(key, ownAnchor(key)),
+			),
+		});
 		const outcome = await runSentimentJob(payload(RUN_LIVE_POLARITY), {
-			resolveProvider: () =>
-				fakeProvider(
-					(keys) => ({
-						entities: keys.map((key, i) =>
-							key === BETA
-								? {
-										...goodEntity(key, "s0002"),
-										evidence: [
-											{ anchorId: "s0002", polarity: "positive" },
-											{ anchorId: "s0002", polarity: "negative" },
-										],
-									}
-								: goodEntity(key, `s000${i + 1}`),
-						),
-					}),
-					{ costUsd: 0.01758 },
-				),
+			resolveProvider: () => fakeProvider(twoLabels, { costUsd: 0.01758 }),
 		});
-		expect(outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "evidence-anchor-polarity-conflict",
-			diagnostic: expect.objectContaining({ entityKey: BETA, aspectKey: null, evidenceIndex: 1, anchorId: "s0002" }),
-		});
-		expect(await failedRow(RUN_LIVE_POLARITY)).toMatchObject({
-			status: "failed",
-			error_code: "evidence-anchor-polarity-conflict",
-		});
+		expect(outcome).toMatchObject({ status: "terminal-validation-failure", code: "schema", requestSent: true });
+		expect(await failedRow(RUN_LIVE_POLARITY)).toMatchObject({ status: "failed", error_code: "schema" });
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_LIVE_POLARITY])).toBe(0);
+
+		const bypassed = await runSentimentJob(payload(RUN_LIVE_BYPASS_POLARITY), {
+			resolveProvider: () => fakeProvider(twoLabels, { bypass: true, costUsd: 0.01758 }),
+		});
+		expect(bypassed).toMatchObject({
+			status: "terminal-validation-failure",
+			code: "schema",
+			diagnostic: expect.objectContaining({ stage: "provider-schema", reason: "schema" }),
+		});
+		expect(await failedRow(RUN_LIVE_BYPASS_POLARITY)).toMatchObject({ status: "failed", error_code: "schema" });
+		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_LIVE_BYPASS_POLARITY])).toBe(0);
 	});
 });
 
