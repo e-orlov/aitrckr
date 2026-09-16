@@ -274,7 +274,10 @@ const aspectResultSchema = z.strictObject({
 	score: z.number().int().min(0).max(100),
 	category: z.enum(SENTIMENT_CATEGORIES),
 	confidence: confidenceSchema,
-	evidence: z.array(evidenceRefSchema).min(1).max(EVIDENCE_MAX_ITEMS * 2),
+	evidence: z
+		.array(evidenceRefSchema)
+		.min(1)
+		.max(EVIDENCE_MAX_ITEMS * 2),
 });
 export const sentimentClassificationResultSchema = z.strictObject({
 	entities: z
@@ -284,7 +287,10 @@ export const sentimentClassificationResultSchema = z.strictObject({
 				score: z.number().int().min(0).max(100),
 				category: z.enum(SENTIMENT_CATEGORIES),
 				confidence: confidenceSchema,
-				evidence: z.array(evidenceRefSchema).min(1).max(EVIDENCE_MAX_ITEMS * 2),
+				evidence: z
+					.array(evidenceRefSchema)
+					.min(1)
+					.max(EVIDENCE_MAX_ITEMS * 2),
 				aspects: z.array(aspectResultSchema).max(SENTIMENT_ASPECT_KEYS.length),
 			}),
 		)
@@ -340,7 +346,11 @@ export function toProviderResult(raw: unknown): SentimentProviderResult {
 		if (target.category === "mixed") {
 			const positiveEvidence = evidence.filter((e) => e.polarity === "positive");
 			const negativeEvidence = evidence.filter((e) => e.polarity === "negative");
-			if (positiveEvidence.length === 0 || negativeEvidence.length === 0 || positiveEvidence.length + negativeEvidence.length !== evidence.length)
+			if (
+				positiveEvidence.length === 0 ||
+				negativeEvidence.length === 0 ||
+				positiveEvidence.length + negativeEvidence.length !== evidence.length
+			)
 				throw new Error(`mixed target needs positive and negative citations only`);
 			return { ...rest, positiveEvidence, negativeEvidence };
 		}
@@ -382,7 +392,7 @@ export function assertStrictStructuredOutputSubset(schema: unknown): void {
 	const allowed = new Set<string>(STRICT_STRUCTURED_OUTPUT_KEYWORDS);
 	const walk = (node: unknown, path: string, underProperties: boolean) => {
 		if (Array.isArray(node)) {
-			node.forEach((item, i) => walk(item, `${path}[${i}]`, false));
+			for (const [i, item] of node.entries()) walk(item, `${path}[${i}]`, false);
 			return;
 		}
 		if (typeof node !== "object" || node === null) return;

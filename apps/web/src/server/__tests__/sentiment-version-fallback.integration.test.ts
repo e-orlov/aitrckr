@@ -67,7 +67,14 @@ async function analysis(i: number, version: string, status: string, taxonomy = S
 	return rows[0].id;
 }
 
-async function observe(analysisId: string, mentionId: string, i: number, score: number, category: string, aspectScore?: number) {
+async function observe(
+	analysisId: string,
+	mentionId: string,
+	i: number,
+	score: number,
+	category: string,
+	aspectScore?: number,
+) {
 	const { rows } = await client.query<{ id: string }>(
 		`INSERT INTO sentiment_observations (analysis_id, mention_id, prompt_run_id, brand_id, entity_type, competitor_id, entity_key, score, category, confidence, evidence)
 		 VALUES ($1, $2, $3, $4, 'competitor', $5::uuid, $5::text, $6, $7, 0.9, $8::jsonb) RETURNING id`,
@@ -79,14 +86,29 @@ async function observe(analysisId: string, mentionId: string, i: number, score: 
 			A,
 			score,
 			category,
-			JSON.stringify([{ quote: "Alpha is mentioned here", start: 10, end: 33, polarity: score > 50 ? "positive" : score < 50 ? "negative" : "neutral" }]),
+			JSON.stringify([
+				{
+					quote: "Alpha is mentioned here",
+					start: 10,
+					end: 33,
+					polarity: score > 50 ? "positive" : score < 50 ? "negative" : "neutral",
+				},
+			]),
 		],
 	);
 	if (aspectScore !== undefined) {
 		await client.query(
 			`INSERT INTO sentiment_aspect_observations (observation_id, taxonomy_version, aspect_key, aspect_label, score, category, confidence, evidence)
 			 VALUES ($1, $2, 'price', 'Price', $3, $4, 0.8, $5::jsonb)`,
-			[rows[0].id, SENTIMENT_TAXONOMY_VERSION, aspectScore, aspectScore > 50 ? "positive" : "negative", JSON.stringify([{ quote: "Sent V4 too", start: 35, end: 46, polarity: aspectScore > 50 ? "positive" : "negative" }])],
+			[
+				rows[0].id,
+				SENTIMENT_TAXONOMY_VERSION,
+				aspectScore,
+				aspectScore > 50 ? "positive" : "negative",
+				JSON.stringify([
+					{ quote: "Sent V4 too", start: 35, end: 46, polarity: aspectScore > 50 ? "positive" : "negative" },
+				]),
+			],
 		);
 	}
 	return rows[0].id;
@@ -206,12 +228,19 @@ describe("V4-RED-007 / V4-RED-008 transitional version selection", () => {
 		const overview = await loadSentimentOverview(scope);
 		expect(overview.coverage.analyses.failed).toBe(0);
 		const evidence = await loadSentimentEvidence({ ...scope, entityKey: A, limit: 5 });
-		expect([...evidence.highest, ...evidence.lowest].some((item) => item.promptRunId === runId(4) && item.score === 40)).toBe(true);
+		expect(
+			[...evidence.highest, ...evidence.lowest].some((item) => item.promptRunId === runId(4) && item.score === 40),
+		).toBe(true);
 	});
 
 	it("removing the v4 rows restores the v3 fallback per run; adding them back replaces only those runs", async () => {
-		await client.query("DELETE FROM sentiment_aspect_observations WHERE observation_id IN (SELECT id FROM sentiment_observations WHERE analysis_id = $1)", [analysisRows["3:sent-classifier-v4"]]);
-		await client.query("DELETE FROM sentiment_observations WHERE analysis_id = $1", [analysisRows["3:sent-classifier-v4"]]);
+		await client.query(
+			"DELETE FROM sentiment_aspect_observations WHERE observation_id IN (SELECT id FROM sentiment_observations WHERE analysis_id = $1)",
+			[analysisRows["3:sent-classifier-v4"]],
+		);
+		await client.query("DELETE FROM sentiment_observations WHERE analysis_id = $1", [
+			analysisRows["3:sent-classifier-v4"],
+		]);
 		await client.query("DELETE FROM sentiment_analyses WHERE id = $1", [analysisRows["3:sent-classifier-v4"]]);
 		const withoutV4 = await loadSentimentOverview(scope);
 		const a = withoutV4.entities.find((e) => e.key === A)!;

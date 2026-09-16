@@ -8,8 +8,20 @@ import type { SentimentCandidate } from "../types";
  * the three inheritance contexts (table header, colon list intro, paragraph
  * continuation), the boundaries that stop inheritance, and generic anchors.
  */
-const ARVO: SentimentCandidate = { key: "brand", entityType: "brand", competitorId: null, name: "Arvo", aliases: ["Arvo Rechtsschutz"] };
-const BELTRA: SentimentCandidate = { key: "c-beltra", entityType: "competitor", competitorId: "c-beltra", name: "Beltra", aliases: [] };
+const ARVO: SentimentCandidate = {
+	key: "brand",
+	entityType: "brand",
+	competitorId: null,
+	name: "Arvo",
+	aliases: ["Arvo Rechtsschutz"],
+};
+const BELTRA: SentimentCandidate = {
+	key: "c-beltra",
+	entityType: "competitor",
+	competitorId: "c-beltra",
+	name: "Beltra",
+	aliases: [],
+};
 const candidates = [ARVO, BELTRA];
 
 const ground = (answer: string) => {
@@ -20,7 +32,9 @@ const keys = (set: ReadonlySet<string>) => [...set].sort();
 
 describe("grounding guard", () => {
 	it("explicit mentions are bounded terms of names and aliases, on the natural text only", () => {
-		const { map } = ground("Arvo Rechtsschutz ist gut. Beltra auch. Die Arvos GmbH ist etwas anderes. Siehe [Arvo](https://arvo.example/x).");
+		const { map } = ground(
+			"Arvo Rechtsschutz ist gut. Beltra auch. Die Arvos GmbH ist etwas anderes. Siehe [Arvo](https://arvo.example/x).",
+		);
 		expect(keys(map.get("s0001")!.explicit)).toEqual(["brand"]);
 		expect(keys(map.get("s0002")!.explicit)).toEqual(["c-beltra"]);
 		// "Arvos" is not "Arvo" (bounded), and a link label is natural text only when it is not the citation itself.
@@ -30,7 +44,9 @@ describe("grounding guard", () => {
 	});
 
 	it("a paragraph continuation inherits the nearest preceding mention and stops at a blank line", () => {
-		const { map } = ground("Arvo bietet drei Stufen. Die Premium-Stufe ist umfangreich.\n\nDie Wartezeit beträgt drei Monate.");
+		const { map } = ground(
+			"Arvo bietet drei Stufen. Die Premium-Stufe ist umfangreich.\n\nDie Wartezeit beträgt drei Monate.",
+		);
 		expect(map.get("s0002")).toMatchObject({ context: "paragraph" });
 		expect(keys(map.get("s0002")!.inherited)).toEqual(["brand"]);
 		expect(map.get("s0003")).toMatchObject({ context: "generic" });
@@ -45,7 +61,9 @@ describe("grounding guard", () => {
 	});
 
 	it("table rows inherit the header row's candidates; the header itself inherits nothing", () => {
-		const { map } = ground("| Kriterium | Arvo | Beltra |\n|---|---|---|\n| Preis | teurer | günstiger |\n| Service | gut | ok |\n\nFazit folgt.");
+		const { map } = ground(
+			"| Kriterium | Arvo | Beltra |\n|---|---|---|\n| Preis | teurer | günstiger |\n| Service | gut | ok |\n\nFazit folgt.",
+		);
 		expect(keys(map.get("s0001")!.explicit)).toEqual(["brand", "c-beltra"]);
 		expect(map.get("s0002")).toMatchObject({ context: "table-header" });
 		expect(keys(map.get("s0002")!.inherited)).toEqual(["brand", "c-beltra"]);
@@ -86,7 +104,9 @@ describe("grounding guard", () => {
 	});
 
 	it("an indented continuation line belongs to its list item", () => {
-		const { map } = ground("Meine Auswahl:\n\n1. **Arvo Komfort**\n   Leistungsstark, aber etwas teurer.\n2. **Beltra Plus**\n   Günstig.");
+		const { map } = ground(
+			"Meine Auswahl:\n\n1. **Arvo Komfort**\n   Leistungsstark, aber etwas teurer.\n2. **Beltra Plus**\n   Günstig.",
+		);
 		expect(map.get("s0003")).toMatchObject({ context: "list-item" });
 		expect(keys(map.get("s0003")!.inherited)).toEqual(["brand"]);
 		expect(map.get("s0005")).toMatchObject({ context: "list-item" });
@@ -95,7 +115,9 @@ describe("grounding guard", () => {
 	});
 
 	it("a comparison row stays attributable to every header entity even when a cell names the other one", () => {
-		const { map } = ground("| Kriterium | Arvo | Beltra |\n|---|---|---|\n| Vergleich | Etwas besser als Beltra bewertet | Leicht dahinter |");
+		const { map } = ground(
+			"| Kriterium | Arvo | Beltra |\n|---|---|---|\n| Vergleich | Etwas besser als Beltra bewertet | Leicht dahinter |",
+		);
 		expect(keys(map.get("s0002")!.explicit)).toEqual(["c-beltra"]);
 		expect(keys(map.get("s0002")!.inherited)).toEqual(["brand", "c-beltra"]);
 		expect(namesOnlyOthers(map.get("s0002")!, "brand")).toBe(false);

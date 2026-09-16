@@ -22,8 +22,8 @@ import {
 } from "@workspace/lib/db/schema";
 import {
 	extractAnswerBody,
-	selectedSentimentAnalysisIds,
 	type SentimentRunCoverageStatus,
+	selectedSentimentAnalysisIds,
 	sentimentRunCoverageStatus,
 } from "@workspace/lib/sentiment";
 import {

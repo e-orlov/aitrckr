@@ -128,7 +128,8 @@ function splitLines(answerBody: string, anchors: readonly EvidenceAnchor[], term
 /** The header row of the contiguous table block containing `line`, or null when `line` is that header. */
 function tableHeader(lines: Line[], line: Line): Line | null {
 	let first = line.index;
-	while (first > 0 && (lines[first - 1].kind === "table-row" || lines[first - 1].kind === "table-separator")) first -= 1;
+	while (first > 0 && (lines[first - 1].kind === "table-row" || lines[first - 1].kind === "table-separator"))
+		first -= 1;
 	const header = lines[first];
 	return header.index === line.index || header.kind !== "table-row" ? null : header;
 }
@@ -143,7 +144,10 @@ function listItemOf(lines: Line[], line: Line): Line | null {
 /** The colon-terminated line that introduces the list containing `line` (blank lines between them allowed), or null. */
 function listIntro(lines: Line[], line: Line, answerBody: string): Line | null {
 	let at = line.index - 1;
-	while (at >= 0 && (lines[at].kind === "list-item" || lines[at].kind === "list-continuation" || lines[at].kind === "blank"))
+	while (
+		at >= 0 &&
+		(lines[at].kind === "list-item" || lines[at].kind === "list-continuation" || lines[at].kind === "blank")
+	)
 		at -= 1;
 	if (at < 0) return null;
 	const candidate = lines[at];
@@ -156,7 +160,12 @@ function listIntro(lines: Line[], line: Line, answerBody: string): Line | null {
  * same line) that names a candidate; scanning stops at a blank line, a
  * heading, a table row or another list item.
  */
-function paragraphOwner(lines: Line[], line: Line, anchor: EvidenceAnchor, explicitByAnchor: Map<string, Set<string>>): Set<string> | null {
+function paragraphOwner(
+	lines: Line[],
+	line: Line,
+	anchor: EvidenceAnchor,
+	explicitByAnchor: Map<string, Set<string>>,
+): Set<string> | null {
 	const ownAnchors = line.anchors;
 	for (let i = ownAnchors.indexOf(anchor) - 1; i >= 0; i -= 1) {
 		const keys = explicitByAnchor.get(ownAnchors[i].id);
@@ -208,46 +217,61 @@ export function groundAnchors(
 	for (const line of lines) {
 		for (const anchor of line.anchors) {
 			const explicit = explicitByAnchor.get(anchor.id) ?? new Set<string>();
-			let inherited: Set<string> | null = null;
-			let context: AnchorContext = explicit.size > 0 ? "explicit" : "generic";
-			if (line.kind === "table-row") {
-				// A comparison row describes every entity of its header, whatever a cell happens to name.
-				const header = tableHeader(lines, line);
-				if (header && header.explicit.size > 0) {
-					inherited = header.explicit;
-					if (explicit.size === 0) context = "table-header";
-				}
-			} else if (explicit.size === 0) {
-				const owner = paragraphOwner(lines, line, anchor, explicitByAnchor);
-				if (owner) {
-					inherited = owner;
-					context = "paragraph";
-				} else if (line.kind === "list-continuation") {
-					const item = listItemOf(lines, line);
-					if (item && item.explicit.size > 0) {
-						inherited = item.explicit;
-						context = "list-item";
-					}
-				}
-				if (!inherited && (line.kind === "list-item" || line.kind === "list-continuation")) {
-					const intro = listIntro(lines, line, answerBody);
-					if (intro && intro.explicit.size > 0) {
-						inherited = intro.explicit;
-						context = "list-intro";
-					}
-				}
-				if (!inherited && line.kind !== "heading") {
-					const heading = headingOwner(lines, line);
-					if (heading) {
-						inherited = heading.explicit;
-						context = "heading";
-					}
-				}
-			}
-			out.set(anchor.id, { anchorId: anchor.id, explicit, inherited: inherited ?? new Set(), context });
+			out.set(anchor.id, groundOne(answerBody, lines, line, anchor, explicit, explicitByAnchor));
 		}
 	}
 	return out;
+}
+
+interface Inheritance {
+	keys: Set<string>;
+	context: AnchorContext;
+}
+
+function groundOne(
+	answerBody: string,
+	lines: Line[],
+	line: Line,
+	anchor: EvidenceAnchor,
+	explicit: Set<string>,
+	explicitByAnchor: Map<string, Set<string>>,
+): AnchorGrounding {
+	let inheritance: Inheritance | null = null;
+	if (line.kind === "table-row") inheritance = tableInheritance(lines, line);
+	else if (explicit.size === 0) inheritance = contextInheritance(answerBody, lines, line, anchor, explicitByAnchor);
+	const context: AnchorContext = explicit.size > 0 ? "explicit" : (inheritance?.context ?? "generic");
+	return { anchorId: anchor.id, explicit, inherited: inheritance?.keys ?? new Set(), context };
+}
+
+/** A comparison row describes every entity of its header, whatever a cell happens to name. */
+function tableInheritance(lines: Line[], line: Line): Inheritance | null {
+	const header = tableHeader(lines, line);
+	return header && header.explicit.size > 0 ? { keys: header.explicit, context: "table-header" } : null;
+}
+
+/** Structural context for an anchor that names no candidate itself, in order of proximity. */
+function contextInheritance(
+	answerBody: string,
+	lines: Line[],
+	line: Line,
+	anchor: EvidenceAnchor,
+	explicitByAnchor: Map<string, Set<string>>,
+): Inheritance | null {
+	const owner = paragraphOwner(lines, line, anchor, explicitByAnchor);
+	if (owner) return { keys: owner, context: "paragraph" };
+	if (line.kind === "list-continuation") {
+		const item = listItemOf(lines, line);
+		if (item && item.explicit.size > 0) return { keys: item.explicit, context: "list-item" };
+	}
+	if (line.kind === "list-item" || line.kind === "list-continuation") {
+		const intro = listIntro(lines, line, answerBody);
+		if (intro && intro.explicit.size > 0) return { keys: intro.explicit, context: "list-intro" };
+	}
+	if (line.kind !== "heading") {
+		const heading = headingOwner(lines, line);
+		if (heading) return { keys: heading.explicit, context: "heading" };
+	}
+	return null;
 }
 
 /** Is the anchor attributable to `entityKey` — by naming it or through its structural context? */

@@ -234,7 +234,10 @@ export const GOLDEN_V4_CASES: GoldenV4Case[] = [
 		},
 		expected: {
 			[ARVO]: { category: "mixed", aspects: { price: { category: "negative" }, coverage: { category: "positive" } } },
-			[BELTRA]: { category: "positive", aspects: { price: { category: "positive" }, coverage: { category: "positive" } } },
+			[BELTRA]: {
+				category: "positive",
+				aspects: { price: { category: "positive" }, coverage: { category: "positive" } },
+			},
 		},
 		grounding: {
 			[ARVO]: { allowedAnchors: ["s0002", "s0003", "s0004", "s0005"], forbiddenAnchors: [] },

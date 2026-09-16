@@ -14,8 +14,8 @@ import { classifySentiment, SENTIMENT_MAX_OUTPUT_TOKENS } from "../classifier";
 import {
 	assertStrictStructuredOutputSubset,
 	type SentimentCandidate,
-	sentimentProviderResultSchemaFor,
 	STRICT_STRUCTURED_OUTPUT_KEYWORDS,
+	sentimentProviderResultSchemaFor,
 } from "../types";
 
 const answer = "Arvo ist empfehlenswert.\n\nBeltra ist günstig, aber der Service ist langsam.";
@@ -43,8 +43,20 @@ const providerAnswer = {
 			positiveEvidence: [{ anchorId: "s0002", polarity: "positive" }],
 			negativeEvidence: [{ anchorId: "s0002", polarity: "negative" }],
 			aspects: [
-				{ key: "price", category: "positive", score: 75, confidence: 0.8, evidence: [{ anchorId: "s0002", polarity: "positive" }] },
-				{ key: "service", category: "negative", score: 25, confidence: 0.8, evidence: [{ anchorId: "s0002", polarity: "negative" }] },
+				{
+					key: "price",
+					category: "positive",
+					score: 75,
+					confidence: 0.8,
+					evidence: [{ anchorId: "s0002", polarity: "positive" }],
+				},
+				{
+					key: "service",
+					category: "negative",
+					score: 25,
+					confidence: 0.8,
+					evidence: [{ anchorId: "s0002", polarity: "negative" }],
+				},
 			],
 		},
 	],
@@ -110,7 +122,7 @@ describe("CP3 provider request contract (classifier v4)", () => {
 		expect(schema.additionalProperties).toBe(false);
 		const entityBranches = schema.properties.entities.items.anyOf;
 		expect(entityBranches).toHaveLength(4);
-		const categories = entityBranches.map((b: any) => b.properties.category.enum).flat().sort();
+		const categories = entityBranches.flatMap((b: any) => b.properties.category.enum).sort();
 		expect(categories).toEqual(["mixed", "negative", "neutral", "positive"]);
 		for (const branch of entityBranches) {
 			expect(branch.additionalProperties).toBe(false);
@@ -140,21 +152,27 @@ describe("CP3 provider request contract (classifier v4)", () => {
 
 	it("the compatibility guard rejects unsupported constructs", () => {
 		for (const bad of [
-			{ type: "object", if: {}, then: {} },
-			{ type: "array", contains: { type: "string" } },
-			{ allOf: [{ type: "object" }] },
-			{ not: { type: "string" } },
-			{ type: "object", patternProperties: {} },
-			{ oneOf: [{ type: "string" }] },
+			'{"type":"object","if":{},"then":{}}',
+			'{"type":"object","if":{},"else":{}}',
+			'{"type":"array","contains":{"type":"string"}}',
+			'{"allOf":[{"type":"object"}]}',
+			'{"not":{"type":"string"}}',
+			'{"type":"object","patternProperties":{}}',
+			'{"oneOf":[{"type":"string"}]}',
 		]) {
-			expect(() => assertStrictStructuredOutputSubset(bad), JSON.stringify(bad)).toThrow();
+			expect(() => assertStrictStructuredOutputSubset(JSON.parse(bad)), bad).toThrow();
 		}
-		expect(() => assertStrictStructuredOutputSubset(z.toJSONSchema(sentimentProviderResultSchemaFor(anchorIds, ["brand"])))).not.toThrow();
+		expect(() =>
+			assertStrictStructuredOutputSubset(z.toJSONSchema(sentimentProviderResultSchemaFor(anchorIds, ["brand"]))),
+		).not.toThrow();
 	});
 
 	it("stays inside the enum-length budget at the anchor cap", () => {
 		const many = Array.from({ length: 400 }, (_, i) => `s${String(i + 1).padStart(4, "0")}`);
-		const keys = ["brand", ...Array.from({ length: 12 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`)];
+		const keys = [
+			"brand",
+			...Array.from({ length: 12 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`),
+		];
 		const json = z.toJSONSchema(sentimentProviderResultSchemaFor(many, keys));
 		let enumChars = 0;
 		JSON.stringify(json, (key, value) => {

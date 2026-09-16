@@ -28,6 +28,48 @@ const REQUIRED_IDS = [
 
 const byId = new Map(GOLDEN_V4_CASES.map((c) => [c.id, c]));
 
+function validate(c: GoldenV4Case) {
+	return validateSentimentResult(c.result, { answerBody: c.answer, candidates: c.candidates });
+}
+
+function expectAccepted(c: GoldenV4Case) {
+	const anchors = segmentAnswer(c.answer);
+	for (const entity of validate(c)) {
+		const labels = c.grounding[entity.key];
+		const expected = c.expected[entity.key];
+		expect(labels, `${c.id}: ${entity.key} labelled`).toBeDefined();
+		expect(entity.category, `${c.id}: ${entity.key} overall`).toBe(expected.category);
+		const cited = [...entity.evidence, ...entity.aspects.flatMap((a) => a.evidence)].map(
+			(e) => anchors.find((a) => a.start === e.start && a.end === e.end)?.id,
+		);
+		for (const id of cited) {
+			expect(labels.allowedAnchors, `${c.id}: ${entity.key} cites ${id}`).toContain(id);
+			expect(labels.forbiddenAnchors, `${c.id}: ${entity.key} cites forbidden ${id}`).not.toContain(id);
+		}
+		for (const [key, aspect] of Object.entries(expected.aspects ?? {})) {
+			const actual = entity.aspects.find((a) => a.key === key);
+			expect(actual?.category, `${c.id}: ${entity.key} aspect ${key}`).toBe(aspect.category);
+		}
+		for (const key of expected.forbiddenAspects ?? []) {
+			expect(
+				entity.aspects.some((a) => a.key === key),
+				`${c.id}: ${entity.key} must not carry ${key}`,
+			).toBe(false);
+		}
+	}
+}
+
+function expectRejected(c: GoldenV4Case, code: string) {
+	let thrown: unknown;
+	try {
+		validate(c);
+	} catch (error) {
+		thrown = error;
+	}
+	expect(thrown, `${c.id}: expected rejection`).toBeInstanceOf(SentimentValidationError);
+	expect((thrown as SentimentValidationError).code, c.id).toBe(code);
+}
+
 describe("V4 golden cases", () => {
 	it("contains every required reproducer with human labels", () => {
 		for (const id of REQUIRED_IDS) expect(byId.has(id), id).toBe(true);
@@ -46,46 +88,19 @@ describe("V4 golden cases", () => {
 
 	it("every accept case validates and cites only allowed anchors; every reject case fails with the labelled code", () => {
 		for (const c of GOLDEN_V4_CASES) {
-			const anchors = segmentAnswer(c.answer);
-			const raw = c.result;
-			if (c.expectedValidator.kind === "accept") {
-				const entities = validateSentimentResult(raw, { answerBody: c.answer, candidates: c.candidates });
-				for (const entity of entities) {
-					const labels = c.grounding[entity.key];
-					expect(labels, `${c.id}: ${entity.key} labelled`).toBeDefined();
-					expect(entity.category, `${c.id}: ${entity.key} overall`).toBe(c.expected[entity.key].category);
-					const cited = [...entity.evidence, ...entity.aspects.flatMap((a) => a.evidence)].map(
-						(e) => anchors.find((a) => a.start === e.start && a.end === e.end)?.id,
-					);
-					for (const id of cited) {
-						expect(labels.allowedAnchors, `${c.id}: ${entity.key} cites ${id}`).toContain(id);
-						expect(labels.forbiddenAnchors, `${c.id}: ${entity.key} cites forbidden ${id}`).not.toContain(id);
-					}
-					for (const [key, aspect] of Object.entries(c.expected[entity.key].aspects ?? {})) {
-						const actual = entity.aspects.find((a) => a.key === key);
-						expect(actual?.category, `${c.id}: ${entity.key} aspect ${key}`).toBe(aspect.category);
-					}
-					for (const key of c.expected[entity.key].forbiddenAspects ?? []) {
-						expect(entity.aspects.some((a) => a.key === key), `${c.id}: ${entity.key} must not carry ${key}`).toBe(false);
-					}
-				}
-			} else {
-				let thrown: unknown;
-				try {
-					validateSentimentResult(raw, { answerBody: c.answer, candidates: c.candidates });
-				} catch (error) {
-					thrown = error;
-				}
-				expect(thrown, `${c.id}: expected rejection`).toBeInstanceOf(SentimentValidationError);
-				expect((thrown as SentimentValidationError).code, c.id).toBe(c.expectedValidator.code);
-			}
+			if (c.expectedValidator.kind === "accept") expectAccepted(c);
+			else expectRejected(c, c.expectedValidator.code);
 		}
 	});
 
 	it("the v3 corpus references still validate under the v4 contract", () => {
 		for (const goldenCase of GOLDEN_CASES) {
 			expect(
-				() => validateSentimentResult(goldenReference(goldenCase), { answerBody: goldenCase.answer, candidates: goldenCase.candidates }),
+				() =>
+					validateSentimentResult(goldenReference(goldenCase), {
+						answerBody: goldenCase.answer,
+						candidates: goldenCase.candidates,
+					}),
 				goldenCase.id,
 			).not.toThrow();
 		}
@@ -93,7 +108,19 @@ describe("V4 golden cases", () => {
 
 	it("labels cover the semantic families the audit found", () => {
 		const families = new Set(GOLDEN_V4_CASES.map((c: GoldenV4Case) => c.family));
-		for (const f of ["entity-swap", "foreign-only", "unbound-aspect", "neutral-statistic", "value-deductible-caveat", "table", "multi-entity", "same-anchor-mixed", "cross-aspect", "continuation", "list-intro"]) {
+		for (const f of [
+			"entity-swap",
+			"foreign-only",
+			"unbound-aspect",
+			"neutral-statistic",
+			"value-deductible-caveat",
+			"table",
+			"multi-entity",
+			"same-anchor-mixed",
+			"cross-aspect",
+			"continuation",
+			"list-intro",
+		]) {
 			expect(families, f).toContain(f);
 		}
 	});

@@ -59,20 +59,6 @@ export {
 	validateSentimentResult,
 } from "./classifier";
 export {
-	selectedSentimentAnalyses,
-	selectedSentimentAnalysisIds,
-	type SentimentRunCoverageStatus,
-	sentimentRunCoverageStatus,
-} from "./read-selection";
-export {
-	type AnchorContext,
-	type AnchorGrounding,
-	type GroundingMap,
-	groundAnchors,
-	isAttributable,
-	namesOnlyOthers,
-} from "./grounding";
-export {
 	brandEntity,
 	competitorEntity,
 	containsBoundedTerm,
@@ -110,6 +96,14 @@ export {
 	sanitizeSentimentError,
 } from "./errors";
 export type { PaidResponseEnvelope } from "./errors-validation";
+export {
+	type AnchorContext,
+	type AnchorGrounding,
+	type GroundingMap,
+	groundAnchors,
+	isAttributable,
+	namesOnlyOthers,
+} from "./grounding";
 export { runSentimentJob, type SentimentJobDeps, type SentimentJobOptions, type SentimentJobOutcome } from "./job";
 export {
 	bucketForRange,
@@ -154,6 +148,12 @@ export {
 	type TextRange,
 } from "./ranges";
 export {
+	type SentimentRunCoverageStatus,
+	selectedSentimentAnalyses,
+	selectedSentimentAnalysisIds,
+	sentimentRunCoverageStatus,
+} from "./read-selection";
+export {
 	type AnalysisClaim,
 	type ClaimOptions,
 	type ClaimOutcome,
@@ -179,6 +179,7 @@ export {
 } from "./store";
 export { extractAnswerBody, type IndexedText, normalizeIndexed, normalizeText } from "./text";
 export {
+	assertStrictStructuredOutputSubset,
 	BRAND_ENTITY_KEY,
 	compareSentimentEntities,
 	EVIDENCE_MAX_ITEMS,
@@ -196,6 +197,7 @@ export {
 	SENTIMENT_MODEL,
 	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_QUEUE,
+	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 	type SentimentAspectKey,
@@ -206,18 +208,16 @@ export {
 	type SentimentEvidence,
 	type SentimentEvidenceRef,
 	type SentimentJobData,
-	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
-	STRICT_STRUCTURED_OUTPUT_KEYWORDS,
 	type SentimentProviderAspect,
 	type SentimentProviderEntity,
 	type SentimentProviderResult,
-	assertStrictStructuredOutputSubset,
+	STRICT_STRUCTURED_OUTPUT_KEYWORDS,
 	sentimentClassificationResultSchema,
 	sentimentJobSchema,
 	sentimentProviderResultSchema,
 	sentimentProviderResultSchemaFor,
-	toClassificationResult,
-	toProviderResult,
 	sentimentSingletonKey,
 	sortSentimentEntities,
+	toClassificationResult,
+	toProviderResult,
 } from "./types";

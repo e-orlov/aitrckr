@@ -89,7 +89,10 @@ describe("V4-RED-002 foreign-only evidence", () => {
 			],
 		};
 		expect(() => validateSentimentResult(foreign, { answerBody: answer, candidates })).toThrow(
-			expect.objectContaining({ code: "evidence-entity-unbound", diagnostic: expect.objectContaining({ anchorId: "s0002" }) }),
+			expect.objectContaining({
+				code: "evidence-entity-unbound",
+				diagnostic: expect.objectContaining({ anchorId: "s0002" }),
+			}),
 		);
 	});
 });
@@ -119,7 +122,10 @@ describe("V4-RED-003 entity-unbound aspect", () => {
 			],
 		};
 		expect(() => validateSentimentResult(result, { answerBody: answer, candidates: [ARVO] })).toThrow(
-			expect.objectContaining({ code: "aspect-ungrounded", diagnostic: expect.objectContaining({ aspectKey: "price" }) }),
+			expect.objectContaining({
+				code: "aspect-ungrounded",
+				diagnostic: expect.objectContaining({ aspectKey: "price" }),
+			}),
 		);
 	});
 
@@ -158,7 +164,15 @@ describe("V4-RED-005 Mixed structural mismatch", () => {
 	it("the provider schema cannot express Mixed without both polarities", () => {
 		const oneSided = {
 			entities: [
-				{ key: "brand", category: "mixed", score: 50, confidence: 0.9, positiveEvidence: [{ anchorId: "s0001", polarity: "positive" }], negativeEvidence: [], aspects: [] },
+				{
+					key: "brand",
+					category: "mixed",
+					score: 50,
+					confidence: 0.9,
+					positiveEvidence: [{ anchorId: "s0001", polarity: "positive" }],
+					negativeEvidence: [],
+					aspects: [],
+				},
 			],
 		};
 		expect(schema.safeParse(oneSided).success).toBe(false);
@@ -220,7 +234,13 @@ describe("V4-RED-005 Mixed structural mismatch", () => {
 					...mixed(["s0003"], ["s0003"]),
 					aspects: [
 						{ key: "coverage", ...positive(["s0003"], 75) },
-						{ key: "price", category: "negative", score: 30, confidence: 0.8, evidence: [{ anchorId: "s0003", polarity: "negative" }] },
+						{
+							key: "price",
+							category: "negative",
+							score: 30,
+							confidence: 0.8,
+							evidence: [{ anchorId: "s0003", polarity: "negative" }],
+						},
 					],
 				},
 			],

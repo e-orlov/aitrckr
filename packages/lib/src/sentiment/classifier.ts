@@ -208,10 +208,14 @@ function assertPolarityFitsCategory(
 			stage: "cross-field",
 		});
 	}
-	fail("polarity-category-mismatch", `${where.label}: ${category} verdict cites ${[...polarities].sort().join("/")} evidence`, {
-		...where,
-		stage: "cross-field",
-	});
+	fail(
+		"polarity-category-mismatch",
+		`${where.label}: ${category} verdict cites ${[...polarities].sort().join("/")} evidence`,
+		{
+			...where,
+			stage: "cross-field",
+		},
+	);
 }
 
 /**
@@ -363,7 +367,13 @@ export function validateClassification(
 				stage: "cross-field",
 			});
 		}
-		const evidence = resolveEvidence(anchors, entity.evidence, { ...at, stage: "evidence" }, entity.category, groundingMap);
+		const evidence = resolveEvidence(
+			anchors,
+			entity.evidence,
+			{ ...at, stage: "evidence" },
+			entity.category,
+			groundingMap,
+		);
 		const aspects = validateAspects(anchors, entity, groundingMap);
 		entities.push({
 			key: entity.key,

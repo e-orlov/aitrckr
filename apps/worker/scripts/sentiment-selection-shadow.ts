@@ -12,7 +12,11 @@
 import { parseArgs } from "node:util";
 import { db } from "@workspace/lib/db/db";
 import { sentimentAnalyses, sentimentObservations } from "@workspace/lib/db/schema";
-import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION, selectedSentimentAnalyses } from "@workspace/lib/sentiment";
+import {
+	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_TAXONOMY_VERSION,
+	selectedSentimentAnalyses,
+} from "@workspace/lib/sentiment";
 import { eq, inArray, sql } from "drizzle-orm";
 
 async function snapshot(label: string) {
@@ -107,17 +111,29 @@ async function main(): Promise<void> {
 	}
 	const during = await snapshot("with-v4-fixtures");
 	const duringByRun = new Map(during.map((row) => [row.promptRunId, row]));
-	const replaced = fixtures.filter((runId) => duringByRun.get(runId)?.classifierVersion === SENTIMENT_CLASSIFIER_VERSION);
+	const replaced = fixtures.filter(
+		(runId) => duringByRun.get(runId)?.classifierVersion === SENTIMENT_CLASSIFIER_VERSION,
+	);
 	const keptOnFailure = fails.filter((runId) => duringByRun.get(runId)?.id === beforeByRun.get(runId)?.id);
 	const untouched = [...beforeByRun.entries()].filter(
 		([runId, row]) => !fixtures.includes(runId) && duringByRun.get(runId)?.id === row.id,
 	).length;
-	console.log(JSON.stringify({ replacedByV4: replaced.length, expectedReplaced: fixtures.length, v3KeptUnderFailedV4: keptOnFailure.length, expectedKept: fails.length, otherRunsUntouched: untouched, expectedUntouched: before.length - fixtures.length }));
+	console.log(
+		JSON.stringify({
+			replacedByV4: replaced.length,
+			expectedReplaced: fixtures.length,
+			v3KeptUnderFailedV4: keptOnFailure.length,
+			expectedKept: fails.length,
+			otherRunsUntouched: untouched,
+			expectedUntouched: before.length - fixtures.length,
+		}),
+	);
 
 	await db.delete(sentimentObservations).where(inArray(sentimentObservations.analysisId, inserted));
 	await db.delete(sentimentAnalyses).where(inArray(sentimentAnalyses.id, inserted));
 	const after = await snapshot("after-removing-fixtures");
-	const restored = after.length === before.length && after.every((row) => beforeByRun.get(row.promptRunId)?.id === row.id);
+	const restored =
+		after.length === before.length && after.every((row) => beforeByRun.get(row.promptRunId)?.id === row.id);
 	console.log(JSON.stringify({ fallbackRestoredIdentically: restored }));
 	process.exit(0);
 }
