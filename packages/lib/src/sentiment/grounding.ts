@@ -12,24 +12,35 @@ import type { SentimentCandidate } from "./types";
  *
  * Two levels of attribution:
  * - `explicit`: the anchor itself names the candidate (name or alias, bounded).
- * - `inherited`: the anchor names no candidate at all and sits in a structural
- *   context whose owner is explicit — the header row of its table, the
- *   colon-terminated line introducing its list, or the nearest preceding
- *   anchor of its own paragraph or list item that names a candidate. Inheritance
- *   stops at a blank line, a heading, a new list item, a table boundary or any
- *   anchor that names a candidate.
- * An anchor with an explicit set is attributable exactly to that set; an anchor
- * without one is attributable to its inherited set; a `generic` anchor
- * (neither) is attributable to nobody and can never carry a target alone.
+ * - `inherited`: candidates attributed from the anchor's structural context —
+ *   the header row of its table (a row of a comparison table describes every
+ *   entity the header names, even when a cell mentions the other one), the
+ *   colon-terminated line introducing its list, the first line of its own
+ *   list item, the nearest preceding anchor of its own paragraph that names a
+ *   candidate, or the nearest heading above it when nothing in between names
+ *   any candidate. Inheritance never crosses a table boundary, another heading
+ *   or a line that names a candidate.
+ * An anchor is attributable to the union of both sets; an anchor that names
+ * candidates itself and is not attributable to the claimed one names only
+ * others; a `generic` anchor (neither set) is attributable to nobody and can
+ * never carry a target alone.
  */
-export type AnchorContext = "explicit" | "table-header" | "list-intro" | "paragraph" | "generic";
+export type AnchorContext =
+	| "explicit"
+	| "table-header"
+	| "list-intro"
+	| "list-item"
+	| "paragraph"
+	| "heading"
+	| "generic";
 
 export interface AnchorGrounding {
 	anchorId: string;
 	/** Candidate keys the anchor's own natural text names. */
 	explicit: ReadonlySet<string>;
-	/** Candidate keys attributed from the structural context when the anchor names none itself. */
+	/** Candidate keys attributed from the structural context. */
 	inherited: ReadonlySet<string>;
+	/** Where the attribution came from; `explicit` when the anchor names a candidate itself. */
 	context: AnchorContext;
 }
 
@@ -42,10 +53,12 @@ const TABLE_ROW = /^\s*\|/u;
 /** A Markdown table alignment row: pipes, colons, dashes and spaces only. */
 const TABLE_SEPARATOR = /^\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*$/u;
 const LIST_ITEM = /^(?:[ \t]*)(?:[-*+•▪◦]|\d{1,3}[.)]|[a-z][.)]|>)[ \t]+/iu;
+/** An indented line (two spaces or a tab) directly under a list item continues that item. */
+const INDENTED = /^(?: {2,}|\t)/u;
 /** A line that introduces what follows: it ends with a colon, optionally inside closing emphasis. */
 const COLON_INTRO = /:[\s*_]*$/u;
 
-type LineKind = "blank" | "heading" | "table-row" | "table-separator" | "list-item" | "text";
+type LineKind = "blank" | "heading" | "table-row" | "table-separator" | "list-item" | "list-continuation" | "text";
 
 interface Line {
 	index: number;
@@ -58,11 +71,12 @@ interface Line {
 	explicit: Set<string>;
 }
 
-function classifyLine(text: string): LineKind {
+function classifyLine(text: string, previous: LineKind | null): LineKind {
 	if (!CONTENT.test(text)) return TABLE_SEPARATOR.test(text) && text.includes("-") ? "table-separator" : "blank";
 	if (HEADING.test(text)) return "heading";
 	if (TABLE_ROW.test(text)) return TABLE_SEPARATOR.test(text) ? "table-separator" : "table-row";
 	if (LIST_ITEM.test(text)) return "list-item";
+	if (INDENTED.test(text) && (previous === "list-item" || previous === "list-continuation")) return "list-continuation";
 	return "text";
 }
 
@@ -92,7 +106,8 @@ function splitLines(answerBody: string, anchors: readonly EvidenceAnchor[], term
 	let index = 0;
 	const push = (end: number) => {
 		const text = answerBody.slice(start, end);
-		lines.push({ index, start, end, kind: classifyLine(text), anchors: [], explicit: new Set() });
+		const previous = lines.at(-1)?.kind ?? null;
+		lines.push({ index, start, end, kind: classifyLine(text, previous), anchors: [], explicit: new Set() });
 		index += 1;
 	};
 	for (const brk of answerBody.matchAll(LINE_BREAK)) {
@@ -118,10 +133,18 @@ function tableHeader(lines: Line[], line: Line): Line | null {
 	return header.index === line.index || header.kind !== "table-row" ? null : header;
 }
 
+/** The first line of the list item a continuation line belongs to. */
+function listItemOf(lines: Line[], line: Line): Line | null {
+	let at = line.index;
+	while (at > 0 && lines[at].kind === "list-continuation") at -= 1;
+	return lines[at].kind === "list-item" ? lines[at] : null;
+}
+
 /** The colon-terminated line that introduces the list containing `line` (blank lines between them allowed), or null. */
 function listIntro(lines: Line[], line: Line, answerBody: string): Line | null {
 	let at = line.index - 1;
-	while (at >= 0 && (lines[at].kind === "list-item" || lines[at].kind === "blank")) at -= 1;
+	while (at >= 0 && (lines[at].kind === "list-item" || lines[at].kind === "list-continuation" || lines[at].kind === "blank"))
+		at -= 1;
 	if (at < 0) return null;
 	const candidate = lines[at];
 	if (candidate.kind !== "text" && candidate.kind !== "heading") return null;
@@ -133,10 +156,10 @@ function listIntro(lines: Line[], line: Line, answerBody: string): Line | null {
  * same line) that names a candidate; scanning stops at a blank line, a
  * heading, a table row or another list item.
  */
-function paragraphOwner(lines: Line[], line: Line, anchor: EvidenceAnchor, grounded: Map<string, Set<string>>): Set<string> | null {
+function paragraphOwner(lines: Line[], line: Line, anchor: EvidenceAnchor, explicitByAnchor: Map<string, Set<string>>): Set<string> | null {
 	const ownAnchors = line.anchors;
 	for (let i = ownAnchors.indexOf(anchor) - 1; i >= 0; i -= 1) {
-		const keys = grounded.get(ownAnchors[i].id);
+		const keys = explicitByAnchor.get(ownAnchors[i].id);
 		if (keys && keys.size > 0) return keys;
 	}
 	if (line.kind !== "text") return null;
@@ -144,9 +167,23 @@ function paragraphOwner(lines: Line[], line: Line, anchor: EvidenceAnchor, groun
 		const previous = lines[at];
 		if (previous.kind !== "text") return null;
 		for (let i = previous.anchors.length - 1; i >= 0; i -= 1) {
-			const keys = grounded.get(previous.anchors[i].id);
+			const keys = explicitByAnchor.get(previous.anchors[i].id);
 			if (keys && keys.size > 0) return keys;
 		}
+	}
+	return null;
+}
+
+/**
+ * The nearest heading above `line` that names a candidate, provided no line
+ * between them names any candidate and no other heading or table intervenes.
+ */
+function headingOwner(lines: Line[], line: Line): Line | null {
+	for (let at = line.index - 1; at >= 0; at -= 1) {
+		const previous = lines[at];
+		if (previous.kind === "heading") return previous.explicit.size > 0 ? previous : null;
+		if (previous.kind === "table-row" || previous.kind === "table-separator") return null;
+		if (previous.explicit.size > 0) return null;
 	}
 	return null;
 }
@@ -164,33 +201,47 @@ export function groundAnchors(
 	const terms = new Map(candidates.map((candidate) => [candidate.key, candidateTerms(candidate)]));
 	const lines = splitLines(answerBody, anchors, terms);
 	const explicitByAnchor = new Map<string, Set<string>>();
-	for (const line of lines) for (const anchor of line.anchors) explicitByAnchor.set(anchor.id, explicitKeys(anchor.naturalText, terms));
+	for (const line of lines)
+		for (const anchor of line.anchors) explicitByAnchor.set(anchor.id, explicitKeys(anchor.naturalText, terms));
 
 	const out = new Map<string, AnchorGrounding>();
 	for (const line of lines) {
 		for (const anchor of line.anchors) {
 			const explicit = explicitByAnchor.get(anchor.id) ?? new Set<string>();
-			if (explicit.size > 0) {
-				out.set(anchor.id, { anchorId: anchor.id, explicit, inherited: new Set(), context: "explicit" });
-				continue;
-			}
 			let inherited: Set<string> | null = null;
-			let context: AnchorContext = "generic";
-			const owner = paragraphOwner(lines, line, anchor, explicitByAnchor);
-			if (owner) {
-				inherited = owner;
-				context = "paragraph";
-			} else if (line.kind === "table-row") {
+			let context: AnchorContext = explicit.size > 0 ? "explicit" : "generic";
+			if (line.kind === "table-row") {
+				// A comparison row describes every entity of its header, whatever a cell happens to name.
 				const header = tableHeader(lines, line);
 				if (header && header.explicit.size > 0) {
 					inherited = header.explicit;
-					context = "table-header";
+					if (explicit.size === 0) context = "table-header";
 				}
-			} else if (line.kind === "list-item") {
-				const intro = listIntro(lines, line, answerBody);
-				if (intro && intro.explicit.size > 0) {
-					inherited = intro.explicit;
-					context = "list-intro";
+			} else if (explicit.size === 0) {
+				const owner = paragraphOwner(lines, line, anchor, explicitByAnchor);
+				if (owner) {
+					inherited = owner;
+					context = "paragraph";
+				} else if (line.kind === "list-continuation") {
+					const item = listItemOf(lines, line);
+					if (item && item.explicit.size > 0) {
+						inherited = item.explicit;
+						context = "list-item";
+					}
+				}
+				if (!inherited && (line.kind === "list-item" || line.kind === "list-continuation")) {
+					const intro = listIntro(lines, line, answerBody);
+					if (intro && intro.explicit.size > 0) {
+						inherited = intro.explicit;
+						context = "list-intro";
+					}
+				}
+				if (!inherited && line.kind !== "heading") {
+					const heading = headingOwner(lines, line);
+					if (heading) {
+						inherited = heading.explicit;
+						context = "heading";
+					}
 				}
 			}
 			out.set(anchor.id, { anchorId: anchor.id, explicit, inherited: inherited ?? new Set(), context });
@@ -199,13 +250,12 @@ export function groundAnchors(
 	return out;
 }
 
-/** Is the anchor attributable to `entityKey` — explicitly, or by inheritance when it names nobody itself? */
+/** Is the anchor attributable to `entityKey` — by naming it or through its structural context? */
 export function isAttributable(grounding: AnchorGrounding, entityKey: string): boolean {
-	if (grounding.explicit.size > 0) return grounding.explicit.has(entityKey);
-	return grounding.inherited.has(entityKey);
+	return grounding.explicit.has(entityKey) || grounding.inherited.has(entityKey);
 }
 
-/** Does the anchor explicitly name other candidates while not naming `entityKey` — evidence that belongs to somebody else? */
+/** Does the anchor name other candidates while not being attributable to `entityKey` — evidence that belongs to somebody else? */
 export function namesOnlyOthers(grounding: AnchorGrounding, entityKey: string): boolean {
-	return grounding.explicit.size > 0 && !grounding.explicit.has(entityKey);
+	return grounding.explicit.size > 0 && !isAttributable(grounding, entityKey);
 }

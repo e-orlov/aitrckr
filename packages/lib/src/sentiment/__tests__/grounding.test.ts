@@ -70,10 +70,36 @@ describe("grounding guard", () => {
 		expect(map.get("s0003")).toMatchObject({ context: "generic" });
 	});
 
-	it("headings do not scope the section below them", () => {
-		const { map } = ground("## Arvo im Vergleich\n\nDer Tarif ist modular.");
+	it("a heading that names a candidate scopes the generic lines below it until another candidate, heading or table", () => {
+		const { map } = ground(
+			"## Arvo im Vergleich\n\nDer Tarif ist modular.\n\n- Testsieger 2026\n\nBeltra ist günstig. Der Beitrag ist niedrig.\n\n## Fazit\n\nAlles in allem gut.",
+		);
 		expect(keys(map.get("s0001")!.explicit)).toEqual(["brand"]);
-		expect(map.get("s0002")).toMatchObject({ context: "generic" });
+		expect(map.get("s0002")).toMatchObject({ context: "heading" });
+		expect(keys(map.get("s0002")!.inherited)).toEqual(["brand"]);
+		expect(map.get("s0003")).toMatchObject({ context: "heading" });
+		// A later mention of another candidate ends the heading's scope for what follows it …
+		expect(map.get("s0005")).toMatchObject({ context: "paragraph" });
+		expect(keys(map.get("s0005")!.inherited)).toEqual(["c-beltra"]);
+		// … and a heading without a candidate scopes nothing.
+		expect(map.get("s0007")).toMatchObject({ context: "generic" });
+	});
+
+	it("an indented continuation line belongs to its list item", () => {
+		const { map } = ground("Meine Auswahl:\n\n1. **Arvo Komfort**\n   Leistungsstark, aber etwas teurer.\n2. **Beltra Plus**\n   Günstig.");
+		expect(map.get("s0003")).toMatchObject({ context: "list-item" });
+		expect(keys(map.get("s0003")!.inherited)).toEqual(["brand"]);
+		expect(map.get("s0005")).toMatchObject({ context: "list-item" });
+		expect(keys(map.get("s0005")!.inherited)).toEqual(["c-beltra"]);
+		expect(isAttributable(map.get("s0005")!, "brand")).toBe(false);
+	});
+
+	it("a comparison row stays attributable to every header entity even when a cell names the other one", () => {
+		const { map } = ground("| Kriterium | Arvo | Beltra |\n|---|---|---|\n| Vergleich | Etwas besser als Beltra bewertet | Leicht dahinter |");
+		expect(keys(map.get("s0002")!.explicit)).toEqual(["c-beltra"]);
+		expect(keys(map.get("s0002")!.inherited)).toEqual(["brand", "c-beltra"]);
+		expect(namesOnlyOthers(map.get("s0002")!, "brand")).toBe(false);
+		expect(isAttributable(map.get("s0002")!, "brand")).toBe(true);
 	});
 
 	it("namesOnlyOthers is true exactly for an anchor that names candidates other than the claimed one", () => {
