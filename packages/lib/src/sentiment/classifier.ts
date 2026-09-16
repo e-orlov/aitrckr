@@ -5,6 +5,7 @@ import { StructuredResearchResponseError } from "../providers/types";
 import { anchorMap, type EvidenceAnchor, segmentAnswer } from "./anchors";
 import { type DiagnosticReason, type DiagnosticStage, diagnostic, safeGenerationId } from "./diagnostics";
 import { type PaidResponseEnvelope, SentimentValidationError } from "./errors-validation";
+import { type GroundingMap, groundAnchors, isAttributable, namesOnlyOthers } from "./grounding";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import { type AnalyzableText, analyzableText, analyzeAnswerRanges } from "./ranges";
@@ -23,7 +24,9 @@ import {
 	type SentimentEvidence,
 	type SentimentEvidenceRef,
 	sentimentClassificationResultSchema,
-	sentimentClassificationResultSchemaFor,
+	sentimentProviderResultSchema,
+	sentimentProviderResultSchemaFor,
+	toClassificationResult,
 } from "./types";
 
 export { SentimentValidationError } from "./errors-validation";
@@ -145,6 +148,7 @@ function resolveOneRef(
 	category: SentimentCategory,
 	seenClaims: Set<string>,
 	polaritiesByAnchor: Map<string, Set<EvidencePolarity>>,
+	groundingMap: GroundingMap | null,
 ): SentimentEvidence | null {
 	const anchor = anchors.get(ref.anchorId);
 	if (!anchor) {
@@ -152,6 +156,15 @@ function resolveOneRef(
 			evidenceIndex: index,
 			anchorId: /^s\d{4}$/.test(ref.anchorId) ? ref.anchorId : undefined,
 		});
+	}
+	const grounding = groundingMap?.get(ref.anchorId);
+	if (grounding && namesOnlyOthers(grounding, where.entityKey)) {
+		fail(
+			"evidence-entity-unbound",
+			`${where.label}: anchor "${ref.anchorId}" names another candidate but not this one`,
+			where,
+			{ evidenceIndex: index, anchorId: ref.anchorId },
+		);
 	}
 	const identity = claimIdentity(where, ref);
 	if (seenClaims.has(identity)) return null;
@@ -172,32 +185,73 @@ function resolveOneRef(
 }
 
 /**
+ * The polarities a target's citations may carry, by category (classifier
+ * v4): a Positive, Negative or Neutral verdict cites only its own polarity;
+ * a Mixed verdict cites at least one positive and at least one negative
+ * anchor and nothing else. The wire schema makes other combinations
+ * unrepresentable; this is the independent second boundary.
+ */
+function assertPolarityFitsCategory(
+	where: EvidenceWhere,
+	category: SentimentCategory,
+	resolved: SentimentEvidence[],
+): void {
+	const polarities = new Set(resolved.map((e) => e.polarity));
+	const fits =
+		category === "mixed"
+			? polarities.has("positive") && polarities.has("negative") && !polarities.has("neutral")
+			: polarities.size === 1 && polarities.has(category);
+	if (fits) return;
+	if (category === "mixed" && !(polarities.has("positive") && polarities.has("negative"))) {
+		fail("mixed-needs-dual-evidence", `${where.label}: mixed requires one positive and one negative citation`, {
+			...where,
+			stage: "cross-field",
+		});
+	}
+	fail("polarity-category-mismatch", `${where.label}: ${category} verdict cites ${[...polarities].sort().join("/")} evidence`, {
+		...where,
+		stage: "cross-field",
+	});
+}
+
+/**
  * Resolve cited anchors into stored evidence for one target: every id must
- * belong to this answer, identical claims collapse to one, one anchor may
- * carry positive and negative only for a Mixed target, and Mixed needs a
- * positive and a negative citation. The stored form is the exact raw slice of
- * the anchor.
+ * belong to this answer, identical claims collapse to one, an anchor that
+ * names only other candidates is refused, one anchor may carry positive and
+ * negative only for a Mixed target, the polarities must fit the category,
+ * and at least one anchor must be attributable to the target's entity. The
+ * stored form is the exact raw slice of the anchor.
  */
 function resolveEvidence(
 	anchors: Map<string, EvidenceAnchor>,
 	refs: SentimentEvidenceRef[],
 	where: EvidenceWhere,
 	category: SentimentCategory,
+	groundingMap: GroundingMap | null,
 ): SentimentEvidence[] {
 	const resolved: SentimentEvidence[] = [];
 	const seenClaims = new Set<string>();
 	const polaritiesByAnchor = new Map<string, Set<EvidencePolarity>>();
+	const resolvedIds: string[] = [];
 	refs.forEach((ref, index) => {
-		const evidence = resolveOneRef(anchors, ref, index, where, category, seenClaims, polaritiesByAnchor);
-		if (evidence) resolved.push(evidence);
+		const evidence = resolveOneRef(anchors, ref, index, where, category, seenClaims, polaritiesByAnchor, groundingMap);
+		if (evidence) {
+			resolved.push(evidence);
+			resolvedIds.push(ref.anchorId);
+		}
 	});
-	if (category === "mixed") {
-		const polarities = new Set(resolved.map((e) => e.polarity));
-		if (!polarities.has("positive") || !polarities.has("negative")) {
-			fail("mixed-needs-dual-evidence", `${where.label}: mixed requires one positive and one negative citation`, {
-				...where,
-				stage: "cross-field",
-			});
+	assertPolarityFitsCategory(where, category, resolved);
+	if (groundingMap) {
+		const attributable = resolvedIds.some((id) => {
+			const grounding = groundingMap.get(id);
+			return grounding !== undefined && isAttributable(grounding, where.entityKey);
+		});
+		if (!attributable) {
+			fail(
+				where.aspectKey === null ? "entity-ungrounded" : "aspect-ungrounded",
+				`${where.label}: no cited anchor is attributable to this entity`,
+				{ ...where, stage: "cross-field" },
+			);
 		}
 	}
 	return resolved;
@@ -207,6 +261,7 @@ function resolveEvidence(
 function validateAspects(
 	anchors: Map<string, EvidenceAnchor>,
 	entity: SentimentClassificationResult["entities"][number],
+	groundingMap: GroundingMap | null,
 ): ValidatedAspect[] {
 	const aspectKeys = new Set<string>();
 	const aspects: ValidatedAspect[] = [];
@@ -230,19 +285,17 @@ function validateAspects(
 			score: aspect.score,
 			category: aspect.category,
 			confidence: aspect.confidence,
-			evidence: resolveEvidence(anchors, aspect.evidence, { ...at, stage: "evidence" }, aspect.category),
+			evidence: resolveEvidence(anchors, aspect.evidence, { ...at, stage: "evidence" }, aspect.category, groundingMap),
 		});
 	}
 	return aspects;
 }
 
 /**
- * Local validation of a structured answer, independent of what the provider
- * already parsed: every supplied candidate exactly once and nothing else,
- * score/category consistency, every citation an anchor of this very answer
- * (resolved here to the exact raw slice and offsets), a positive and a
- * negative citation for Mixed, at most one result per aspect key. Anything
- * invalid throws with a bounded diagnostic and nothing is persisted.
+ * Local validation of a provider answer in its wire shape (classifier v4),
+ * independent of what the provider already parsed: the discriminated shape,
+ * then every rule of `validateClassification`. Anything invalid throws with a
+ * bounded diagnostic and nothing is persisted.
  */
 export function validateSentimentResult(
 	raw: unknown,
@@ -253,9 +306,38 @@ export function validateSentimentResult(
 		analysis?: AnalyzableText;
 	},
 ): ValidatedEntitySentiment[] {
-	const anchors = anchorMap([
+	const parsed = sentimentProviderResultSchema.safeParse(raw);
+	if (!parsed.success) {
+		fail("schema", parsed.error.issues[0]?.message ?? "invalid classifier output", { stage: "provider-schema" });
+	}
+	return validateClassification(toClassificationResult(parsed.data), args);
+}
+
+/**
+ * The rules over the internal claim representation, shared by the wire
+ * validation, the canary, the shadow oracle and the golden corpus: every
+ * supplied candidate exactly once and nothing else, score/category
+ * consistency, every citation an anchor of this very answer (resolved here to
+ * the exact raw slice and offsets), polarities that fit the category, a
+ * positive and a negative citation for Mixed, at most one result per aspect
+ * key, and deterministic entity grounding of every target.
+ */
+export function validateClassification(
+	raw: unknown,
+	args: {
+		answerBody: string;
+		candidates: SentimentCandidate[];
+		anchors?: readonly EvidenceAnchor[];
+		analysis?: AnalyzableText;
+		/** `false` replays rows produced before the grounding guard existed without it; production always grounds. */
+		grounding?: boolean;
+	},
+): ValidatedEntitySentiment[] {
+	const anchorList = [
 		...(args.anchors ?? segmentAnswer(args.answerBody, args.analysis ?? analyzeAnswerRanges(args.answerBody))),
-	]);
+	];
+	const anchors = anchorMap(anchorList);
+	const groundingMap = args.grounding === false ? null : groundAnchors(args.answerBody, anchorList, args.candidates);
 	const parsed = sentimentClassificationResultSchema.safeParse(raw);
 	if (!parsed.success) {
 		fail("schema", parsed.error.issues[0]?.message ?? "invalid classifier output", { stage: "provider-schema" });
@@ -281,8 +363,8 @@ export function validateSentimentResult(
 				stage: "cross-field",
 			});
 		}
-		const evidence = resolveEvidence(anchors, entity.evidence, { ...at, stage: "evidence" }, entity.category);
-		const aspects = validateAspects(anchors, entity);
+		const evidence = resolveEvidence(anchors, entity.evidence, { ...at, stage: "evidence" }, entity.category, groundingMap);
+		const aspects = validateAspects(anchors, entity, groundingMap);
 		entities.push({
 			key: entity.key,
 			score: entity.score,
@@ -354,7 +436,7 @@ async function requestClassification(
 	try {
 		return await provider.runStructuredResearch({
 			prompt,
-			schema: sentimentClassificationResultSchemaFor(anchorIds, entityKeys),
+			schema: sentimentProviderResultSchemaFor(anchorIds, entityKeys),
 			webSearch: true,
 			signal,
 			maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,

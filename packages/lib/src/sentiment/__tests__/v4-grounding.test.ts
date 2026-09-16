@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { segmentAnswer } from "../anchors";
-import { validateSentimentResult } from "../classifier";
+import { validateClassification, validateSentimentResult } from "../classifier";
 import { SENTIMENT_ASPECT_ROUTING_RULES } from "../prompt";
 import { type SentimentCandidate, sentimentProviderResultSchemaFor } from "../types";
 
@@ -199,7 +199,8 @@ describe("V4-RED-005 Mixed structural mismatch", () => {
 				},
 			],
 		};
-		expect(() => validateSentimentResult(conflicting, { answerBody: answer, candidates: [ARVO] })).toThrow(
+		// The wire schema already refuses this shape; the internal representation reaches the second boundary directly.
+		expect(() => validateClassification(conflicting, { answerBody: answer, candidates: [ARVO] })).toThrow(
 			expect.objectContaining({ code: "polarity-category-mismatch" }),
 		);
 	});

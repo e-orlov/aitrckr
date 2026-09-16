@@ -5,10 +5,16 @@ import {
 	classifySentiment,
 	SentimentValidationError,
 	sentimentInputHash,
+	validateClassification,
 	validateSentimentResult,
 } from "../classifier";
 import { buildSentimentPrompt, renderAnchoredAnswer } from "../prompt";
-import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION, type SentimentCandidate } from "../types";
+import {
+	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_TAXONOMY_VERSION,
+	type SentimentCandidate,
+	toProviderResult,
+} from "../types";
 
 const answer =
 	"ARAG ist nicht teuer und bietet einen sehr guten Service.\n\nDie HUK-COBURG ist günstig, aber die Schadenabwicklung dauert lange.  WGV wird nur genannt.";
@@ -81,7 +87,8 @@ const good = {
 	],
 };
 
-const validate = (raw: unknown) => validateSentimentResult(raw, { answerBody: answer, candidates });
+// `good` is the internal claim representation; the rules below are the second boundary behind the wire schema.
+const validate = (raw: unknown) => validateClassification(raw, { answerBody: answer, candidates });
 
 describe("UT-SNT-006 evidence and consistency validation", () => {
 	it("accepts a grounded, consistent result and resolves anchors into exact raw slices of the stored body", () => {
@@ -152,9 +159,10 @@ describe("UT-SNT-006 evidence and consistency validation", () => {
 		single.entities[1].evidence = [{ anchorId: "s0002", polarity: "positive" }];
 		expect(() => validate(single)).toThrow(expect.objectContaining({ code: "mixed-needs-dual-evidence" }));
 		const samePolarity = structuredClone(good);
+		// Two same-polarity citations of the entity's own anchor collapse to one and still lack the other side.
 		samePolarity.entities[1].evidence = [
 			{ anchorId: "s0002", polarity: "positive" },
-			{ anchorId: "s0003", polarity: "positive" },
+			{ anchorId: "s0002", polarity: "positive" },
 		];
 		expect(() => validate(samePolarity)).toThrow(expect.objectContaining({ code: "mixed-needs-dual-evidence" }));
 		const noPolarity = structuredClone(good) as unknown as { entities: { evidence: unknown[] }[] };
@@ -238,7 +246,7 @@ describe("UT-SNT-006 evidence and consistency validation", () => {
 describe("classifySentiment through an injected provider", () => {
 	it("makes exactly one structured call with web search on, the segmented answer and an anchor-bound schema", async () => {
 		const run = vi.fn(async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
-			object: schema.parse(good),
+			object: schema.parse(toProviderResult(good)),
 			modelVersion: "openai/gpt-5-mini",
 			generationId: "gen-1",
 		}));
@@ -265,7 +273,9 @@ describe("classifySentiment through an injected provider", () => {
 		// The request schema only admits this answer's anchors.
 		const foreign = structuredClone(good);
 		foreign.entities[2].evidence = [{ anchorId: "s0004", polarity: "neutral" }];
-		expect(call.schema.safeParse(foreign).success).toBe(false);
+		expect(call.schema.safeParse(toProviderResult(foreign)).success).toBe(false);
+		// The wire shape itself is validated locally again before anything is persisted.
+		expect(() => validateSentimentResult(toProviderResult(good), { answerBody: answer, candidates })).not.toThrow();
 		expect(result.provider).toBe("openrouter");
 		expect(result.model).toBe("openai/gpt-5-mini");
 		expect(result.classifierVersion).toBe(SENTIMENT_CLASSIFIER_VERSION);
@@ -279,7 +289,7 @@ describe("classifySentiment through an injected provider", () => {
 		const provider = {
 			id: "openrouter",
 			runStructuredResearch: async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
-				object: schema.parse(good),
+				object: schema.parse(toProviderResult(good)),
 				modelVersion: "openai/gpt-4o-mini",
 			}),
 		} as unknown as Provider;
@@ -292,7 +302,7 @@ describe("classifySentiment through an injected provider", () => {
 		const provider = {
 			id: "openrouter",
 			runStructuredResearch: async () => ({
-				object: { entities: [{ ...good.entities[2], key: "c-nope" }] },
+				object: toProviderResult({ entities: [{ ...good.entities[2], key: "c-nope" }] }),
 				modelVersion: null,
 			}),
 		} as unknown as Provider;

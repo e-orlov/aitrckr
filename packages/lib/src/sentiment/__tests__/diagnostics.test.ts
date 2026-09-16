@@ -168,31 +168,32 @@ function leakyProvider(): Provider & { logs: string[] } {
 			async ({ schema, prompt }: { schema: { parse: (v: unknown) => unknown }; prompt: string }) => {
 				expect(prompt).toContain(PROMPT_MARKER);
 				return {
+					// Wire shape of classifier v4; the price aspect cites the Bolt sentence for Zentaur — grounded rejection.
 					object: schema.parse({
 						entities: [
 							{
 								key: "brand",
-								score: 80,
 								category: "positive",
+								score: 80,
 								confidence: 0.9,
 								evidence: [{ anchorId: "s0001", polarity: "positive" }],
 								aspects: [
 									{
 										key: "price",
-										score: 80,
 										category: "positive",
+										score: 80,
 										confidence: 0.9,
 										evidence: [
 											{ anchorId: "s0001", polarity: "positive" },
-											{ anchorId: "s0001", polarity: "neutral" },
+											{ anchorId: "s0002", polarity: "positive" },
 										],
 									},
 								],
 							},
 							{
 								key: "c-bolt",
-								score: 20,
 								category: "negative",
+								score: 20,
 								confidence: 0.9,
 								evidence: [{ anchorId: "s0002", polarity: "negative" }],
 								aspects: [],
@@ -301,22 +302,22 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 
 		expect(outcome).toMatchObject({
 			status: "terminal-validation-failure",
-			code: "evidence-anchor-polarity-conflict",
+			code: "evidence-entity-unbound",
 			requestSent: true,
 			envelope: { generationId: "gen-opaque-7", usage: { costUsd: 0.02 } },
 			diagnostic: {
 				stage: "evidence",
-				reason: "evidence-anchor-polarity-conflict",
+				reason: "evidence-entity-unbound",
 				entityKey: "brand",
 				aspectKey: "price",
 				evidenceIndex: 1,
-				anchorId: "s0001",
+				anchorId: "s0002",
 			},
 		});
 		expect(deps.persist).not.toHaveBeenCalled();
 		expect(usage).toEqual([expect.objectContaining({ succeeded: false, actualCostUsd: 0.02 })]);
 		const row = marks[0] as { errorMessage: string; errorCode: string };
-		expect(row.errorCode).toBe("evidence-anchor-polarity-conflict");
+		expect(row.errorCode).toBe("evidence-entity-unbound");
 		const diagnosticJson = row.errorMessage.slice(row.errorMessage.indexOf("diagnostic=") + "diagnostic=".length);
 		expect(Buffer.byteLength(diagnosticJson, "utf8")).toBeLessThanOrEqual(DIAGNOSTIC_MAX_BYTES);
 		expect(sentimentDiagnosticSchema.safeParse(JSON.parse(diagnosticJson)).success).toBe(true);
@@ -349,7 +350,7 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 		const report = await runSentimentCanary({ contract, deps, deadlineMs: 1000, watchdogMs: 2000 });
 		expect(report.verdict).toEqual({
 			status: "reject",
-			reasons: [{ code: "validation", detail: "evidence-anchor-polarity-conflict" }],
+			reasons: [{ code: "validation", detail: "evidence-entity-unbound" }],
 		});
 		expect(report.outcome).toMatchObject({
 			status: "terminal-validation-failure",

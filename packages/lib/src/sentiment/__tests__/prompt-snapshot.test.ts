@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { segmentAnswer } from "../anchors";
 import { buildSentimentPrompt } from "../prompt";
-import { type SentimentCandidate, sentimentClassificationResultSchemaFor } from "../types";
+import { type SentimentCandidate, sentimentProviderResultSchemaFor } from "../types";
 
 const answer =
 	"ARAG ist nicht teuer und bietet einen sehr guten Service.\n\nDie HUK-COBURG ist günstig, aber die Schadenabwicklung dauert lange.  WGV wird nur genannt.";
@@ -32,7 +32,7 @@ describe("CT-SNT-008 provider-facing prompt and schema snapshots", () => {
 	it("binds the request schema to this answer's anchor ids and this request's entity keys", () => {
 		const ids = segmentAnswer(answer).map((anchor) => anchor.id);
 		const jsonSchema = z.toJSONSchema(
-			sentimentClassificationResultSchemaFor(
+			sentimentProviderResultSchemaFor(
 				ids,
 				candidates.map((c) => c.key),
 			),

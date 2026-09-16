@@ -22,6 +22,14 @@ export const DIAGNOSTIC_REASONS = [
 	"evidence-anchor-polarity-conflict",
 	"mixed-needs-dual-evidence",
 	"evidence-not-in-answer",
+	/** A target's category does not fit the polarities of its citations (classifier v4). */
+	"polarity-category-mismatch",
+	/** A cited anchor explicitly names another candidate but not the claimed one (classifier v4). */
+	"evidence-entity-unbound",
+	/** No cited anchor of an entity's overall verdict is attributable to that entity (classifier v4). */
+	"entity-ungrounded",
+	/** No cited anchor of an aspect is attributable to the aspect's entity (classifier v4). */
+	"aspect-ungrounded",
 ] as const;
 export type DiagnosticReason = (typeof DIAGNOSTIC_REASONS)[number];
 

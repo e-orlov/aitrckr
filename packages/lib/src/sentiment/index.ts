@@ -55,8 +55,17 @@ export {
 	sentimentInputHash,
 	type ValidatedAspect,
 	type ValidatedEntitySentiment,
+	validateClassification,
 	validateSentimentResult,
 } from "./classifier";
+export {
+	type AnchorContext,
+	type AnchorGrounding,
+	type GroundingMap,
+	groundAnchors,
+	isAttributable,
+	namesOnlyOthers,
+} from "./grounding";
 export {
 	brandEntity,
 	competitorEntity,
@@ -191,9 +200,18 @@ export {
 	type SentimentEvidence,
 	type SentimentEvidenceRef,
 	type SentimentJobData,
+	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
+	STRICT_STRUCTURED_OUTPUT_KEYWORDS,
+	type SentimentProviderAspect,
+	type SentimentProviderEntity,
+	type SentimentProviderResult,
+	assertStrictStructuredOutputSubset,
 	sentimentClassificationResultSchema,
-	sentimentClassificationResultSchemaFor,
 	sentimentJobSchema,
+	sentimentProviderResultSchema,
+	sentimentProviderResultSchemaFor,
+	toClassificationResult,
+	toProviderResult,
 	sentimentSingletonKey,
 	sortSentimentEntities,
 } from "./types";

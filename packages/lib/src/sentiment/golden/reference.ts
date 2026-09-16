@@ -1,5 +1,10 @@
 import { type EvidenceAnchor, segmentAnswer } from "../anchors";
-import type { SentimentClassificationResult, SentimentEvidenceRef } from "../types";
+import {
+	type SentimentClassificationResult,
+	type SentimentEvidenceRef,
+	type SentimentProviderResult,
+	toProviderResult,
+} from "../types";
 import type { GoldenCase, GoldenReferenceEvidence } from "./corpus";
 
 const collapse = (text: string) => text.replace(/\s+/g, " ").trim();
@@ -29,8 +34,13 @@ function cite(anchors: EvidenceAnchor[], evidence: GoldenReferenceEvidence[], ca
 	return refs;
 }
 
-/** The reference labelling of a case in the exact form the provider must return. */
-export function goldenReference(goldenCase: GoldenCase): SentimentClassificationResult {
+/** The reference labelling of a case in the exact wire form the provider must return (classifier v4 branches). */
+export function goldenReference(goldenCase: GoldenCase): SentimentProviderResult {
+	return toProviderResult(goldenReferenceClaims(goldenCase));
+}
+
+/** The reference labelling in the internal claim representation (one flat citation list per target). */
+export function goldenReferenceClaims(goldenCase: GoldenCase): SentimentClassificationResult {
 	const anchors = segmentAnswer(goldenCase.answer);
 	return {
 		entities: goldenCase.reference.entities.map((entity) => ({

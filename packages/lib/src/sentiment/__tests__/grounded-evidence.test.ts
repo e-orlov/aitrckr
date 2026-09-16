@@ -92,22 +92,23 @@ const paraphrased = {
  * local rules: a Mixed verdict citing only one polarity. This is the
  * post-schema failure class that still costs a paid call.
  */
+/** Wire shape of classifier v4 that the schema accepts but local grounding refuses: the WGV verdict cites the ARAG sentence. */
 const locallyRejected = {
 	entities: [
 		{
 			key: "brand",
-			score: 80,
 			category: "positive",
+			score: 80,
 			confidence: 0.9,
 			evidence: [{ anchorId: "s0001", polarity: "positive" }],
 			aspects: [],
 		},
 		{
 			key: "c-wgv",
-			score: 50,
-			category: "mixed",
+			category: "positive",
+			score: 70,
 			confidence: 0.8,
-			evidence: [{ anchorId: "s0002", polarity: "positive" }],
+			evidence: [{ anchorId: "s0001", polarity: "positive" }],
 			aspects: [],
 		},
 	],
@@ -198,7 +199,7 @@ describe("grounded evidence — RED before the corrective", () => {
 	it("1. a paraphrased excerpt and a locally rejected anchored answer are both rejected, and the paid response's usage and generation survive in the error", async () => {
 		for (const [answer, code] of [
 			[paraphrased, "schema"],
-			[locallyRejected, "mixed-needs-dual-evidence"],
+			[locallyRejected, "evidence-entity-unbound"],
 		] as const) {
 			const provider = providerAnswering(answer);
 			let thrown: unknown;

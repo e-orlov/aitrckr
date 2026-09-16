@@ -228,25 +228,26 @@ const mentions: StoredMention[] = [
 ];
 const candidates = candidatesFromMentions(mentions, entities);
 
-/** Answers with a Mixed verdict citing one polarity only (rejected locally) and a hostile envelope on the result. */
+/** Answers with the brand's verdict grounded on the competitor's sentence (rejected locally) and a hostile envelope on the result. */
 function hostileProvider(): Provider {
 	return {
 		id: "openrouter",
 		runStructuredResearch: vi.fn(async ({ schema }: { schema: { parse: (v: unknown) => unknown } }) => ({
+			// Wire shape of classifier v4: the brand cites the Vantis sentence — rejected locally as ungrounded evidence.
 			object: schema.parse({
 				entities: [
 					{
 						key: "brand",
-						score: 50,
-						category: "mixed",
+						category: "positive",
+						score: 80,
 						confidence: 0.8,
-						evidence: [{ anchorId: "s0001", polarity: "positive" }],
+						evidence: [{ anchorId: "s0002", polarity: "positive" }],
 						aspects: [],
 					},
 					{
 						key: "c-vantis",
-						score: 50,
 						category: "neutral",
+						score: 50,
 						confidence: 0.9,
 						evidence: [{ anchorId: "s0002", polarity: "neutral" }],
 						aspects: [],
@@ -317,7 +318,7 @@ describe("H2 no arbitrary string of a hostile envelope reaches any surface", () 
 		vi.unstubAllEnvs();
 		expect(outcome).toMatchObject({
 			status: "terminal-validation-failure",
-			code: "mixed-needs-dual-evidence",
+			code: "evidence-entity-unbound",
 			envelope: {
 				generationId: null,
 				request: null,
@@ -351,7 +352,7 @@ describe("H2 no arbitrary string of a hostile envelope reaches any surface", () 
 		const report = await runSentimentCanary({ contract, deps, deadlineMs: 1000, watchdogMs: 2000 });
 		expect(report.verdict).toEqual({
 			status: "reject",
-			reasons: [{ code: "validation", detail: "mixed-needs-dual-evidence" }],
+			reasons: [{ code: "validation", detail: "evidence-entity-unbound" }],
 		});
 		expect(report.outcome).toMatchObject({
 			status: "terminal-validation-failure",
