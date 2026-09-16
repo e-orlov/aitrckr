@@ -333,7 +333,8 @@ export function toClassificationResult(provider: SentimentProviderResult): Senti
  * branch (a Positive target with a negative citation, a Mixed target lacking
  * one polarity) throws — the wire contract cannot express it.
  */
-export function toProviderResult(result: SentimentClassificationResult): SentimentProviderResult {
+export function toProviderResult(raw: unknown): SentimentProviderResult {
+	const result = sentimentClassificationResultSchema.parse(raw);
 	const wire = (target: SentimentEntityResult | SentimentAspectResult) => {
 		const { evidence, ...rest } = target;
 		if (target.category === "mixed") {

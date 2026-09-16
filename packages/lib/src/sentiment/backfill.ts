@@ -16,7 +16,12 @@ import {
 	persistDetection,
 } from "./store";
 import { extractAnswerBody, normalizeText } from "./text";
-import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_DETECTOR_VERSION } from "./types";
+import {
+	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
+	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
+	SENTIMENT_TAXONOMY_VERSION,
+} from "./types";
 
 /**
  * Resume position in the (created_at, id) keyset scan over prompt_runs.
@@ -278,6 +283,10 @@ export interface SentimentEnqueueInventory {
 	noMentions: number;
 	/** Runs with an analysis of another classifier version only (stale, auditable). */
 	staleVersionOnly: number;
+	/** Of `eligible`: runs still shown from a completed analysis of a readable fallback version until the current version completes. */
+	fallbackCompleted: number;
+	/** Of `eligible`: runs with mentions and no analysis row of any version. */
+	neverClassified: number;
 	attempted: number;
 	accepted: number;
 	deduplicated: number;
@@ -312,6 +321,13 @@ async function classifyRunEligibility(
 	const analyses = await db.query.sentimentAnalyses.findMany({ where: eq(sentimentAnalyses.promptRunId, run.id) });
 	const current = analyses.find((row) => row.classifierVersion === SENTIMENT_CLASSIFIER_VERSION);
 	if (!current && analyses.length > 0) counts.staleVersionOnly++;
+	const fallback = analyses.some(
+		(row) =>
+			row.classifierVersion !== SENTIMENT_CLASSIFIER_VERSION &&
+			(SENTIMENT_READABLE_CLASSIFIER_VERSIONS as readonly string[]).includes(row.classifierVersion) &&
+			row.status === "completed" &&
+			row.taxonomyVersion === SENTIMENT_TAXONOMY_VERSION,
+	);
 
 	if (!receipt) {
 		counts.notScanned++;
@@ -339,6 +355,8 @@ async function classifyRunEligibility(
 	}
 	counts.eligible++;
 	if (current?.status === "failed") counts.eligibleFailed++;
+	if (fallback) counts.fallbackCompleted++;
+	if (analyses.length === 0) counts.neverClassified++;
 	return "eligible";
 }
 
@@ -384,6 +402,8 @@ export async function runSentimentEnqueue(args: {
 		staleDetector: 0,
 		noMentions: 0,
 		staleVersionOnly: 0,
+		fallbackCompleted: 0,
+		neverClassified: 0,
 		attempted: 0,
 		accepted: 0,
 		deduplicated: 0,

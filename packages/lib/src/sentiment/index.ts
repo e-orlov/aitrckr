@@ -59,6 +59,12 @@ export {
 	validateSentimentResult,
 } from "./classifier";
 export {
+	selectedSentimentAnalyses,
+	selectedSentimentAnalysisIds,
+	type SentimentRunCoverageStatus,
+	sentimentRunCoverageStatus,
+} from "./read-selection";
+export {
 	type AnchorContext,
 	type AnchorGrounding,
 	type GroundingMap,
