@@ -26,6 +26,7 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 		outcome: string;
 		generationId: string | null;
 		actualCostUsd: string | null;
+		candidate: unknown;
 		inputHash: string;
 		startedAt: Date;
 	}[] = [];
@@ -91,6 +92,7 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 				outcome: "sending",
 				generationId: null,
 				actualCostUsd: null,
+				candidate: null,
 				inputHash,
 				startedAt: new Date(),
 			};
@@ -99,10 +101,20 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 		},
 		finishProviderAttempt: async (id, args) => {
 			const row = attempts.find((a) => a.id === id);
-			if (!row) return;
+			if (!row) throw new Error(`provider attempt ${id} missing`);
+			const generationId = args.generationId ?? null;
+			const actualCostUsd = typeof args.actualCostUsd === "number" ? args.actualCostUsd.toFixed(6) : null;
+			if (row.outcome !== "sending") {
+				const same =
+					row.outcome === args.outcome && row.generationId === generationId && row.actualCostUsd === actualCostUsd;
+				if (!same) throw new Error(`attempt ${id} is already settled with different evidence`);
+				return "already-settled";
+			}
 			row.outcome = args.outcome;
-			row.generationId = args.generationId ?? null;
-			row.actualCostUsd = typeof args.actualCostUsd === "number" ? args.actualCostUsd.toFixed(6) : null;
+			row.generationId = generationId;
+			row.actualCostUsd = actualCostUsd;
+			row.candidate = args.candidate ?? null;
+			return "settled";
 		},
 		loadProviderAttempts: async (analysisId) =>
 			attempts

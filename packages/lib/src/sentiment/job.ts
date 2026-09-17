@@ -277,20 +277,45 @@ interface PaidAnswer<T> {
 	value: T;
 	generationId: string | null;
 	costUsd: number | null;
+	/** The normalized candidate this answer produced, kept on its attempt row; verdicts carry none. */
+	candidate?: SentimentClassificationResult | null;
+}
+
+/** Run a DB-only step again from the answer already in hand; when that is exhausted the case goes to reconciliation. */
+async function retryDbOnly<T>(w: Workflow, attemptOrdinal: number, step: () => Promise<T>): Promise<T> {
+	for (let round = 1; ; round++) {
+		try {
+			return await step();
+		} catch (error) {
+			if (error instanceof ClaimLostError) throw error;
+			if (round >= SETTLE_ATTEMPTS) throw new HandOver("unknown-provider-outcome", attemptOrdinal);
+			await (w.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(SETTLE_RETRY_MS);
+		}
+	}
 }
 
 /**
- * One paid answer becomes durable in a single transaction: the ledger row
- * closes with its generation id and charged cost, the usage event is written
- * and the case budget is recomputed from the ledger. A failure here is
- * retried DB-only from the answer already in hand; when that is exhausted the
- * row stays `sending` and the case goes to reconciliation — a paid answer is
- * never bought again because it could not be recorded.
+ * One paid answer becomes durable in two steps with different owners. First
+ * the attempt's own evidence — outcome, generation id, charged cost,
+ * normalized candidate and the usage event — commits in one transaction keyed
+ * on the immutable attempt id and never fenced on the claim, exactly once: a
+ * worker that lost its lease while the request was out still leaves its
+ * answer behind for reconciliation. Only then is the case budget recomputed
+ * from the ledger under the claim and instance fence; losing that fence ends
+ * the attempt as `claim-lost` without undoing the evidence. Either step is
+ * retried DB-only; a paid answer is never bought again because it could not
+ * be recorded.
  */
 async function settlePaidAnswer(
 	w: Workflow,
 	attempt: { id: string; ordinal: number },
-	args: { outcome: "accepted" | "rejected"; generationId: string | null; costUsd: number | null; succeeded: boolean },
+	args: {
+		outcome: "accepted" | "rejected";
+		generationId: string | null;
+		costUsd: number | null;
+		candidate: SentimentClassificationResult | null;
+		succeeded: boolean;
+	},
 	attribution: { provider: string; model: string | null },
 ): Promise<void> {
 	const usage = { organizationId: w.run.organizationId, brandId: w.run.brandId, promptId: w.run.promptId };
@@ -298,26 +323,27 @@ async function settlePaidAnswer(
 	const finish = w.deps.finishProviderAttempt ?? finishProviderAttempt;
 	const charge = w.deps.chargeResolutionCase ?? chargeResolutionCase;
 	const transaction = w.deps.transaction ?? runInTransaction;
-	for (let round = 1; ; round++) {
-		try {
-			const charged = await transaction(async (tx) => {
-				await finish(
-					attempt.id,
-					{ outcome: args.outcome, generationId: args.generationId, actualCostUsd: args.costUsd },
-					tx,
-				);
+	await retryDbOnly(w, attempt.ordinal, () =>
+		transaction(async (tx) => {
+			const settled = await finish(
+				attempt.id,
+				{
+					outcome: args.outcome,
+					generationId: args.generationId,
+					actualCostUsd: args.costUsd,
+					candidate: args.candidate,
+				},
+				tx,
+			);
+			// The usage event is written with the first settlement only, so a replay never attributes twice.
+			if (settled === "settled") {
 				await recordUsage({ ...usage, ...attribution, succeeded: args.succeeded, actualCostUsd: args.costUsd }, tx);
-				return charge(w.claim.analysisId, w.claim, tx);
-			});
-			w.paidCalls = charged.automatedProviderCalls;
-			w.costUsd = charged.totalActualCostUsd;
-			return;
-		} catch (error) {
-			if (error instanceof ClaimLostError) throw error;
-			if (round >= SETTLE_ATTEMPTS) throw new HandOver("unknown-provider-outcome", attempt.ordinal);
-			await (w.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(SETTLE_RETRY_MS);
-		}
-	}
+			}
+		}),
+	);
+	const charged = await retryDbOnly(w, attempt.ordinal, () => charge(w.claim.analysisId, w.claim));
+	w.paidCalls = charged.automatedProviderCalls;
+	w.costUsd = charged.totalActualCostUsd;
 }
 
 /**
@@ -365,6 +391,7 @@ async function paidCall<T>(
 					outcome: "rejected",
 					generationId: safe.envelope.generationId,
 					costUsd: safe.envelope.usage?.costUsd ?? null,
+					candidate: null,
 					succeeded: false,
 				},
 				{ provider: safe.provider, model: safe.model },
@@ -395,6 +422,7 @@ async function paidCall<T>(
 			outcome: usable(answer.value) ? "accepted" : "rejected",
 			generationId: answer.generationId,
 			costUsd: answer.costUsd,
+			candidate: answer.candidate ?? null,
 			succeeded: true,
 		},
 		{ provider: w.provider.id, model: SENTIMENT_MODEL },
@@ -511,7 +539,12 @@ async function initialCandidate(w: Workflow): Promise<SentimentClassificationRes
 				{ ...w.deps, resolveProvider: () => w.provider },
 				w.options.signal,
 			);
-			return { value, generationId: value.generationId ?? null, costUsd: value.usage?.costUsd ?? null };
+			return {
+				value,
+				generationId: value.generationId ?? null,
+				costUsd: value.usage?.costUsd ?? null,
+				candidate: value.candidate,
+			};
 		},
 		(value) => value.contractDefect === null && value.unresolvedTargets.length === 0,
 	);
@@ -554,7 +587,9 @@ async function repair(
 		"repair",
 		async () => {
 			const raw = await structured(w, prompt, schema);
-			return { ...raw, value: toClassificationResult(schema.parse(raw.value)) };
+			const value = toClassificationResult(schema.parse(raw.value));
+			// The reusable evidence of a repair is the whole candidate it yields, not the repaired slice alone.
+			return { ...raw, value, candidate: mergeRepairedEntities(candidate, value, keys) };
 		},
 		(value) => {
 			const a = assess(w, mergeRepairedEntities(candidate, value, keys));

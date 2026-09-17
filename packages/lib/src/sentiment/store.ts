@@ -38,6 +38,7 @@ import {
 	type SentimentAnalysisStatus,
 	type SentimentAspectKey,
 	type SentimentCandidate,
+	type SentimentClassificationResult,
 	type SentimentDetectionStatus,
 	sortSentimentEntities,
 } from "./types";
@@ -789,24 +790,61 @@ export async function openProviderAttempt(
 	return row;
 }
 
-/** Close an attempt with its safe outcome; a paid answer carries its generation id and charged cost. */
+/** A settlement that disagrees with the terminal evidence an attempt already holds; the first evidence stands. */
+export class AttemptSettlementConflictError extends Error {
+	constructor(readonly attemptId: string) {
+		super(`attempt ${attemptId} is already settled with different evidence`);
+		this.name = "AttemptSettlementConflictError";
+	}
+}
+
+export interface AttemptSettlement {
+	outcome: Exclude<AttemptOutcome, "sending">;
+	generationId?: string | null;
+	actualCostUsd?: number | null;
+	/** The normalized candidate an answered attempt produced; omitted for refusals, aborts and verdicts. */
+	candidate?: SentimentClassificationResult | null;
+}
+
+const costColumn = (value: number | null | undefined): string | null =>
+	typeof value === "number" && Number.isFinite(value) && value >= 0 ? value.toFixed(6) : null;
+
+/**
+ * Settle an attempt with its terminal evidence — outcome, generation id,
+ * charged cost and normalized candidate — exactly once. The evidence belongs
+ * to the immutable attempt row, so this write is keyed on the attempt alone
+ * and is never fenced on a case claim: a worker that lost its claim still
+ * leaves its own answer behind. Only a `sending` row is written; an identical
+ * repeat is a no-op (`already-settled`), and a repeat that disagrees with the
+ * stored evidence fails without touching it.
+ */
 export async function finishProviderAttempt(
 	id: string,
-	args: { outcome: Exclude<AttemptOutcome, "sending">; generationId?: string | null; actualCostUsd?: number | null },
+	args: AttemptSettlement,
 	executor: Executor = db,
-): Promise<void> {
-	await executor
+): Promise<"settled" | "already-settled"> {
+	const generationId = args.generationId ?? null;
+	const actualCostUsd = costColumn(args.actualCostUsd);
+	const rows = await executor
 		.update(sentimentProviderAttempts)
 		.set({
 			outcome: args.outcome,
-			generationId: args.generationId ?? null,
-			actualCostUsd:
-				typeof args.actualCostUsd === "number" && Number.isFinite(args.actualCostUsd) && args.actualCostUsd >= 0
-					? args.actualCostUsd.toFixed(6)
-					: null,
+			generationId,
+			actualCostUsd,
+			candidate: args.candidate ?? null,
 			finishedAt: new Date(),
 		})
-		.where(eq(sentimentProviderAttempts.id, id));
+		.where(and(eq(sentimentProviderAttempts.id, id), eq(sentimentProviderAttempts.outcome, "sending")))
+		.returning({ id: sentimentProviderAttempts.id });
+	if (rows.length === 1) return "settled";
+	const row = await executor.query.sentimentProviderAttempts.findFirst({ where: eq(sentimentProviderAttempts.id, id) });
+	if (!row) throw new Error(`provider attempt ${id} missing`);
+	const same =
+		row.outcome === args.outcome &&
+		row.generationId === generationId &&
+		(row.actualCostUsd === null ? actualCostUsd === null : Number(row.actualCostUsd) === Number(actualCostUsd));
+	if (!same) throw new AttemptSettlementConflictError(id);
+	return "already-settled";
 }
 
 export interface UnresolvedCaseRow {

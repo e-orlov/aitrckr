@@ -94,7 +94,7 @@ const observations = (runId: string) => count("sentiment_observations WHERE prom
 
 const cite = (anchorId: string, polarity: "positive" | "negative" | "neutral") => ({ anchorId, polarity });
 const positive = (score: number, ...ids: string[]) => ({
-	category: "positive",
+	category: "positive" as const,
 	score,
 	confidence: 0.9,
 	evidence: ids.map((i) => cite(i, "positive")),
