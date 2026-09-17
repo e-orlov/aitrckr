@@ -1,13 +1,14 @@
 #!/usr/bin/env tsx
 /**
- * SENT-01 classifier v4 shadow oracle — read-only. Replays the v4 validation
- * rules (entity grounding, polarity/category fit, anchor resolution) over
- * every stored completed sentiment analysis of the database DATABASE_URL
- * points at, without changing a row. Prints ids, codes and counts only: no
- * answer text, no quotes, no provider payload.
+ * SENT-01 classifier shadow oracle — read-only. Replays the current validation
+ * rules (entity grounding, polarity/category fit, anchor resolution; since v5
+ * the mandatory overall is terminal and an unsupported aspect claim is dropped
+ * on its own) over every stored completed sentiment analysis of the database
+ * DATABASE_URL points at, without changing a row. Prints ids, codes and counts
+ * only: no answer text, no quotes, no provider payload.
  *
  * Usage (against a restored copy, never production):
- *   pnpm -C apps/worker exec tsx --env-file=<env> scripts/sentiment-grounding-shadow.ts [--version sent-classifier-v3] [--json <file>]
+ *   pnpm -C apps/worker exec tsx --env-file=<env> scripts/sentiment-grounding-shadow.ts [--version sent-classifier-v3[,sent-classifier-v4]] [--json <file>]
  */
 import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -28,21 +29,26 @@ import {
 	type SentimentEvidence,
 	SentimentValidationError,
 	segmentAnswer,
-	validateClassification,
+	validateClassificationDetailed,
 } from "@workspace/lib/sentiment";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 interface ShadowRow {
 	analysisId: string;
 	promptRunId: string;
 	classifierVersion: string;
-	/** `accept` or the first validation code the v4 rules raise for this analysis. */
+	/** `accept` (completed) or the terminal validation code the current rules raise for this analysis. */
 	outcome: string;
 	entityKey: string | null;
 	aspectKey: string | null;
 	anchorId: string | null;
 	/** Per cited anchor: how it was attributed to its entity (explicit / inherited context / generic / names-others). */
 	anchorContexts: Record<string, number>;
+	/** Stored aspect rows replayed, and how many of them the current rules keep. */
+	aspectsStored: number;
+	aspectsKept: number;
+	/** Aspect claims the current rules drop (classifier v5): identifiers and codes only. */
+	filteredClaims: { entityKey: string; aspectKey: string; code: string; anchorIds: string[] }[];
 }
 
 function refsFromStored(body: string, evidence: SentimentEvidence[], anchors: ReturnType<typeof segmentAnswer>) {
@@ -94,7 +100,8 @@ async function shadowOne(analysis: StoredAnalysis): Promise<ShadowRow> {
 		.from(promptRuns)
 		.where(eq(promptRuns.id, analysis.promptRunId));
 	const body = run ? extractAnswerBody(run.rawOutput, run.provider, run.model) : null;
-	if (!body) return { ...base(analysis), outcome: "body-missing", ...empty, anchorContexts: {} };
+	const none = { anchorContexts: {}, aspectsStored: 0, aspectsKept: 0, filteredClaims: [] };
+	if (!body) return { ...base(analysis), outcome: "body-missing", ...empty, ...none };
 
 	const entities = await loadDetectableEntities(analysis.brandId, "historical");
 	const mentions = await loadMentions(analysis.promptRunId);
@@ -133,9 +140,23 @@ async function shadowOne(analysis: StoredAnalysis): Promise<ShadowRow> {
 			}),
 		),
 	};
+	const aspectsStored = internal.entities.reduce((n, e) => n + e.aspects.length, 0);
 	try {
-		validateClassification(internal, { answerBody: body, candidates, anchors, analysis: ranges });
-		return { ...base(analysis), outcome: "accept", ...empty, anchorContexts };
+		const validated = validateClassificationDetailed(internal, {
+			answerBody: body,
+			candidates,
+			anchors,
+			analysis: ranges,
+		});
+		return {
+			...base(analysis),
+			outcome: "accept",
+			...empty,
+			anchorContexts,
+			aspectsStored,
+			aspectsKept: validated.entities.reduce((n, e) => n + e.aspects.length, 0),
+			filteredClaims: validated.filteredClaims,
+		};
 	} catch (error) {
 		if (!(error instanceof SentimentValidationError)) throw error;
 		return {
@@ -145,6 +166,9 @@ async function shadowOne(analysis: StoredAnalysis): Promise<ShadowRow> {
 			aspectKey: error.diagnostic?.aspectKey ?? null,
 			anchorId: error.diagnostic?.anchorId ?? null,
 			anchorContexts,
+			aspectsStored,
+			aspectsKept: 0,
+			filteredClaims: [],
 		};
 	}
 }
@@ -153,7 +177,7 @@ async function main(): Promise<void> {
 	const { values } = parseArgs({
 		options: { version: { type: "string" }, json: { type: "string" }, brand: { type: "string" } },
 	});
-	const version = values.version ?? "sent-classifier-v3";
+	const versions = (values.version ?? "sent-classifier-v3").split(",");
 	const analyses = await db
 		.select({
 			id: sentimentAnalyses.id,
@@ -163,7 +187,7 @@ async function main(): Promise<void> {
 			status: sentimentAnalyses.status,
 		})
 		.from(sentimentAnalyses)
-		.where(eq(sentimentAnalyses.classifierVersion, version));
+		.where(inArray(sentimentAnalyses.classifierVersion, versions));
 	const completed = analyses.filter((a) => a.status === "completed" && (!values.brand || a.brandId === values.brand));
 	const rows: ShadowRow[] = [];
 	const contextTotals: Record<string, number> = {};
@@ -174,13 +198,20 @@ async function main(): Promise<void> {
 	}
 	const byOutcome: Record<string, number> = {};
 	for (const row of rows) byOutcome[row.outcome] = (byOutcome[row.outcome] ?? 0) + 1;
+	const accepted = rows.filter((r) => r.outcome === "accept");
 	const report = {
-		version,
+		versions,
 		analyses: completed.length,
 		byOutcome,
+		completed: accepted.length,
+		terminal: rows.length - accepted.length,
+		aspectsStored: rows.reduce((n, r) => n + r.aspectsStored, 0),
+		aspectsConfirmed: accepted.reduce((n, r) => n + r.aspectsKept, 0),
+		filteredClaims: accepted.reduce((n, r) => n + r.filteredClaims.length, 0),
 		anchorContexts: contextTotals,
 		rejected: rows.filter((r) => r.outcome !== "accept"),
-		accepted: rows.filter((r) => r.outcome === "accept").map((r) => r.promptRunId),
+		filtered: accepted.filter((r) => r.filteredClaims.length > 0),
+		accepted: accepted.map((r) => r.promptRunId),
 	};
 	console.log(JSON.stringify(report, null, 1));
 	if (values.json) writeFileSync(values.json, JSON.stringify(report, null, 1));

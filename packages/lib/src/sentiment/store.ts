@@ -11,6 +11,7 @@ import {
 	sentimentAnalyses,
 	sentimentAspectObservations,
 	sentimentDetections,
+	sentimentFilteredClaims,
 	sentimentObservations,
 	usageEvents,
 } from "../db/schema";
@@ -460,8 +461,10 @@ export async function markAnalysis(
 /**
  * Persist a validated classification atomically: the analysis flips to
  * `completed` — fenced on the claim generation, which also locks the row —
- * then its observations are replaced by the new set with their aspect rows.
- * A stale claimant gets `ClaimLostError` before any observation is touched.
+ * then its observations are replaced by the new set with their aspect rows,
+ * and the audit of the aspect claims dropped as unsupported is replaced with
+ * them (identifiers and codes only). A stale claimant gets `ClaimLostError`
+ * before any row is touched; a failure anywhere rolls all of it back.
  */
 export async function persistClassification(args: {
 	claim: AnalysisClaim;
@@ -495,6 +498,7 @@ export async function persistClassification(args: {
 			.returning({ id: sentimentAnalyses.id });
 		if (owned.length !== 1) throw new ClaimLostError(args.claim);
 		await tx.delete(sentimentObservations).where(eq(sentimentObservations.analysisId, args.claim.analysisId));
+		await tx.delete(sentimentFilteredClaims).where(eq(sentimentFilteredClaims.analysisId, args.claim.analysisId));
 		for (const entity of args.classification.entities) {
 			const mention = mentionByKey.get(entity.key);
 			if (!mention) throw new Error(`classified entity "${entity.key}" has no mention row`);
@@ -529,6 +533,21 @@ export async function persistClassification(args: {
 				);
 			}
 		}
+		const audit = new Map<string, typeof sentimentFilteredClaims.$inferInsert>();
+		for (const claim of args.classification.filteredClaims) {
+			const mention = mentionByKey.get(claim.entityKey);
+			if (!mention) throw new Error(`filtered claim for entity "${claim.entityKey}" has no mention row`);
+			audit.set(`${claim.entityKey}|${claim.aspectKey}|${claim.code}`, {
+				analysisId: args.claim.analysisId,
+				entityType: mention.entityType,
+				entityKey: mention.key,
+				aspectKey: claim.aspectKey,
+				validationCode: claim.code,
+				classifierVersion: args.classification.classifierVersion,
+				anchorIds: claim.anchorIds,
+			});
+		}
+		if (audit.size > 0) await tx.insert(sentimentFilteredClaims).values([...audit.values()]);
 	});
 }
 

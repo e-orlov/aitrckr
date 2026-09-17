@@ -633,12 +633,61 @@ export const sentimentAspectObservations = pgTable(
 	}),
 ).enableRLS();
 
+/**
+ * Operator audit of aspect claims the classifier proposed and the answer did
+ * not support for that entity (classifier v5): the claim is dropped from the
+ * analysis, which completes on the grounded claims, and this row records that
+ * it was proposed. Identifiers and the allow-listed validation code only —
+ * no text of the answer, the prompt or the provider payload ever lands here.
+ * Internal: the Sentiment page never reads it. One row per distinct
+ * (analysis, entity, aspect, code); rows are replaced with the observations
+ * of their analysis.
+ */
+export const sentimentFilteredClaims = pgTable(
+	"sentiment_filtered_claims",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		analysisId: uuid("analysis_id")
+			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
+			.notNull(),
+		entityType: text("entity_type").notNull(),
+		entityKey: text("entity_key").notNull(),
+		aspectKey: text("aspect_key").notNull(),
+		validationCode: text("validation_code").notNull(),
+		classifierVersion: text("classifier_version").notNull(),
+		/** Anchor ids (`s0001`…) the dropped claim cited; never the anchor text. */
+		anchorIds: jsonb("anchor_ids").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		analysisClaimUnique: uniqueIndex("sentiment_filtered_claims_analysis_claim_idx").on(
+			table.analysisId,
+			table.entityKey,
+			table.aspectKey,
+			table.validationCode,
+		),
+		aspectKeyCheck: check(
+			"sentiment_filtered_claims_aspect_key_check",
+			sql`${table.aspectKey} IN ('price', 'coverage', 'service', 'other')`,
+		),
+		entityTypeCheck: check(
+			"sentiment_filtered_claims_entity_type_check",
+			sql`${table.entityType} IN ('brand', 'competitor')`,
+		),
+		validationCodeCheck: check(
+			"sentiment_filtered_claims_validation_code_check",
+			sql`${table.validationCode} IN ('aspect-ungrounded', 'evidence-entity-unbound', 'polarity-category-mismatch', 'mixed-needs-dual-evidence', 'evidence-anchor-polarity-conflict')`,
+		),
+	}),
+).enableRLS();
+
 export type SentimentDetection = typeof sentimentDetections.$inferSelect;
 export type PromptRunEntityMention = typeof promptRunEntityMentions.$inferSelect;
 export type NewPromptRunEntityMention = typeof promptRunEntityMentions.$inferInsert;
 export type SentimentAnalysis = typeof sentimentAnalyses.$inferSelect;
 export type SentimentObservation = typeof sentimentObservations.$inferSelect;
 export type SentimentAspectObservation = typeof sentimentAspectObservations.$inferSelect;
+export type SentimentFilteredClaim = typeof sentimentFilteredClaims.$inferSelect;
 
 // Encrypted overrides for credential environment variables, keyed by the env-var
 // name they stand in for. Separate table, strictest access.
