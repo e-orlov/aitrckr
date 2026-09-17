@@ -856,6 +856,54 @@ function ledgerTotals(kase: StoredResolutionCase, attempts: StoredAttempt[]): { 
 	};
 }
 
+/**
+ * Under a freshly acquired claim, move a parked case forward only on exact
+ * same-instance evidence: the case budget is caught up from the ledger (never
+ * lowered — drift keeps the case parked and is reported), then the stored
+ * candidate becomes the provisional result and the workflow continues at
+ * verification. Anything else hands the row back parked, untouched.
+ */
+async function resumeParkedCase(
+	kase: StoredResolutionCase,
+	claim: ResolutionOwner,
+	inputHash: string,
+	attempts: StoredAttempt[],
+	deps: SentimentJobDeps,
+): Promise<{ kase: StoredResolutionCase } | { outcome: SentimentJobOutcome }> {
+	const evidence = resumableEvidence(kase, inputHash, attempts);
+	if (!evidence) {
+		await park(claim, null, deps);
+		return { outcome: reviewOutcome(kase) };
+	}
+	const ledger = ledgerTotals(kase, attempts);
+	if (kase.automatedProviderCalls > ledger.calls || Number(kase.totalActualCostUsd) > ledger.costUsd + 1e-9) {
+		// The case claims more than its ledger shows: never lower a counter by guessing; leave it parked and say so.
+		console.error(
+			`sentiment budget drift on analysis ${claim.analysisId}: case ${kase.automatedProviderCalls}/${kase.totalActualCostUsd} vs ledger ${ledger.calls}/${ledger.costUsd.toFixed(6)}`,
+		);
+		await park(claim, null, deps);
+		return { outcome: reviewOutcome(kase, evidence.attempt.ordinal) };
+	}
+	// The late call the previous owner never got to charge is counted before any budget decision.
+	const charged = await (deps.chargeResolutionCase ?? chargeResolutionCase)(claim.analysisId, claim);
+	const resumed = {
+		status: "verifying" as const,
+		provisionalResult: evidence.candidate,
+		unresolvedTargets: [],
+		reviewReason: null,
+		nextAttemptAt: null,
+	};
+	await (deps.updateResolutionCase ?? updateResolutionCase)(claim.analysisId, resumed, claim);
+	return {
+		kase: {
+			...kase,
+			...resumed,
+			automatedProviderCalls: charged.automatedProviderCalls,
+			totalActualCostUsd: charged.totalActualCostUsd.toFixed(6),
+		},
+	};
+}
+
 async function classifyAndPersist(
 	run: StoredRunForSentiment & { answerBody: string },
 	analysisClaim: AnalysisClaim,
@@ -880,37 +928,9 @@ async function classifyAndPersist(
 	}
 	const attempts = await (deps.loadProviderAttempts ?? loadProviderAttempts)(claim.analysisId);
 	if (isParked(kase)) {
-		// Re-checked under the new claim: only exact same-instance evidence may move a parked case, and only its new owner.
-		const evidence = resumableEvidence(kase, inputHash, attempts);
-		if (!evidence) {
-			await park(claim, null, deps);
-			return reviewOutcome(kase);
-		}
-		const ledger = ledgerTotals(kase, attempts);
-		if (kase.automatedProviderCalls > ledger.calls || Number(kase.totalActualCostUsd) > ledger.costUsd + 1e-9) {
-			// The case claims more than its ledger shows: never lower a counter by guessing; leave it parked and say so.
-			console.error(
-				`sentiment budget drift on analysis ${claim.analysisId}: case ${kase.automatedProviderCalls}/${kase.totalActualCostUsd} vs ledger ${ledger.calls}/${ledger.costUsd.toFixed(6)}`,
-			);
-			await park(claim, null, deps);
-			return reviewOutcome(kase, evidence.attempt.ordinal);
-		}
-		// The late call the previous owner never got to charge is counted before any budget decision.
-		const charged = await (deps.chargeResolutionCase ?? chargeResolutionCase)(claim.analysisId, claim);
-		const resumed = {
-			status: "verifying" as const,
-			provisionalResult: evidence.candidate,
-			unresolvedTargets: [],
-			reviewReason: null,
-			nextAttemptAt: null,
-		};
-		await (deps.updateResolutionCase ?? updateResolutionCase)(claim.analysisId, resumed, claim);
-		kase = {
-			...kase,
-			...resumed,
-			automatedProviderCalls: charged.automatedProviderCalls,
-			totalActualCostUsd: charged.totalActualCostUsd.toFixed(6),
-		};
+		const resumed = await resumeParkedCase(kase, claim, inputHash, attempts, deps);
+		if ("outcome" in resumed) return resumed.outcome;
+		kase = resumed.kase;
 	}
 	const dangling = attempts.find((a) => a.outcome === "sending");
 	if (dangling) {
