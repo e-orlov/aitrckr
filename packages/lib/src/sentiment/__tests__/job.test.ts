@@ -195,12 +195,12 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		const outcome = await runSentimentJob(payload, d);
 		expect(outcome).toMatchObject(verifiedOutcome);
 		expect(d.claimAnalysis).toHaveBeenCalledTimes(1);
-		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
+		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true, resumeResolution: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
 		expect(fakes.calls.map((c) => c.phase)).toEqual(["verify"]);
 		expect(d.persist).toHaveBeenCalledWith(
 			expect.objectContaining({
-				claim: { analysisId: "a1", generation: 7 },
+				claim: expect.objectContaining({ analysisId: "a1", generation: 7 }),
 				promptRunId: RUN_ID,
 				mentions,
 				verifierVersion: SENTIMENT_VERIFIER_VERSION,
@@ -244,7 +244,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(marks).toEqual([]);
 	});
 
-	it("C4: a persistence failure after the paid answers parks the case, fails the analysis with the persistence code and never re-attributes", async () => {
+	it("C4: a persistence failure after the paid answers parks the case as pending_resolution with the persistence code and never re-attributes", async () => {
 		const { d, marks, usage, fakes } = deps({
 			persist: vi.fn(async () => {
 				throw new Error(`insert failed while writing "${run.answerBody}"`);
@@ -252,20 +252,33 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		});
 		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "persistence", kind: "store" });
 		expect(usage).toHaveLength(2);
-		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "persistence", inputHash: null });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: "persistence", inputHash: null });
 		expect(fakes.cases.get("a1")).toMatchObject({ status: "retry_wait" });
 		expect(JSON.stringify(marks)).not.toContain(run.answerBody ?? "");
 	});
 
-	it("C4: a failing usage write does not replace the outcome and is attempted once per paid answer", async () => {
+	it("C4: a failing usage write is retried DB-only from the recorded answer; the paid answer is never bought again", async () => {
+		let failures = 0;
+		const recordUsage = vi.fn(async () => {
+			if (failures++ === 0) throw new Error("usage table unavailable");
+		});
+		const { d, fakes } = deps({ recordUsage, sleep: vi.fn(async () => {}) });
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "classified", paidCalls: 2 });
+		expect(d.classify).toHaveBeenCalledTimes(1);
+		expect(recordUsage).toHaveBeenCalledTimes(3);
+		expect(fakes.attempts.map((a) => a.outcome)).toEqual(["accepted", "accepted"]);
+	});
+
+	it("C4: a usage write that keeps failing leaves the paid attempt for reconciliation instead of a second call", async () => {
 		const recordUsage = vi.fn(async () => {
 			throw new Error("usage table unavailable");
 		});
-		const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-		const { d } = deps({ recordUsage });
-		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "classified" });
-		expect(recordUsage).toHaveBeenCalledTimes(2);
-		spy.mockRestore();
+		const { d, marks, fakes } = deps({ recordUsage, sleep: vi.fn(async () => {}) });
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: 1 });
+		expect(d.classify).toHaveBeenCalledTimes(1);
+		expect(fakes.attempts.map((a) => a.outcome)).toEqual(["sending"]);
+		expect(fakes.cases.get("a1")).toMatchObject({ status: "awaiting_reconciliation" });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution" });
 	});
 
 	it("C4: a persistence failure whose terminal write is refused ends claim-lost", async () => {
@@ -281,7 +294,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("fence: a provider failure whose routing write is refused still throws for the queue", async () => {
 		const { d } = deps({
 			classify: vi.fn(async () => {
-				throw new Error("OpenRouter API error (500)");
+				throw new Error("OpenRouter API error (503)");
 			}),
 			markAnalysis: vi.fn(async () => false),
 		});
@@ -358,7 +371,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("B8: a completed analysis with a stale input hash (new entity after a roster edit) is reclassified", async () => {
 		const { d } = deps({ analysis: { status: "completed", inputHash: "0".repeat(64) } });
 		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "classified", verified: true });
-		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
+		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true, resumeResolution: true });
 	});
 
 	it("B8: a completed analysis under another taxonomy or without a hash never counts as current", async () => {
@@ -480,7 +493,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			reviewReason: "call-limit",
 			automatedProviderCalls: 5,
 		});
-		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "awaiting-review", inputHash: null });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: null, inputHash: null });
 		expect(usage).toHaveLength(5);
 		// A further run makes no call and keeps the review item.
 		const again = deps({ fakes, classify: vi.fn(async () => unresolved) });
@@ -488,14 +501,14 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(again.d.classify).not.toHaveBeenCalled();
 	});
 
-	it("a provider failure keeps the queue's retry path: the job throws, the failed row carries no input hash, the case waits", async () => {
+	it("a proven refusal keeps the queue's retry path: the job throws, the parked row carries no input hash, the case waits", async () => {
 		const { d, marks, usage, fakes } = deps({
 			classify: vi.fn(async () => {
-				throw new Error("OpenRouter API error (502)");
+				throw new Error("OpenRouter API error (503)");
 			}),
 		});
 		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
-		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "provider", inputHash: null });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: "provider", inputHash: null });
 		expect(usage).toEqual([]);
 		expect(fakes.attempts.map((a) => `${a.phase}:${a.outcome}:${a.generationId}`)).toEqual([
 			"classify:provider-error:null",
@@ -576,21 +589,40 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect((thrown as Error).cause).toBeUndefined();
 	});
 
-	it("sanitizes an aborted request to the stable `aborted` code", async () => {
+	it("an aborted request has an unknown outcome: the attempt is `aborted`, the case awaits reconciliation, nothing is retried", async () => {
 		const { d, marks, fakes } = deps({
 			classify: vi.fn(async () => {
 				throw new DOMException("The operation was aborted", "AbortError");
 			}),
 		});
-		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "aborted", kind: "aborted" });
-		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "aborted" });
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: 1 });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution" });
 		expect(fakes.attempts.map((a) => a.outcome)).toEqual(["aborted"]);
+		expect(fakes.cases.get("a1")).toMatchObject({ status: "awaiting_reconciliation" });
+	});
+
+	it("an ambiguous 5xx or a status-less transport error is never repeated automatically", async () => {
+		for (const error of [new Error("OpenRouter API error (502)"), new TypeError("fetch failed")]) {
+			const { d, fakes } = deps({
+				classify: vi.fn(async () => {
+					throw error;
+				}),
+			});
+			expect(await runSentimentJob(payload, d)).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: 1 });
+			expect(fakes.attempts.map((a) => a.outcome)).toEqual(["sending"]);
+			expect(d.classify).toHaveBeenCalledTimes(1);
+		}
 	});
 
 	it("an attempt left in `sending` blocks every automatic call until reconciled", async () => {
 		const fakes = resolutionFakes();
-		await fakes.deps.ensureResolutionCase?.("a1", currentHash);
-		await fakes.deps.openProviderAttempt?.({ analysisId: "a1", phase: "classify", inputHash: currentHash });
+		const kase = await fakes.deps.ensureResolutionCase?.("a1", currentHash);
+		await fakes.deps.openProviderAttempt?.({
+			analysisId: "a1",
+			phase: "classify",
+			inputHash: currentHash,
+			claim: { analysisId: "a1", generation: 1, instanceId: kase?.instanceId ?? "" },
+		});
 		const { d, marks } = deps({ fakes });
 		expect(await runSentimentJob(payload, d)).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: 1 });
 		expect(d.classify).not.toHaveBeenCalled();
@@ -598,7 +630,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			status: "awaiting_reconciliation",
 			reviewReason: "unknown-provider-outcome",
 		});
-		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "awaiting-reconciliation" });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: null });
 	});
 
 	it("skips invalid and stale payloads without touching the store", async () => {

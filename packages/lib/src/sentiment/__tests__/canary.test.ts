@@ -633,7 +633,7 @@ describe("canary verdict after the one call", () => {
 		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "job-outcome", detail: "awaiting-review" }] });
 		expect(deps.persist).not.toHaveBeenCalled();
 		expect(marks).toEqual([
-			expect.objectContaining({ status: "failed", errorCode: "awaiting-review", inputHash: null }),
+			expect.objectContaining({ status: "pending_resolution", errorCode: null, inputHash: null }),
 		]);
 		expect(usage).toEqual([expect.objectContaining({ succeeded: false, actualCostUsd: goodUsage.costUsd })]);
 		expect(report.outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect", paidCalls: 1 });
@@ -684,7 +684,7 @@ describe("canary verdict after the one call", () => {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
 		expect(deps.claimAnalysis).toHaveBeenCalledTimes(1);
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "provider" })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: "provider" })]);
 		expect(usage).toEqual([]);
 		expect(report.outcome).toEqual({ status: "error", name: "SentimentJobError", code: "provider", httpStatus: 503 });
 		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error", detail: "503" }] });
@@ -709,7 +709,11 @@ describe("canary verdict after the one call", () => {
 		const claimAnalysis = vi.fn(async () => ({ claimed: false as const, status: "processing" as const }));
 		const { deps, usage } = storeFakes(provider, { claimAnalysis });
 		const report = await runSentimentCanary({ contract, deps, ...fast });
-		expect(claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true, pristineOnly: true });
+		expect(claimAnalysis).toHaveBeenCalledWith("a1", {
+			allowFinished: true,
+			resumeResolution: true,
+			pristineOnly: true,
+		});
 		expect(provider.runStructuredResearch).not.toHaveBeenCalled();
 		expect(report.providerCalls).toBe(0);
 		expect(report.outcome).toEqual({ status: "claimed-elsewhere" });
@@ -786,7 +790,7 @@ describe("E2: the exact classifier input is re-checked at the provider boundary"
 		expect(report.providerCalls).toBe(0);
 		expect(deps.persist).not.toHaveBeenCalled();
 		expect(usage).toEqual([]);
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "canary-input-drift" })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: "canary-input-drift" })]);
 		expect(report.outcome).toMatchObject({ status: "error", name: "SentimentJobError", code: "canary-input-drift" });
 		expect(codes(report)).toEqual(expected);
 	};
@@ -834,7 +838,7 @@ describe("E1: the post-call gate runs before persistence", () => {
 		expect(usage).toEqual([expect.objectContaining({ succeeded: true }), expect.objectContaining({ succeeded: true })]);
 		// Nothing was written: the analysis fails with the contract code, observations are never touched.
 		expect(deps.persist).not.toHaveBeenCalled();
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "canary-contract" })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: "canary-contract" })]);
 		expect(report.outcome).toMatchObject({ status: "error", name: "SentimentJobError", code: "canary-contract" });
 		return { report, usage };
 	};
@@ -983,7 +987,7 @@ describe("E1: the post-call gate runs before persistence", () => {
 		expect(codes(report)).toEqual(["provider-calls", "job-outcome"]);
 		expect(report.outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect" });
 		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 })]);
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "awaiting-review" })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: null })]);
 	});
 
 	it("accept path persists exactly once", async () => {
@@ -1060,9 +1064,10 @@ describe("canary deadline and watchdog share one abort signal", () => {
 		expect((signal.reason as DOMException).name).toBe("TimeoutError");
 		expect(maxOutputTokens).toBe(8000);
 		expect(elapsed).toBeLessThan(900);
-		expect(report.outcome).toMatchObject({ status: "error", name: "SentimentJobError", code: "aborted" });
+		expect(report.outcome).toMatchObject({ status: "error", name: "TimeoutError", code: "aborted" });
 		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "request-deadline" }] });
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "aborted" })]);
+		// The aborted request's outcome is unknown: parked for reconciliation, never retried automatically.
+		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: null })]);
 		// An aborted request never received an answer: nothing was paid, nothing is attributed.
 		expect(usage).toEqual([]);
 	});
@@ -1104,7 +1109,7 @@ describe("canary deadline and watchdog share one abort signal", () => {
 		expect(deps.persist).not.toHaveBeenCalled();
 		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
 		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 })]);
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "aborted" })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: "aborted" })]);
 	});
 
 	it("the watchdog ends a job invocation that never settles", async () => {

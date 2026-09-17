@@ -203,7 +203,7 @@ export async function applyAdjudication(input: unknown): Promise<AdjudicationRes
 		throw error;
 	}
 
-	const claimed = await claimAnalysis(decision.analysisId, { allowFinished: true });
+	const claimed = await claimAnalysis(decision.analysisId, { allowFinished: true, resumeResolution: true });
 	if (!claimed.claimed)
 		return { status: "refused", analysisId: decision.analysisId, code: "claimed-elsewhere", detail: claimed.status };
 	await persistClassification({

@@ -589,6 +589,22 @@ function rejectReasonForError(outcome: Extract<SentimentCanaryOutcome, { status:
 	}
 }
 
+/**
+ * A non-classified job outcome as the canary reports it. When the canary's
+ * own deadline cut the request, the job parked the run for reconciliation;
+ * the canary reports the abort it caused rather than an anonymous outcome.
+ */
+function parkedOutcome(status: SentimentJobOutcome["status"], signal: AbortSignal): SentimentCanaryOutcome {
+	if (status !== "awaiting-reconciliation" || !signal.aborted) return { status } as SentimentCanaryOutcome;
+	const reason = signal.reason as { name?: unknown } | undefined;
+	return {
+		status: "error",
+		name: typeof reason?.name === "string" ? reason.name : "AbortError",
+		code: "aborted",
+		httpStatus: null,
+	};
+}
+
 function safeOutcomeForError(error: unknown): SentimentCanaryOutcome {
 	const e = error as { name?: string; code?: unknown; httpStatus?: unknown };
 	return {
@@ -782,7 +798,7 @@ export async function runSentimentCanary(args: {
 				unresolved: result.unresolved,
 			};
 		} else {
-			outcome = { status: result.status };
+			outcome = parkedOutcome(result.status, controller.signal);
 		}
 	} catch (error) {
 		outcome = safeOutcomeForError(error);

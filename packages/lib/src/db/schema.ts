@@ -525,7 +525,7 @@ export const sentimentAnalyses = pgTable(
 		),
 		statusCheck: check(
 			"sentiment_analyses_status_check",
-			sql`${table.status} IN ('pending', 'processing', 'completed', 'no_mentions', 'failed')`,
+			sql`${table.status} IN ('pending', 'processing', 'completed', 'no_mentions', 'failed', 'pending_resolution')`,
 		),
 	}),
 ).enableRLS();
@@ -696,7 +696,11 @@ export const sentimentFilteredClaims = pgTable(
  * never text), which targets are unresolved, and the bounded automatic
  * budget already spent. `awaiting_review` and `awaiting_reconciliation` are
  * mandatory operator work items, never a closed failure; `resolved` is set in
- * the same transaction that persists the verified result.
+ * the same transaction that persists the verified result. `instance_id`
+ * identifies one resolution instance (analysis = run + classifier version,
+ * plus the input hash): a resolved instance is immutable, and a changed input
+ * rotates the id with a fresh budget while the old instance's attempt rows
+ * stay under the old id.
  */
 export const sentimentResolutionCases = pgTable(
 	"sentiment_resolution_cases",
@@ -705,6 +709,7 @@ export const sentimentResolutionCases = pgTable(
 			.primaryKey()
 			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
 			.notNull(),
+		instanceId: uuid("instance_id").defaultRandom().notNull(),
 		inputHash: text("input_hash").notNull(),
 		status: text("status").notNull().default("open"),
 		provisionalResult: jsonb("provisional_result"),
@@ -750,6 +755,8 @@ export const sentimentProviderAttempts = pgTable(
 		analysisId: uuid("analysis_id")
 			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
 			.notNull(),
+		/** The resolution instance the request was made for; the ordinal runs over the whole analysis and is never reused. */
+		instanceId: uuid("instance_id").notNull(),
 		ordinal: integer("ordinal").notNull(),
 		phase: text("phase").notNull(),
 		provider: text("provider").notNull(),

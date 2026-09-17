@@ -124,7 +124,19 @@ export const SENTIMENT_MODEL = "openai/gpt-5-mini";
 export const SENTIMENT_DETECTION_STATUSES = ["mentions", "no_mentions", "unextractable"] as const;
 export type SentimentDetectionStatus = (typeof SENTIMENT_DETECTION_STATUSES)[number];
 
-export const SENTIMENT_ANALYSIS_STATUSES = ["pending", "processing", "completed", "no_mentions", "failed"] as const;
+/**
+ * `pending_resolution` is a v5 run parked inside its resolution workflow
+ * (retry wait, awaiting review or reconciliation): unresolved work, never a
+ * failure, and claimable only by that workflow or by adjudication.
+ */
+export const SENTIMENT_ANALYSIS_STATUSES = [
+	"pending",
+	"processing",
+	"completed",
+	"no_mentions",
+	"failed",
+	"pending_resolution",
+] as const;
 export type SentimentAnalysisStatus = (typeof SENTIMENT_ANALYSIS_STATUSES)[number];
 
 /**

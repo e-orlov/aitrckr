@@ -1,5 +1,5 @@
 {
-  "id": "9fc936b1-feb6-4a79-a0e2-bd3659250013",
+  "id": "67ac8713-1238-4f25-a0d6-09070ab1c482",
   "prevId": "5283aae9-afc0-49fc-84e5-b994a92d973a",
   "version": "7",
   "dialect": "postgresql",
@@ -1496,7 +1496,7 @@
       "checkConstraints": {
         "sentiment_analyses_status_check": {
           "name": "sentiment_analyses_status_check",
-          "value": "\"sentiment_analyses\".\"status\" IN ('pending', 'processing', 'completed', 'no_mentions', 'failed')"
+          "value": "\"sentiment_analyses\".\"status\" IN ('pending', 'processing', 'completed', 'no_mentions', 'failed', 'pending_resolution')"
         }
       },
       "isRLSEnabled": true
@@ -2198,6 +2198,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "instance_id": {
+          "name": "instance_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
         "ordinal": {
           "name": "ordinal",
           "type": "integer",
@@ -2350,6 +2356,13 @@
           "type": "uuid",
           "primaryKey": true,
           "notNull": true
+        },
+        "instance_id": {
+          "name": "instance_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
         },
         "input_hash": {
           "name": "input_hash",

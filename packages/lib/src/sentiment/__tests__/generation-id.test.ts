@@ -188,7 +188,10 @@ describe("H1 the generation id survives the successful path", () => {
 			// Decided at the persistence boundary like every other post-call rejection: nothing is written.
 			expect(report.outcome).toMatchObject({ status: "error", code: "canary-contract" });
 			expect(deps.persist).not.toHaveBeenCalled();
-			expect(deps.markAnalysis).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ status: "failed" }));
+			expect(deps.markAnalysis).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.objectContaining({ status: "pending_resolution" }),
+			);
 			expect(JSON.stringify(report)).not.toMatch(/gen x|yyyyy/);
 		}
 	});

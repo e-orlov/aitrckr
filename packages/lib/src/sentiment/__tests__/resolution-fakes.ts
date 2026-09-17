@@ -20,6 +20,7 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 	const attempts: {
 		id: string;
 		analysisId: string;
+		instanceId: string;
 		ordinal: number;
 		phase: string;
 		outcome: string;
@@ -30,11 +31,25 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 	}[] = [];
 	const calls: { phase: string; prompt: string }[] = [];
 	const deps: Partial<SentimentJobDeps> = {
+		// Rolls the in-memory store back on failure, as the real transaction would.
+		transaction: async (fn) => {
+			const attemptsBefore = attempts.map((a) => ({ ...a }));
+			const casesBefore = new Map([...cases].map(([k, v]) => [k, { ...v }]));
+			try {
+				return await fn(undefined as never);
+			} catch (error) {
+				attempts.splice(0, attempts.length, ...attemptsBefore);
+				for (const [k, v] of casesBefore) Object.assign(cases.get(k) ?? {}, v);
+				throw error;
+			}
+		},
+		loadResolutionCase: async (analysisId) => (cases.get(analysisId) as never) ?? null,
 		ensureResolutionCase: async (analysisId, inputHash) => {
 			const existing = cases.get(analysisId);
 			if (existing && existing.inputHash === inputHash) return existing as never;
 			const row = {
 				analysisId,
+				instanceId: `inst-${analysisId}-${cases.size + 1}-${inputHash.slice(0, 8)}`,
 				inputHash,
 				status: "open",
 				provisionalResult: null,
@@ -53,17 +68,24 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 			const row = cases.get(analysisId);
 			if (row) Object.assign(row, patch, { updatedAt: new Date() });
 		},
-		chargeResolutionCase: async (analysisId, costUsd) => {
+		chargeResolutionCase: async (analysisId, owner) => {
 			const row = cases.get(analysisId) as { automatedProviderCalls: number; totalActualCostUsd: string };
-			row.automatedProviderCalls += 1;
-			row.totalActualCostUsd = (Number(row.totalActualCostUsd) + (costUsd ?? 0)).toFixed(6);
+			const paid = attempts.filter(
+				(a) =>
+					a.analysisId === analysisId &&
+					a.instanceId === owner.instanceId &&
+					(a.outcome === "accepted" || a.outcome === "rejected"),
+			);
+			row.automatedProviderCalls = paid.length;
+			row.totalActualCostUsd = paid.reduce((sum, a) => sum + Number(a.actualCostUsd ?? 0), 0).toFixed(6);
 			return { automatedProviderCalls: row.automatedProviderCalls, totalActualCostUsd: Number(row.totalActualCostUsd) };
 		},
-		openProviderAttempt: async ({ analysisId, phase, inputHash }) => {
+		openProviderAttempt: async ({ analysisId, phase, inputHash, claim }) => {
 			const ordinal = attempts.filter((a) => a.analysisId === analysisId).length + 1;
 			const row = {
 				id: `att-${analysisId}-${ordinal}`,
 				analysisId,
+				instanceId: claim.instanceId,
 				ordinal,
 				phase,
 				outcome: "sending",

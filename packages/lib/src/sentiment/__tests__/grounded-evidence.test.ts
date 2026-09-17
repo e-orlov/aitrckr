@@ -10,7 +10,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { type Provider, StructuredResearchResponseError } from "../../providers/types";
-import { classifySentiment, type SentimentClassification, sentimentInputHash } from "../classifier";
+import { classifySentiment, type SentimentClassification } from "../classifier";
 import type { DetectableEntity } from "../detector";
 import { runSentimentJob, type SentimentJobDeps } from "../job";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
@@ -257,7 +257,7 @@ describe("grounded evidence — RED before the corrective", () => {
 		// A paid answer the schema cannot shape is a contract defect: the run leaves the automatic workflow as an open
 		// review item (never thrown for the queue to retry, never a closed failure).
 		expect(outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect", paidCalls: 1 });
-		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "awaiting-review", inputHash: null });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: null, inputHash: null });
 	});
 
 	it("4. a run waiting for review is never sent to the provider again by the automatic path", async () => {

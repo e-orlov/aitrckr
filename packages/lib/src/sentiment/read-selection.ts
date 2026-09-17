@@ -75,15 +75,16 @@ export type SentimentRunCoverageStatus = "completed" | "pending" | "failed" | "n
 /**
  * One coverage status per prompt run over all its analysis rows, consistent
  * with the selection above: `completed` when a readable completed analysis is
- * selected; otherwise `pending` while a readable attempt is in flight;
- * otherwise `failed` when the newest readable attempt failed; otherwise
+ * selected; otherwise `pending` while a readable attempt is in flight or
+ * parked inside its resolution workflow (`pending_resolution`); otherwise
+ * `failed` when the newest readable attempt failed; otherwise
  * `no_mentions`; rows of unreadable versions or a stale taxonomy alone are
  * stale work still to be redone and count as `pending`.
  */
 export function sentimentRunCoverageStatus(): SQL<SentimentRunCoverageStatus> {
 	const readable = inArray(sentimentAnalyses.classifierVersion, [...SENTIMENT_READABLE_CLASSIFIER_VERSIONS]);
 	const completed = and(readableCompletedWhere());
-	const inFlight = and(readable, inArray(sentimentAnalyses.status, ["pending", "processing"]));
+	const inFlight = and(readable, inArray(sentimentAnalyses.status, ["pending", "processing", "pending_resolution"]));
 	const failed = and(readable, eq(sentimentAnalyses.status, "failed"));
 	const noMentions = and(readable, eq(sentimentAnalyses.status, "no_mentions"));
 	return sql<SentimentRunCoverageStatus>`case

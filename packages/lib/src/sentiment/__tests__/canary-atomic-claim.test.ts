@@ -197,7 +197,7 @@ describe("G3: the canary call is granted by an atomic pristine claim, not by pre
 		expect(depsB.recordUsage).not.toHaveBeenCalled();
 
 		// The row belongs to A's attempt only.
-		expect(shared.row).toEqual({ status: "failed", attempts: 1, observations: 0 });
+		expect(shared.row).toEqual({ status: "pending_resolution", attempts: 1, observations: 0 });
 		// A's provider failure never received an answer: unpaid, nothing attributed.
 		expect(shared.usage).toHaveLength(0);
 		expect(JSON.stringify(reportB)).not.toMatch(/ARAG|WGV|upstream|Bearer|sk-or-/);

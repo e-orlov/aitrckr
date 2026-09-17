@@ -183,7 +183,7 @@ describe("G1: only a never-attempted run is pristine", () => {
 		expect(one.providerCalls).toBe(1);
 		expect(first.runStructuredResearch).toHaveBeenCalledTimes(1);
 		expect(codes(one)).toEqual(["provider-error"]);
-		expect(store.state()).toEqual({ status: "failed", attempts: 1, observations: 0 });
+		expect(store.state()).toEqual({ status: "pending_resolution", attempts: 1, observations: 0 });
 		// The provider failure was unpaid: nothing attributed.
 		expect(store.recordUsage).toHaveBeenCalledTimes(0);
 
@@ -200,9 +200,9 @@ describe("G1: only a never-attempted run is pristine", () => {
 		expect(second.runStructuredResearch).not.toHaveBeenCalled();
 		expect(store.persist).not.toHaveBeenCalled();
 		expect(store.recordUsage).toHaveBeenCalledTimes(0);
-		expect(store.state()).toEqual({ status: "failed", attempts: 1, observations: 0 });
+		expect(store.state()).toEqual({ status: "pending_resolution", attempts: 1, observations: 0 });
 		expect(await inspectSentimentCanaryRunState(RUN, store.deps)).toEqual({
-			analysis: { status: "failed", attempts: 1, observations: 0 },
+			analysis: { status: "pending_resolution", attempts: 1, observations: 0 },
 			pristine: false,
 		});
 	});

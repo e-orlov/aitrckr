@@ -1,3 +1,4 @@
+import type { SentimentAnalysis } from "../db/schema";
 import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
 import { StructuredResearchResponseError } from "../providers/types";
 import { type EvidenceAnchor, segmentAnswer } from "./anchors";
@@ -44,6 +45,7 @@ import {
 	chargeResolutionCase,
 	claimAnalysis,
 	detectionResultFor,
+	type Executor,
 	ensureAnalysis,
 	ensureResolutionCase,
 	finishProviderAttempt,
@@ -53,12 +55,15 @@ import {
 	loadDetection,
 	loadMentions,
 	loadProviderAttempts,
+	loadResolutionCase,
 	loadRunForSentiment,
 	markAnalysis,
 	openProviderAttempt,
 	persistClassification,
 	persistDetection,
+	type ResolutionOwner,
 	recordSentimentUsageEvent,
+	runInTransaction,
 	type StoredMention,
 	type StoredResolutionCase,
 	type StoredRunForSentiment,
@@ -110,7 +115,11 @@ export type SentimentJobOutcome =
 	 * failure. No call is made while it waits.
 	 */
 	| { status: "awaiting-review"; reason: ReviewReason; paidCalls: number; costUsd: number; unresolved: number }
-	/** A provider request left without a recorded outcome (crash mid-call): no automatic call until an operator reconciles it. */
+	/**
+	 * A provider request whose outcome is unknown (crash mid-call, timeout,
+	 * abort, connection loss, ambiguous 5xx, or a paid answer that could not be
+	 * settled): no automatic call until an operator reconciles it.
+	 */
 	| { status: "awaiting-reconciliation"; attemptOrdinal: number }
 	/** Retained for tooling that reads historical outcomes; the v5 workflow never produces it. */
 	| {
@@ -140,6 +149,9 @@ export interface SentimentJobDeps extends SentimentClassifierDeps {
 	openProviderAttempt?: typeof openProviderAttempt;
 	finishProviderAttempt?: typeof finishProviderAttempt;
 	loadProviderAttempts?: typeof loadProviderAttempts;
+	loadResolutionCase?: typeof loadResolutionCase;
+	/** Runs the settlement of one paid answer (ledger row, usage event, case budget) as one transaction. */
+	transaction?: <T>(fn: (tx: Executor) => Promise<T>) => Promise<T>;
 	/** Overrides of the automatic budget and backoff (tests); production uses `RESOLUTION_POLICY`. */
 	resolutionPolicy?: Partial<ResolutionPolicy>;
 	sleep?: (ms: number) => Promise<void>;
@@ -173,23 +185,44 @@ async function resolveMentions(
 
 /**
  * Routing write of an attempt that could not finish: the analysis leaves the
- * `processing` claim with the safe code so the run stays eligible for the next
- * job run. Never a product outcome; the resolution case carries the workflow.
+ * `processing` claim parked as `pending_resolution` with the safe code. Never
+ * a product outcome and never `failed`; the resolution case carries the
+ * workflow, and only that workflow or adjudication may move the row again.
  */
-function failAttempt(claim: AnalysisClaim, safe: SafeSentimentError, deps: SentimentJobDeps): Promise<boolean> {
+function park(claim: AnalysisClaim, safe: SafeSentimentError | null, deps: SentimentJobDeps): Promise<boolean> {
 	return (deps.markAnalysis ?? markAnalysis)(claim, {
-		status: "failed",
-		errorCode: safe.code,
-		errorMessage: storedErrorMessage(safe),
+		status: "pending_resolution",
+		errorCode: safe?.code ?? null,
+		errorMessage: safe ? storedErrorMessage(safe) : null,
 		inputHash: null,
 	});
 }
 
 const MAX_INLINE_WAIT_MS = 30_000;
+/** DB-only retries of settling a paid answer before the attempt is left for reconciliation. */
+const SETTLE_ATTEMPTS = 3;
+const SETTLE_RETRY_MS = 250;
+
+/**
+ * Only a provider response that is itself the refusal proves that nothing was
+ * billed: a definite 4xx or 503 with no generation id, or a request that never
+ * left. Timeouts, aborts, connection loss, status-less errors and every other
+ * 5xx (500, 502, 504, 524, 529 …) leave the outcome unknown and are never
+ * repeated automatically.
+ */
+function isProvenRejection(safe: SafeSentimentError): boolean {
+	if (!safe.requestSent) return true;
+	if (safe.envelope?.generationId) return false;
+	if (safe.kind !== "provider" || safe.httpStatus === null) return false;
+	return (safe.httpStatus >= 400 && safe.httpStatus < 500) || safe.httpStatus === 503;
+}
 
 /** Thrown inside the workflow to leave the automatic path; never escapes `resolve`. */
 class HandOver extends Error {
-	constructor(readonly reason: ReviewReason) {
+	constructor(
+		readonly reason: ReviewReason,
+		readonly attemptOrdinal = 0,
+	) {
 		super(`resolution handed over: ${reason}`);
 		this.name = "HandOver";
 	}
@@ -197,7 +230,7 @@ class HandOver extends Error {
 
 interface Workflow {
 	run: StoredRunForSentiment & { answerBody: string };
-	claim: AnalysisClaim;
+	claim: ResolutionOwner;
 	mentions: StoredMention[];
 	candidates: SentimentCandidate[];
 	anchors: EvidenceAnchor[];
@@ -225,11 +258,53 @@ interface PaidAnswer<T> {
 }
 
 /**
+ * One paid answer becomes durable in a single transaction: the ledger row
+ * closes with its generation id and charged cost, the usage event is written
+ * and the case budget is recomputed from the ledger. A failure here is
+ * retried DB-only from the answer already in hand; when that is exhausted the
+ * row stays `sending` and the case goes to reconciliation — a paid answer is
+ * never bought again because it could not be recorded.
+ */
+async function settlePaidAnswer(
+	w: Workflow,
+	attempt: { id: string; ordinal: number },
+	args: { outcome: "accepted" | "rejected"; generationId: string | null; costUsd: number | null; succeeded: boolean },
+	attribution: { provider: string; model: string | null },
+): Promise<void> {
+	const usage = { organizationId: w.run.organizationId, brandId: w.run.brandId, promptId: w.run.promptId };
+	const recordUsage = w.deps.recordUsage ?? recordSentimentUsageEvent;
+	const finish = w.deps.finishProviderAttempt ?? finishProviderAttempt;
+	const charge = w.deps.chargeResolutionCase ?? chargeResolutionCase;
+	const transaction = w.deps.transaction ?? runInTransaction;
+	for (let round = 1; ; round++) {
+		try {
+			const charged = await transaction(async (tx) => {
+				await finish(
+					attempt.id,
+					{ outcome: args.outcome, generationId: args.generationId, actualCostUsd: args.costUsd },
+					tx,
+				);
+				await recordUsage({ ...usage, ...attribution, succeeded: args.succeeded, actualCostUsd: args.costUsd }, tx);
+				return charge(w.claim.analysisId, w.claim, tx);
+			});
+			w.paidCalls = charged.automatedProviderCalls;
+			w.costUsd = charged.totalActualCostUsd;
+			return;
+		} catch (error) {
+			if (error instanceof ClaimLostError) throw error;
+			if (round >= SETTLE_ATTEMPTS) throw new HandOver("unknown-provider-outcome", attempt.ordinal);
+			await (w.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(SETTLE_RETRY_MS);
+		}
+	}
+}
+
+/**
  * One provider request with its ledger row and attribution: the intent is
  * recorded before the request leaves; a paid answer (whatever becomes of it)
- * is charged to the case and attributed exactly once; a transport failure is
- * an unpaid attempt that parks the case in `retry_wait` and re-throws for the
- * queue's bounded retry. The budget is checked before every request.
+ * is settled exactly once; a proven refusal is an unpaid attempt that parks
+ * the case in `retry_wait` and re-throws for the queue's bounded retry; an
+ * unknown outcome hands the case to reconciliation without another request.
+ * The budget is checked before every request.
  */
 async function paidCall<T>(
 	w: Workflow,
@@ -240,17 +315,10 @@ async function paidCall<T>(
 	if (w.paidCalls >= w.policy.maxPaidCalls) throw new HandOver("call-limit");
 	if (w.costUsd >= w.policy.maxCostUsd) throw new HandOver("cost-limit");
 	if (w.options.signal?.aborted) {
-		// The job was cancelled (shutdown, expiry, canary deadline): no further paid request; the case waits.
+		// The job was cancelled (shutdown, expiry, canary deadline) before the request left: nothing billed; the case waits.
 		const safe = sanitizeSentimentError(new DOMException("job aborted before the request", "AbortError"));
-		await (w.deps.updateResolutionCase ?? updateResolutionCase)(
-			w.claim.analysisId,
-			{
-				status: "retry_wait",
-				nextAttemptAt: new Date(Date.now() + backoffMs(1, w.policy)),
-			},
-			w.claim,
-		);
-		await failAttempt(w.claim, safe, w.deps);
+		await retryLater(w, 1);
+		await park(w.claim, safe, w.deps);
 		throw new SentimentJobError({ ...safe, requestSent: false });
 	}
 	const attempt = await (w.deps.openProviderAttempt ?? openProviderAttempt)({
@@ -259,10 +327,7 @@ async function paidCall<T>(
 		inputHash: w.inputHash,
 		claim: w.claim,
 	});
-	const usage = { organizationId: w.run.organizationId, brandId: w.run.brandId, promptId: w.run.promptId };
-	const recordUsage = w.deps.recordUsage ?? recordSentimentUsageEvent;
 	const finish = w.deps.finishProviderAttempt ?? finishProviderAttempt;
-	const charge = w.deps.chargeResolutionCase ?? chargeResolutionCase;
 	let answer: PaidAnswer<T>;
 	try {
 		answer = await request();
@@ -270,54 +335,52 @@ async function paidCall<T>(
 		const safe = sanitizeSentimentError(error);
 		if (safe.requestSent && safe.envelope?.generationId) {
 			// The provider answered and charged, but the answer could not be shaped: a paid, unusable attempt.
-			const cost = safe.envelope.usage?.costUsd ?? null;
-			await finish(attempt.id, { outcome: "rejected", generationId: safe.envelope.generationId, actualCostUsd: cost });
-			await recordUsage({
-				...usage,
-				provider: safe.provider,
-				model: safe.model,
-				succeeded: false,
-				actualCostUsd: cost,
-			});
-			const charged = await charge(w.claim.analysisId, cost, w.claim);
-			w.paidCalls = charged.automatedProviderCalls;
-			w.costUsd = charged.totalActualCostUsd;
+			await settlePaidAnswer(
+				w,
+				attempt,
+				{
+					outcome: "rejected",
+					generationId: safe.envelope.generationId,
+					costUsd: safe.envelope.usage?.costUsd ?? null,
+					succeeded: false,
+				},
+				{ provider: safe.provider, model: safe.model },
+			);
 			throw new HandOver("contract-defect");
 		}
-		await finish(attempt.id, { outcome: safe.kind === "aborted" ? "aborted" : "provider-error" });
-		w.consecutiveFailures += 1;
-		await (w.deps.updateResolutionCase ?? updateResolutionCase)(
-			w.claim.analysisId,
-			{
-				status: "retry_wait",
-				nextAttemptAt: new Date(Date.now() + backoffMs(w.consecutiveFailures, w.policy)),
-			},
-			w.claim,
-		);
-		await failAttempt(w.claim, safe, w.deps);
-		throw new SentimentJobError(safe);
+		if (isProvenRejection(safe)) {
+			await finish(attempt.id, { outcome: "provider-error" });
+			w.consecutiveFailures += 1;
+			await retryLater(w, w.consecutiveFailures);
+			await park(w.claim, safe, w.deps);
+			throw new SentimentJobError(safe);
+		}
+		// Unknown outcome: the row keeps `sending` (or `aborted`) as the reconciliation record; no automatic repeat.
+		if (safe.kind === "aborted") await finish(attempt.id, { outcome: "aborted" });
+		throw new HandOver("unknown-provider-outcome", attempt.ordinal);
 	}
-	await finish(attempt.id, {
-		outcome: usable(answer.value) ? "accepted" : "rejected",
-		generationId: answer.generationId,
-		actualCostUsd: answer.costUsd,
-	});
-	try {
-		await recordUsage({
-			...usage,
-			provider: w.provider.id,
-			model: SENTIMENT_MODEL,
+	await settlePaidAnswer(
+		w,
+		attempt,
+		{
+			outcome: usable(answer.value) ? "accepted" : "rejected",
+			generationId: answer.generationId,
+			costUsd: answer.costUsd,
 			succeeded: true,
-			actualCostUsd: answer.costUsd,
-		});
-	} catch (error) {
-		console.error("sentiment usage attribution failed:", error instanceof Error ? error.name : typeof error);
-	}
-	const charged = await charge(w.claim.analysisId, answer.costUsd, w.claim);
-	w.paidCalls = charged.automatedProviderCalls;
-	w.costUsd = charged.totalActualCostUsd;
+		},
+		{ provider: w.provider.id, model: SENTIMENT_MODEL },
+	);
 	w.consecutiveFailures = 0;
 	return answer.value;
+}
+
+/** Park the case for the queue's bounded retry after an unpaid attempt. */
+function retryLater(w: Workflow, failures: number): Promise<void> {
+	return (w.deps.updateResolutionCase ?? updateResolutionCase)(
+		w.claim.analysisId,
+		{ status: "retry_wait", nextAttemptAt: new Date(Date.now() + backoffMs(failures, w.policy)) },
+		w.claim,
+	);
 }
 
 type StructuredSchema = Parameters<NonNullable<Provider["runStructuredResearch"]>>[0]["schema"];
@@ -399,9 +462,9 @@ function assessedCandidate(w: Workflow, assessment: CandidateAssessment): Sentim
 /** Phase A: the one initial classification (web search on); its candidate seeds the workflow. */
 async function initialCandidate(w: Workflow): Promise<SentimentClassificationResult> {
 	const attempts = await (w.deps.loadProviderAttempts ?? loadProviderAttempts)(w.claim.analysisId);
-	// Only this workflow instance counts: attempts before the case was (re)opened belong to an earlier run.
+	// Only this resolution instance counts: attempts of a superseded instance (changed input) belong to its own budget.
 	const initialAnswers = attempts.filter(
-		(a) => a.phase === "classify" && a.generationId !== null && a.startedAt.getTime() >= w.kase.createdAt.getTime(),
+		(a) => a.phase === "classify" && a.generationId !== null && a.instanceId === w.claim.instanceId,
 	).length;
 	if (initialAnswers >= w.policy.maxInitialClassifications) throw new HandOver("initial-classification-limit");
 	const classification = await paidCall<SentimentClassification>(
@@ -528,17 +591,11 @@ async function persistVerified(w: Workflow, assessment: CandidateAssessment): Pr
 	} catch (error) {
 		if (error instanceof ClaimLostError) return { status: "claim-lost", generation: w.claim.generation };
 		// The transaction rolled back: nothing of the result exists; the case
-		// keeps its candidate for the next run and waits.
+		// keeps its candidate for the next run and waits. No provider call is
+		// needed to finish — the next run persists from the stored candidate.
 		const safe = sanitizeSentimentError(error, "persist");
-		await (w.deps.updateResolutionCase ?? updateResolutionCase)(
-			w.claim.analysisId,
-			{
-				status: "retry_wait",
-				nextAttemptAt: new Date(Date.now() + backoffMs(1, w.policy)),
-			},
-			w.claim,
-		);
-		const owned = await failAttempt(w.claim, safe, w.deps);
+		await retryLater(w, 1);
+		const owned = await park(w.claim, safe, w.deps);
 		if (!owned) return { status: "claim-lost", generation: w.claim.generation };
 		throw new SentimentJobError(safe);
 	}
@@ -560,16 +617,23 @@ async function persistVerified(w: Workflow, assessment: CandidateAssessment): Pr
 	};
 }
 
+/**
+ * Leave the automatic path: the case becomes the operator's work item
+ * (`awaiting_review`, or `awaiting_reconciliation` when a request's outcome is
+ * unknown) and the analysis is parked as `pending_resolution`.
+ */
 async function handOver(
 	w: Workflow,
 	reason: ReviewReason,
 	candidate: SentimentClassificationResult | null,
 	unresolved: UnresolvedTarget[],
+	attemptOrdinal: number,
 ): Promise<SentimentJobOutcome> {
+	const reconcile = reason === "unknown-provider-outcome";
 	await (w.deps.updateResolutionCase ?? updateResolutionCase)(
 		w.claim.analysisId,
 		{
-			status: "awaiting_review",
+			status: reconcile ? "awaiting_reconciliation" : "awaiting_review",
 			reviewReason: reason,
 			provisionalResult: candidate,
 			unresolvedTargets: unresolved,
@@ -577,12 +641,8 @@ async function handOver(
 		},
 		w.claim,
 	);
-	await (w.deps.markAnalysis ?? markAnalysis)(w.claim, {
-		status: "failed",
-		errorCode: "awaiting-review",
-		errorMessage: null,
-		inputHash: null,
-	});
+	await park(w.claim, null, w.deps);
+	if (reconcile) return { status: "awaiting-reconciliation", attemptOrdinal };
 	return {
 		status: "awaiting-review",
 		reason,
@@ -627,21 +687,32 @@ async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 			pending = verifierIssuesToTargets(verdict.issues);
 		}
 	} catch (error) {
-		// A lease taken over by a newer attempt: nothing of this attempt is written further.
-		if (error instanceof ClaimLostError) return { status: "claim-lost", generation: w.claim.generation };
-		if (!(error instanceof HandOver)) throw error;
-		const unresolved = candidate ? assess(w, candidate).unresolved : [];
-		try {
-			return await handOver(w, error.reason, candidate, [...unresolved, ...pending]);
-		} catch (inner) {
-			if (inner instanceof ClaimLostError) return { status: "claim-lost", generation: w.claim.generation };
-			throw inner;
-		}
+		return leaveWorkflow(w, error, candidate, pending);
 	}
 }
 
-function reviewOutcome(kase: StoredResolutionCase): SentimentJobOutcome {
-	if (kase.status === "awaiting_reconciliation") return { status: "awaiting-reconciliation", attemptOrdinal: 0 };
+/** Every non-verified exit of the workflow: a lost lease writes nothing more; a hand-over parks the case; anything else propagates. */
+async function leaveWorkflow(
+	w: Workflow,
+	error: unknown,
+	candidate: SentimentClassificationResult | null,
+	pending: UnresolvedTarget[],
+): Promise<SentimentJobOutcome> {
+	// A lease taken over by a newer attempt: nothing of this attempt is written further.
+	if (error instanceof ClaimLostError) return { status: "claim-lost", generation: w.claim.generation };
+	if (!(error instanceof HandOver)) throw error;
+	const unresolved = candidate ? assess(w, candidate).unresolved : [];
+	try {
+		return await handOver(w, error.reason, candidate, [...unresolved, ...pending], error.attemptOrdinal);
+	} catch (inner) {
+		if (inner instanceof ClaimLostError) return { status: "claim-lost", generation: w.claim.generation };
+		throw inner;
+	}
+}
+
+/** The outcome of a case parked for the operator; nothing is claimed or written for it. */
+function reviewOutcome(kase: StoredResolutionCase, attemptOrdinal = 0): SentimentJobOutcome {
+	if (kase.status === "awaiting_reconciliation") return { status: "awaiting-reconciliation", attemptOrdinal };
 	return {
 		status: "awaiting-review",
 		reason: (kase.reviewReason as ReviewReason | null) ?? "call-limit",
@@ -651,57 +722,40 @@ function reviewOutcome(kase: StoredResolutionCase): SentimentJobOutcome {
 	};
 }
 
+const isParked = (kase: StoredResolutionCase) =>
+	kase.status === "awaiting_review" || kase.status === "awaiting_reconciliation";
+
 async function classifyAndPersist(
 	run: StoredRunForSentiment & { answerBody: string },
-	claim: AnalysisClaim,
+	analysisClaim: AnalysisClaim,
 	mentions: StoredMention[],
 	candidates: SentimentCandidate[],
+	inputHash: string,
 	deps: SentimentJobDeps,
 	options: SentimentJobOptions,
 ): Promise<SentimentJobOutcome> {
 	const policy: ResolutionPolicy = { ...RESOLUTION_POLICY, ...deps.resolutionPolicy };
-	const inputHash = sentimentInputHash(run.answerBody, candidates);
-	let kase = await (deps.ensureResolutionCase ?? ensureResolutionCase)(claim.analysisId, inputHash);
-	const mark = deps.markAnalysis ?? markAnalysis;
-	if (kase.status === "resolved") {
-		// A resolved case whose analysis is being processed again (stale lease recovery,
-		// deliberate reprocessing): a fresh workflow, not a replay of the old candidate.
-		const startedAt = new Date();
-		const fresh = {
-			status: "open" as const,
-			provisionalResult: null,
-			unresolvedTargets: [],
-			nextAttemptAt: null,
-			reviewReason: null,
-			createdAt: startedAt,
-			automatedProviderCalls: 0,
-			totalActualCostUsd: "0",
-		};
-		await (deps.updateResolutionCase ?? updateResolutionCase)(claim.analysisId, fresh, claim);
-		kase = { ...kase, ...fresh };
-	}
-	if (kase.status === "awaiting_review" || kase.status === "awaiting_reconciliation") {
-		await mark(claim, {
-			status: "failed",
-			errorCode: kase.status.replace("_", "-"),
-			errorMessage: null,
-			inputHash: null,
-		});
-		return reviewOutcome(kase);
+	// A case of another input rotates to a new instance here (fenced on the claim); the same input's case is reused.
+	const kase = await (deps.ensureResolutionCase ?? ensureResolutionCase)(
+		analysisClaim.analysisId,
+		inputHash,
+		analysisClaim,
+	);
+	const claim: ResolutionOwner = { ...analysisClaim, instanceId: kase.instanceId };
+	if (kase.status === "resolved" || isParked(kase)) {
+		// Decided between the pre-claim check and the claim (a racing owner): hand the row back untouched.
+		await park(claim, null, deps);
+		return kase.status === "resolved" ? { status: "already-completed" } : reviewOutcome(kase);
 	}
 	const attempts = await (deps.loadProviderAttempts ?? loadProviderAttempts)(claim.analysisId);
 	const dangling = attempts.find((a) => a.outcome === "sending");
 	if (dangling) {
 		await (deps.updateResolutionCase ?? updateResolutionCase)(
 			claim.analysisId,
-			{
-				status: "awaiting_reconciliation",
-				reviewReason: "unknown-provider-outcome",
-				nextAttemptAt: null,
-			},
+			{ status: "awaiting_reconciliation", reviewReason: "unknown-provider-outcome", nextAttemptAt: null },
 			claim,
 		);
-		await mark(claim, { status: "failed", errorCode: "awaiting-reconciliation", errorMessage: null, inputHash: null });
+		await park(claim, null, deps);
 		return { status: "awaiting-reconciliation", attemptOrdinal: dangling.ordinal };
 	}
 	if (kase.nextAttemptAt && kase.nextAttemptAt.getTime() > Date.now()) {
@@ -713,14 +767,14 @@ async function classifyAndPersist(
 		provider = deps.resolveProvider ? deps.resolveProvider() : resolveSentimentProvider();
 	} catch (error) {
 		const safe = sanitizeSentimentError(error);
-		await failAttempt(claim, safe, deps);
+		await park(claim, safe, deps);
 		throw new SentimentJobError({ ...safe, requestSent: false });
 	}
 	const analysis = analyzeAnswerRanges(run.answerBody);
 	const anchors = segmentAnswer(run.answerBody, analysis);
 	let consecutiveFailures = 0;
 	for (let i = attempts.length - 1; i >= 0; i--) {
-		if (attempts[i].outcome !== "provider-error" && attempts[i].outcome !== "aborted") break;
+		if (attempts[i].instanceId !== claim.instanceId || attempts[i].outcome !== "provider-error") break;
 		consecutiveFailures += 1;
 	}
 	return resolve({
@@ -774,10 +828,13 @@ function acceptPayload(data: unknown): { payload: SentimentJobData } | { skipped
  * without touching what a later attempt wrote. Invalid or stale payloads are
  * skipped without a call and without failing the job. Provider, network and
  * persistence errors park the resolution case and propagate as
- * `SentimentJobError` so pg-boss applies its bounded retry policy; the only
- * successful outcome is a verified result persisted in one transaction, and
- * an exhausted automatic budget hands the run to the operator as an open
- * `awaiting_review` case (ADR-SENT-01-GROUNDED-COMPLETION, Amendment B).
+ * `SentimentJobError` so pg-boss applies its bounded retry policy — but only a
+ * proven refusal is repeated; an unknown provider outcome is parked for
+ * reconciliation. The only successful outcome is a verified result persisted
+ * in one transaction; an exhausted automatic budget hands the run to the
+ * operator as an open `awaiting_review` case; parked work is
+ * `pending_resolution`, never `failed` (ADR-SENT-01-GROUNDED-COMPLETION,
+ * Amendment B).
  */
 export async function runSentimentJob(
 	data: unknown,
@@ -797,15 +854,19 @@ export async function runSentimentJob(
 	const candidates = candidatesFromMentions(mentions, entities);
 	const body = mentions.length === 0 ? null : run.answerBody;
 	if (body === null && analysis.status === "no_mentions") return { status: "already-completed" };
-	if (body !== null && isAnalysisCurrent(analysis, sentimentInputHash(body, candidates))) {
-		return { status: "already-completed" };
-	}
+	const inputHash = body === null ? null : sentimentInputHash(body, candidates);
+	const settled = inputHash === null ? null : await settledWithoutClaim(analysis, inputHash, deps);
+	if (settled) return settled;
 
-	const claimed = await (deps.claimAnalysis ?? claimAnalysis)(analysis.id, { allowFinished: true });
+	// This is the resolution workflow itself, so it may resume a run it parked; a plain claim never does.
+	const claimed = await (deps.claimAnalysis ?? claimAnalysis)(analysis.id, {
+		allowFinished: true,
+		resumeResolution: true,
+	});
 	if (!claimed.claimed) return { status: "claimed-elsewhere", analysisStatus: claimed.status };
 	const claim = claimed.claim;
 
-	if (body === null) {
+	if (body === null || inputHash === null) {
 		const owned = await (deps.markAnalysis ?? markAnalysis)(claim, {
 			status: "no_mentions",
 			completedAt: new Date(),
@@ -815,5 +876,22 @@ export async function runSentimentJob(
 		return owned ? { status: "no-mentions" } : { status: "claim-lost", generation: claim.generation };
 	}
 
-	return classifyAndPersist({ ...run, answerBody: body }, claim, mentions, candidates, deps, options);
+	return classifyAndPersist({ ...run, answerBody: body }, claim, mentions, candidates, inputHash, deps, options);
+}
+
+/**
+ * What is decided before anything is claimed or written: a current verified
+ * result, and the resolution instance of exactly this input — a resolved
+ * instance is immutable, a parked one is the operator's; neither is touched.
+ */
+async function settledWithoutClaim(
+	analysis: SentimentAnalysis,
+	inputHash: string,
+	deps: SentimentJobDeps,
+): Promise<SentimentJobOutcome | null> {
+	if (isAnalysisCurrent(analysis, inputHash)) return { status: "already-completed" };
+	const kase = await (deps.loadResolutionCase ?? loadResolutionCase)(analysis.id);
+	if (!kase || kase.inputHash !== inputHash) return null;
+	if (kase.status === "resolved") return { status: "already-completed" };
+	return isParked(kase) ? reviewOutcome(kase) : null;
 }

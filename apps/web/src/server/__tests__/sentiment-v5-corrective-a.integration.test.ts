@@ -308,8 +308,8 @@ describe("B a changed input hash opens a new immutable instance", () => {
 		).toMatchObject({ status: "classified", paidCalls: 2 });
 		const old = { kase: await caseOf(run(2)), attempts: await attemptsOf(run(2)) };
 		expect(old.attempts).toHaveLength(2);
-		// The competitor is renamed: the classifier input of every run naming it changes.
-		await client.query("UPDATE competitors SET name = 'Alpha Renamed' WHERE id = $1", [ALPHA]);
+		// The competitor gains an alias: the classifier input of every run naming it changes.
+		await client.query("UPDATE competitors SET aliases = '{\"Alpha Insurance\"}' WHERE id = $1", [ALPHA]);
 		const second = scripted([
 			{ phase: "classify", answer: twoOk },
 			{ phase: "verify", answer: ACCEPT },
@@ -403,7 +403,12 @@ describe("D pending_resolution is owned by the resolution workflow and adjudicat
 		expect(again.attempts).toBe(parked.attempts);
 
 		const sent: string[] = [];
-		const sender = { send: async (_q: string, data: { promptRunId: string }) => (sent.push(data.promptRunId), "job") };
+		const sender = {
+			send: async (_q: string, data: { promptRunId: string }) => {
+				sent.push(data.promptRunId);
+				return "job";
+			},
+		};
 		const inventory = await runSentimentEnqueue({ enqueue: { limit: 100 }, sender, brandId: BRAND });
 		expect(sent).not.toContain(run(3));
 		expect(sent).not.toContain(run(4));
