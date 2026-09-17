@@ -2,157 +2,454 @@
 
 exports[`CT-SNT-008 provider-facing prompt and schema snapshots > binds the request schema to this answer's anchor ids and this request's entity keys 1`] = `
 {
+  "$defs": {
+    "__schema0": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aspects": {
+              "$ref": "#/$defs/__schema1",
+            },
+            "category": {
+              "enum": [
+                "positive",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema3",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/entityKey",
+            },
+            "score": {
+              "maximum": 100,
+              "minimum": 51,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "aspects",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aspects": {
+              "$ref": "#/$defs/__schema1",
+            },
+            "category": {
+              "enum": [
+                "negative",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema4",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/entityKey",
+            },
+            "score": {
+              "maximum": 49,
+              "minimum": 0,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "aspects",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aspects": {
+              "$ref": "#/$defs/__schema1",
+            },
+            "category": {
+              "enum": [
+                "neutral",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema5",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/entityKey",
+            },
+            "score": {
+              "maximum": 50,
+              "minimum": 50,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "aspects",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aspects": {
+              "$ref": "#/$defs/__schema1",
+            },
+            "category": {
+              "enum": [
+                "mixed",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "key": {
+              "$ref": "#/$defs/entityKey",
+            },
+            "negativeEvidence": {
+              "items": {
+                "$ref": "#/$defs/__schema4",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "positiveEvidence": {
+              "items": {
+                "$ref": "#/$defs/__schema3",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "score": {
+              "maximum": 50,
+              "minimum": 50,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "aspects",
+            "category",
+            "score",
+            "confidence",
+            "positiveEvidence",
+            "negativeEvidence",
+          ],
+          "type": "object",
+        },
+      ],
+    },
+    "__schema1": {
+      "items": {
+        "$ref": "#/$defs/__schema2",
+      },
+      "maxItems": 4,
+      "type": "array",
+    },
+    "__schema2": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "positive",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema3",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/aspectKey",
+            },
+            "score": {
+              "maximum": 100,
+              "minimum": 51,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "negative",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema4",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/aspectKey",
+            },
+            "score": {
+              "maximum": 49,
+              "minimum": 0,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "neutral",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema5",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/aspectKey",
+            },
+            "score": {
+              "maximum": 50,
+              "minimum": 50,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "mixed",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "key": {
+              "$ref": "#/$defs/aspectKey",
+            },
+            "negativeEvidence": {
+              "items": {
+                "$ref": "#/$defs/__schema4",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "positiveEvidence": {
+              "items": {
+                "$ref": "#/$defs/__schema3",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "score": {
+              "maximum": 50,
+              "minimum": 50,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "category",
+            "score",
+            "confidence",
+            "positiveEvidence",
+            "negativeEvidence",
+          ],
+          "type": "object",
+        },
+      ],
+    },
+    "__schema3": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorId": {
+          "$ref": "#/$defs/anchorId",
+        },
+        "polarity": {
+          "enum": [
+            "positive",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "anchorId",
+        "polarity",
+      ],
+      "type": "object",
+    },
+    "__schema4": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorId": {
+          "$ref": "#/$defs/anchorId",
+        },
+        "polarity": {
+          "enum": [
+            "negative",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "anchorId",
+        "polarity",
+      ],
+      "type": "object",
+    },
+    "__schema5": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorId": {
+          "$ref": "#/$defs/anchorId",
+        },
+        "polarity": {
+          "enum": [
+            "neutral",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "anchorId",
+        "polarity",
+      ],
+      "type": "object",
+    },
+    "anchorId": {
+      "enum": [
+        "s0001",
+        "s0002",
+        "s0003",
+      ],
+      "type": "string",
+    },
+    "aspectKey": {
+      "enum": [
+        "price",
+        "coverage",
+        "service",
+        "other",
+      ],
+      "type": "string",
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number",
+    },
+    "entityKey": {
+      "enum": [
+        "brand",
+        "c-huk",
+        "c-wgv",
+      ],
+      "type": "string",
+    },
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
     "entities": {
       "items": {
-        "additionalProperties": false,
-        "properties": {
-          "aspects": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "category": {
-                  "enum": [
-                    "positive",
-                    "neutral",
-                    "mixed",
-                    "negative",
-                  ],
-                  "type": "string",
-                },
-                "confidence": {
-                  "maximum": 1,
-                  "minimum": 0,
-                  "type": "number",
-                },
-                "evidence": {
-                  "items": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "anchorId": {
-                        "enum": [
-                          "s0001",
-                          "s0002",
-                          "s0003",
-                        ],
-                        "type": "string",
-                      },
-                      "polarity": {
-                        "enum": [
-                          "positive",
-                          "negative",
-                          "neutral",
-                        ],
-                        "type": "string",
-                      },
-                    },
-                    "required": [
-                      "anchorId",
-                      "polarity",
-                    ],
-                    "type": "object",
-                  },
-                  "maxItems": 3,
-                  "minItems": 1,
-                  "type": "array",
-                },
-                "key": {
-                  "enum": [
-                    "price",
-                    "coverage",
-                    "service",
-                    "other",
-                  ],
-                  "type": "string",
-                },
-                "score": {
-                  "maximum": 100,
-                  "minimum": 0,
-                  "type": "integer",
-                },
-              },
-              "required": [
-                "key",
-                "score",
-                "category",
-                "confidence",
-                "evidence",
-              ],
-              "type": "object",
-            },
-            "maxItems": 4,
-            "type": "array",
-          },
-          "category": {
-            "enum": [
-              "positive",
-              "neutral",
-              "mixed",
-              "negative",
-            ],
-            "type": "string",
-          },
-          "confidence": {
-            "maximum": 1,
-            "minimum": 0,
-            "type": "number",
-          },
-          "evidence": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "anchorId": {
-                  "enum": [
-                    "s0001",
-                    "s0002",
-                    "s0003",
-                  ],
-                  "type": "string",
-                },
-                "polarity": {
-                  "enum": [
-                    "positive",
-                    "negative",
-                    "neutral",
-                  ],
-                  "type": "string",
-                },
-              },
-              "required": [
-                "anchorId",
-                "polarity",
-              ],
-              "type": "object",
-            },
-            "maxItems": 3,
-            "minItems": 1,
-            "type": "array",
-          },
-          "key": {
-            "enum": [
-              "brand",
-              "c-huk",
-              "c-wgv",
-            ],
-            "type": "string",
-          },
-          "score": {
-            "maximum": 100,
-            "minimum": 0,
-            "type": "integer",
-          },
-        },
-        "required": [
-          "key",
-          "score",
-          "category",
-          "confidence",
-          "evidence",
-          "aspects",
-        ],
-        "type": "object",
+        "$ref": "#/$defs/__schema0",
       },
       "minItems": 1,
       "type": "array",
@@ -172,30 +469,49 @@ You will receive the ANSWER (a stored response, split into numbered segments) an
 
 Entity keys are opaque identifiers. Return each "key" exactly as listed in ENTITIES, character for character — never the entity's name, alias, domain or a variation of the key. The output schema only accepts the listed keys.
 
+Grounding — evaluate one exact candidate at a time and cite only segments that are about that candidate:
+- A segment is evidence for a candidate only when it names that candidate (name or alias) or unmistakably continues a sentence, list or table row that names it. A segment that names a different candidate is never evidence for this one, even if it appears in the same paragraph or table.
+- Never exchange evidence between the rows or columns of a comparison table: the row or cell that describes candidate B says nothing about candidate A.
+- A segment that names no candidate at all (a general checklist, a generic tip, a definition, a heading) cannot carry a verdict by itself; cite it only next to a segment that names the candidate, and only when it clearly continues that candidate's description. Bullets directly under a product title that names the candidate, and the paragraph that directly answers a one-line question naming the candidate, count as continuing it; bullets under a generic label ("Advantages", "Disadvantages", "Conclusion", "Check before signing") do not.
+- Aspects are optional. When an aspect has no segment that names the candidate or continues such a segment, leave the aspect out instead of supporting it with generic bullets; an omitted aspect is correct, an aspect resting on generic text is a defect.
+- If a candidate is only named in a list of examples, a pass-through mention or an instruction, its verdict is "neutral" with that segment as the citation.
+
 Score each entity on 0..100 for how the ANSWER portrays it:
 - 0 = maximally negative, 25 = clearly negative, 50 = neutral or balanced, 75 = clearly positive, 100 = unequivocal endorsement.
 Category must match the score exactly:
 - "positive": score 51..100 — the answer recommends, praises or presents the entity favourably.
 - "negative": score 0..49 — the answer warns about, excludes, criticises or presents a material disadvantage of the entity.
 - "neutral": score exactly 50 — the entity is only named or described factually, with no evaluation.
-- "mixed": score exactly 50 — the answer states meaningful positive AND meaningful negative points about the entity (cite one of each).
+- "mixed": score exactly 50 — the answer states a meaningful positive AND a meaningful negative point about the same target.
 Rules:
 - Judge only what the stored answer says about THIS entity; never copy the overall tone of the answer.
 - "not expensive" / "kein Nachteil" and other negations flip polarity; read double negations carefully.
 - "A is better than B" is positive for A and negative for B only when the wording clearly says so; a plain comparison without judgement is neutral for both.
 - A negative statement about the whole industry is not a negative statement about every named company.
 - An opinion the answer attributes to a cited source, a user review or a rating site is NOT the answer's own evaluation unless the answer adopts it.
-- Pronouns and later clauses that clearly refer to a named entity count for that entity.
 - Different entities in the same answer may have different sentiment; repeated mentions of one entity are one observation.
 - Confidence is 0..1 for how unambiguous the evidence is.
 
-Aspects: additionally rate the entity on each aspect the ANSWER actually evaluates for it, using the canonical keys below (map synonyms to the canonical key; do not invent aspects). Omit aspects the answer does not evaluate for that entity. An entity can be "mixed" overall while an aspect is clearly positive or negative.
+Aspects: additionally rate the entity on each aspect the ANSWER explicitly evaluates for it, using the canonical keys below (map synonyms to the canonical key; do not invent aspects). An entity can be "mixed" overall while an aspect is clearly positive or negative.
 - "price" (Price): Cost, premiums, fees, value for money, discounts, price increases. Synonyms: cost, costs, premium, premiums, fee, fees, value, pricing, preis, beitrag, kosten, tarif.
 - "coverage" (Coverage): What is insured or included, exclusions, limits, waiting periods, scope of protection. Synonyms: scope, protection, included, exclusions, limits, deckung, leistung, leistungsumfang, schutz, wartezeit.
 - "service" (Service): Customer support, claims handling, responsiveness, helpdesk, digital tools, advice quality. Synonyms: support, customer service, claims, helpdesk, hotline, beratung, kundenservice, schadenabwicklung, erreichbarkeit.
 - "other" (Other): Any other evaluated aspect (reputation, trust, ratings, financial strength, market position).
 
-Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]; links, URLs and source lists have been removed from it, so every segment is natural language and a source reference is never evidence. For every entity and aspect item, list at most 3 evidence items, each an "anchorId" that is exactly one of the segment ids shown and a "polarity": "positive", "negative" or "neutral" for what that segment says about the entity. Cite only segments that actually evaluate the entity in words. Never invent ids, never quote or rewrite text. Within one evidence list, cite each segment id at most once, with the one polarity that segment carries for that item; the same segment may carry a different polarity in another item (for example positive for "price" and negative for "coverage"). A "mixed" item needs at least two evidence items: one labelled positive, one labelled negative — the only case in which one segment may appear twice in one list, and only when it states both sides.
+Aspect routing — rate an aspect only when the ANSWER explicitly evaluates it for this candidate, and file every evaluation under its canonical key:
+- "price": premiums, contributions, price-performance / value for money, discounts, cost to the customer, and the deductible / self-retention (Selbstbeteiligung, Selbstbehalt) including whether it can rise or be waived.
+- "coverage": insured risks, benefits and their scope, limits and sums insured, exclusions, waiting periods, retroactive cover, what is and is not protected.
+- "service": claims handling, advice and consultation, reachability, response times, digital tools and customer service.
+- "other": only an explicit evaluative statement about the candidate that genuinely fits none of the three keys — reputation, trust, test wins and ratings, financial strength, flexibility of the tariff structure, transparency.
+- A bare name, a ranking position without judgement, a case count, a usage share, a growth figure or any other descriptive statistic is not an evaluation: it is "neutral" evidence and never a "positive" or "negative" aspect. Omit an aspect entirely when the answer states no explicit evaluative claim for it; "other" is a narrow fallback, never a default bucket.
+- Assign the same kind of statement to the same key in every answer: a deductible caveat is always "price", a waiting period always "coverage", slow claims handling always "service".
+
+Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]; links, URLs and source lists have been removed from it, so every segment is natural language and a source reference is never evidence. Decide the polarity of every relevant segment for the target FIRST — "positive", "negative" or "neutral" for what that segment says about that target — and choose the category from those polarities afterwards:
+- only positive segments → "positive"; only negative segments → "negative"; only neutral segments → "neutral";
+- at least one positive AND at least one negative segment about the same target → "mixed". A "mixed" verdict lists its positive citations in "positiveEvidence" and its negative citations in "negativeEvidence"; every other verdict lists its citations in "evidence", all carrying the verdict's own polarity.
+- A single segment that states both a positive and a negative side (for example good value but a rising deductible) may appear once in "positiveEvidence" and once in "negativeEvidence" of a "mixed" verdict — and only there.
+- Keep the polarities of different aspects separate: a segment may be positive for "coverage" and negative for "price"; that does not make either aspect "mixed".
+For every entity and aspect item list at most 3 citations per list, each an "anchorId" that is exactly one of the segment ids shown. Never invent ids, never quote or rewrite text, never cite a segment twice with the same polarity in one list.
 
 ENTITIES:
 - key "brand": ARAG — the brand being tracked
@@ -210,4 +526,4 @@ ANSWER (segments; cite by id):
 """"
 `;
 
-exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"cea55575ed5157f40b7e3fbcba28f38c1d66fd0eccd1e32be63c58e56e4dc85c"`;
+exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"347c17d3e8a9fe2b930f488f077014d5e345209d08ccd9f12c3bbd266810c38e"`;

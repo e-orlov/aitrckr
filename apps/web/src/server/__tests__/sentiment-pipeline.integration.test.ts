@@ -1391,7 +1391,10 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		requireParameters: true,
 	};
 
-	/** Answers every candidate; the Alpha entity cites one anchor twice with the same polarity, which the classifier refuses. */
+	/** The anchor of each candidate's own sentence: s0001 Alpha, s0002 Newco, s0003 the brand. */
+	const ownAnchor = (key: string) => (key === ALPHA ? "s0001" : key === NEWCO ? "s0002" : "s0003");
+
+	/** Answers every candidate conformingly; the Alpha entity cites Newco's sentence, which the grounding guard refuses. */
 	function rejectingProvider(calls: { n: number }): Provider {
 		return {
 			...fakeProvider(),
@@ -1406,13 +1409,7 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 							score: 50,
 							category: "neutral",
 							confidence: 0.9,
-							evidence:
-								key === ALPHA
-									? [
-											{ anchorId: "s0001", polarity: "neutral" },
-											{ anchorId: "s0001", polarity: "positive" },
-										]
-									: [{ anchorId: key === NEWCO ? "s0002" : "s0003", polarity: "neutral" }],
+							evidence: [{ anchorId: key === ALPHA ? "s0002" : ownAnchor(key), polarity: "neutral" }],
 							aspects: [],
 						})),
 					}),
@@ -1457,15 +1454,15 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		expect(calls.n).toBe(1);
 		expect(outcome).toMatchObject({
 			status: "terminal-validation-failure",
-			code: "evidence-anchor-polarity-conflict",
+			code: "evidence-entity-unbound",
 			requestSent: true,
 			envelope: { generationId: "gen-terminal-01", usage: { costUsd: 0.020047 }, request },
 			diagnostic: {
 				stage: "evidence",
-				reason: "evidence-anchor-polarity-conflict",
+				reason: "evidence-entity-unbound",
 				entityKey: ALPHA,
-				evidenceIndex: 1,
-				anchorId: "s0001",
+				evidenceIndex: 0,
+				anchorId: "s0002",
 			},
 		});
 		const entities = await loadDetectableEntities(BRAND, "historical");
@@ -1477,19 +1474,19 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		expect(failed).toMatchObject({
 			status: "failed",
 			input_hash: expectedHash,
-			error_code: "evidence-anchor-polarity-conflict",
+			error_code: "evidence-entity-unbound",
 			attempts: 1,
 		});
 		const message = failed.error_message ?? "";
 		const diagnosticJson = message.slice(message.indexOf(" diagnostic=") + " diagnostic=".length);
 		expect(
 			message.startsWith(
-				`validation evidence-anchor-polarity-conflict (SentimentValidationError) via openrouter/${SENTIMENT_MODEL}`,
+				`validation evidence-entity-unbound (SentimentValidationError) via openrouter/${SENTIMENT_MODEL}`,
 			),
 		).toBe(true);
 		expect(JSON.parse(diagnosticJson)).toMatchObject({
 			stage: "evidence",
-			reason: "evidence-anchor-polarity-conflict",
+			reason: "evidence-entity-unbound",
 			entityKey: ALPHA,
 			generationId: "gen-terminal-01",
 		});
@@ -1509,7 +1506,7 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		const before = await row();
 		expect(await runSentimentJob(terminalPayload, { resolveProvider: () => rejectingProvider(calls) })).toMatchObject({
 			status: "skipped",
-			reason: expect.stringContaining("terminal validation failure evidence-anchor-polarity-conflict"),
+			reason: expect.stringContaining("terminal validation failure evidence-entity-unbound"),
 		});
 		expect(calls.n).toBe(0);
 		expect(await row()).toEqual(before);
@@ -1558,12 +1555,12 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 				const keys = [...prompt.matchAll(/^- key "([^"]+)"/gm)].map((m) => m[1]);
 				return {
 					object: schema.parse({
-						entities: keys.map((key, index) => ({
+						entities: keys.map((key) => ({
 							key,
 							score: 50,
 							category: "neutral",
 							confidence: 0.9,
-							evidence: [{ anchorId: `s000${index + 1}`, polarity: "neutral" }],
+							evidence: [{ anchorId: ownAnchor(key), polarity: "neutral" }],
 							aspects: [],
 						})),
 					}),

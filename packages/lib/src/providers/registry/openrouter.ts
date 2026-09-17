@@ -1,8 +1,9 @@
-import { z } from "zod";
+import type { z } from "zod";
 import { WEB_QUERIES_UNAVAILABLE } from "../../constants";
 import { getCredential } from "../../secrets";
 import { type Citation, normalizeCitationTitle } from "../../text-extraction";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS, warnIfOutputCapped } from "../config";
+import { toStructuredOutputJsonSchema } from "../json-schema";
 import {
 	type Provider,
 	type ProviderOptions,
@@ -223,7 +224,7 @@ export const openrouter: Provider = {
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
 		// Raw fetch (no AI SDK) so we can attach OpenRouter's server-tool fields
 		// — the AI SDK's OpenAI-compat path doesn't pass them through.
-		const jsonSchema = z.toJSONSchema(schema as z.ZodType);
+		const jsonSchema = toStructuredOutputJsonSchema(schema as z.ZodType);
 		const body: Record<string, unknown> = {
 			model: DEFAULT_RESEARCH_MODEL,
 			messages: [{ role: "user", content: prompt }],

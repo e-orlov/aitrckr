@@ -20,7 +20,12 @@ import {
 	sentimentDetections,
 	sentimentObservations,
 } from "@workspace/lib/db/schema";
-import { extractAnswerBody } from "@workspace/lib/sentiment";
+import {
+	extractAnswerBody,
+	type SentimentRunCoverageStatus,
+	selectedSentimentAnalysisIds,
+	sentimentRunCoverageStatus,
+} from "@workspace/lib/sentiment";
 import {
 	bucketForRange,
 	computeEntityMetrics,
@@ -35,7 +40,6 @@ import {
 	BRAND_ENTITY_KEY,
 	SENTIMENT_ASPECT_KEYS,
 	SENTIMENT_ASPECTS,
-	SENTIMENT_CLASSIFIER_VERSION,
 	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAspectKey,
@@ -227,16 +231,14 @@ function scopeRuns(
 const runIdsInScope = (scope: ScopeSql) => db.select({ id: promptRuns.id }).from(promptRuns).where(scope.runsWhere);
 
 /**
- * The one eligibility contract every read shares: an analysis counts — for
- * coverage and for metrics alike — only under the current classifier AND
- * taxonomy version. A completed analysis under an older taxonomy is stale
- * (it will be reclassified) and contributes to neither.
+ * The one eligibility contract every read shares: for each prompt run exactly
+ * one analysis is selected — the completed one of the most preferred readable
+ * classifier version under the current taxonomy (`selectedSentimentAnalysisIds`
+ * in `@workspace/lib/sentiment`). Coverage and metrics alike derive from that
+ * selection; a completed analysis under an older taxonomy or an unreadable
+ * version is stale (it will be reclassified) and contributes to neither.
  */
-const currentAnalysisWhere = (): SQL =>
-	and(
-		eq(sentimentAnalyses.classifierVersion, SENTIMENT_CLASSIFIER_VERSION),
-		eq(sentimentAnalyses.taxonomyVersion, SENTIMENT_TAXONOMY_VERSION),
-	) as SQL;
+const selectedAnalysisWhere = (): SQL => selectedSentimentAnalysisIds();
 
 /** Observations are read through their mention: only the current, non-superseded mention projection counts. */
 const withCurrentMention = and(
@@ -245,13 +247,9 @@ const withCurrentMention = and(
 	isNull(promptRunEntityMentions.supersededAt),
 ) as SQL;
 
-/** Completed current analyses over current mentions; a stale taxonomy or superseded mention never counts. */
+/** Observations of the selected analyses over current mentions; a stale taxonomy, an unselected version or a superseded mention never counts. */
 function completedObservationsWhere(aspect: SentimentAspectFilter, scope: ScopeSql): SQL {
-	const base = and(
-		currentAnalysisWhere(),
-		eq(sentimentAnalyses.status, "completed"),
-		inArray(sentimentObservations.promptRunId, runIdsInScope(scope)),
-	) as SQL;
+	const base = and(selectedAnalysisWhere(), inArray(sentimentObservations.promptRunId, runIdsInScope(scope))) as SQL;
 	if (aspect === "overall") return base;
 	return and(
 		base,
@@ -342,33 +340,26 @@ async function coverageStats(scope: ScopeSql) {
 				),
 			)
 			.groupBy(sentimentDetections.status),
+		// One status per run over all its analysis rows, consistent with the selection used for metrics.
 		db
 			.select({
-				status: sentimentAnalyses.status,
-				current: sql<boolean>`(${currentAnalysisWhere()})`,
-				value: sql<number>`count(*)::int`,
+				promptRunId: sentimentAnalyses.promptRunId,
+				status: sentimentRunCoverageStatus().as("run_status"),
 			})
 			.from(sentimentAnalyses)
-			.where(
-				and(
-					eq(sentimentAnalyses.classifierVersion, SENTIMENT_CLASSIFIER_VERSION),
-					inArray(sentimentAnalyses.promptRunId, runIdsInScope(scope)),
-				),
-			)
-			.groupBy(sql`1`, sql`2`),
+			.where(inArray(sentimentAnalyses.promptRunId, runIdsInScope(scope)))
+			.groupBy(sentimentAnalyses.promptRunId),
 	]);
 	const byReceipt = new Map(receipts.map((row) => [row.status, row.value]));
 	const withMentions = byReceipt.get("mentions") ?? 0;
 	const unextractable = byReceipt.get("unextractable") ?? 0;
-	// Finished rows outside the current eligibility contract (older taxonomy)
-	// are stale work still to be redone: they count as pending, never as done.
 	const analyses = { completed: 0, pending: 0, failed: 0, noMentions: 0 };
 	for (const row of statuses) {
-		if (!row.current && (row.status === "completed" || row.status === "no_mentions")) analyses.pending += row.value;
-		else if (row.status === "completed") analyses.completed += row.value;
-		else if (row.status === "failed") analyses.failed += row.value;
-		else if (row.status === "no_mentions") analyses.noMentions += row.value;
-		else analyses.pending += row.value;
+		const status = row.status as SentimentRunCoverageStatus;
+		if (status === "completed") analyses.completed += 1;
+		else if (status === "failed") analyses.failed += 1;
+		else if (status === "no_mentions") analyses.noMentions += 1;
+		else analyses.pending += 1;
 	}
 	return {
 		responsesDetected: withMentions + unextractable + (byReceipt.get("no_mentions") ?? 0),

@@ -13,7 +13,7 @@ import {
 } from "../golden/corpus";
 import { GOLDEN_GATES, goldenGatesPass, scoreGoldenCase, summarizeGolden } from "../golden/evaluate";
 import { goldenReference } from "../golden/reference";
-import { sentimentClassificationResultSchemaFor } from "../types";
+import { sentimentProviderResultSchemaFor } from "../types";
 
 const brandEntityForGolden = {
 	key: GOLDEN_BRAND.key,
@@ -86,7 +86,7 @@ describe("GOLD-SNT-001 synthetic corpus", () => {
 	it("GOLD-SNT-CIT-001: the request schema of every case accepts only the exact candidate keys", () => {
 		for (const goldenCase of GOLDEN_CASES) {
 			const ids = segmentAnswer(goldenCase.answer).map((anchor) => anchor.id);
-			const schema = sentimentClassificationResultSchemaFor(
+			const schema = sentimentProviderResultSchemaFor(
 				ids,
 				goldenCase.candidates.map((c) => c.key),
 			);

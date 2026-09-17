@@ -12,11 +12,23 @@ export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v2";
  * change). Rows with another version stay auditable and are ignored at read
  * time.
  */
-export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v3";
+export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v4";
+
+/**
+ * Transitional read policy: every Sentiment read prefers a completed analysis
+ * of the current classifier and falls back, per prompt run, to a completed
+ * analysis of a listed older version, so history classified under the
+ * previous contract stays visible until it is reclassified. Preference order;
+ * versions not listed here (v2 and older) are never read. Removing the
+ * fallback is a later explicit decision, not a side effect of a deployment.
+ */
+export const SENTIMENT_READABLE_CLASSIFIER_VERSIONS = [SENTIMENT_CLASSIFIER_VERSION, "sent-classifier-v3"] as const;
 
 /**
  * Versioned separately from the classifier: a later taxonomy must never
- * silently rewrite what an older aspect row meant.
+ * silently rewrite what an older aspect row meant. The aspect *keys* and
+ * their meaning are unchanged in v4; the routing rules that send a statement
+ * to one key belong to the classifier contract, not to the taxonomy.
  */
 export const SENTIMENT_TAXONOMY_VERSION = "sent-aspects-v1";
 
@@ -140,71 +152,286 @@ export function isScoreCategoryConsistent(score: number, category: SentimentCate
 export const ANCHOR_ID_PATTERN = /^s\d{4}$/;
 
 /**
+ * The reusable parts of one request's wire contract. Every part is a single
+ * Zod instance shared by all the places that use it, so the JSON Schema
+ * serialisation (`toStructuredOutputJsonSchema`, `reused: "ref"`) emits each
+ * of them exactly once under `$defs` and references it from every site: the
+ * per-request anchor-id enum appears in the document one time, whatever the
+ * number of evidence lists, and the entity-key enum likewise. The Zod schema
+ * remains the only source of truth — the provider schema and the local parser
+ * are the same object.
+ */
+export const SENTIMENT_SCHEMA_DEFINITIONS = Object.freeze({
+	anchorId: "anchorId",
+	entityKey: "entityKey",
+	aspectKey: "aspectKey",
+	confidence: "confidence",
+});
+
+interface SchemaParts {
+	anchorId: z.ZodType<string>;
+	entityKey: z.ZodType<string>;
+	aspectKey: z.ZodType<SentimentAspectKey>;
+	confidence: z.ZodType<number>;
+	citations: Record<EvidencePolarity, z.ZodType<{ anchorId: string; polarity: EvidencePolarity }>>;
+}
+
+/**
  * The provider never types an excerpt: it cites one of the answer's anchors
- * by id and labels its polarity. `anchorIdSchema` binds the id to the
- * current answer when the ids are known (the request schema), and to the
- * anchor pattern otherwise (parsing a stored or replayed result).
- */
-function evidenceSchemaFor(anchorIds?: readonly string[]) {
-	const anchorId =
-		anchorIds && anchorIds.length > 0
-			? z.enum(anchorIds as [string, ...string[]])
-			: z.string().regex(ANCHOR_ID_PATTERN);
-	return z.strictObject({
-		anchorId,
-		polarity: z.enum(EVIDENCE_POLARITIES),
-	});
-}
-
-function aspectResultSchemaFor(anchorIds?: readonly string[]) {
-	return z.strictObject({
-		key: z.enum(SENTIMENT_ASPECT_KEYS),
-		score: z.number().int().min(0).max(100),
-		category: z.enum(SENTIMENT_CATEGORIES),
-		confidence: z.number().min(0).max(1),
-		evidence: z.array(evidenceSchemaFor(anchorIds)).min(1).max(EVIDENCE_MAX_ITEMS),
-	});
-}
-
-/**
+ * by id. The id is bound to the current answer when the ids are known (the
+ * request schema) and to the anchor pattern otherwise (parsing a stored or
+ * replayed result); the polarity is fixed by the list the citation sits in.
  * The entity key is bound to the exact opaque candidate keys when they are
- * known (the request schema), so a display name, alias or variation can never
- * be a schema-valid answer; parsing a stored or replayed result binds by shape
- * only and the local allowlist decides.
+ * known, so a display name, alias or variation can never be a schema-valid
+ * answer; parsing a stored or replayed result binds by shape only and the
+ * local allowlist decides.
  */
-function entityResultSchemaFor(anchorIds?: readonly string[], entityKeys?: readonly string[]) {
-	const key = entityKeys && entityKeys.length > 0 ? z.enum(entityKeys as [string, ...string[]]) : z.string().min(1);
-	return z.strictObject({
-		key,
-		score: z.number().int().min(0).max(100),
-		category: z.enum(SENTIMENT_CATEGORIES),
-		confidence: z.number().min(0).max(1),
-		evidence: z.array(evidenceSchemaFor(anchorIds)).min(1).max(EVIDENCE_MAX_ITEMS),
-		aspects: z.array(aspectResultSchemaFor(anchorIds)).max(SENTIMENT_ASPECT_KEYS.length),
-	});
+function schemaPartsFor(anchorIds?: readonly string[], entityKeys?: readonly string[]): SchemaParts {
+	const anchorId = (
+		anchorIds && anchorIds.length > 0 ? z.enum(anchorIds as [string, ...string[]]) : z.string().regex(ANCHOR_ID_PATTERN)
+	).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.anchorId });
+	const entityKey = (
+		entityKeys && entityKeys.length > 0 ? z.enum(entityKeys as [string, ...string[]]) : z.string().min(1)
+	).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.entityKey });
+	// Only leaf parts carry an id: a named composite makes the serializer hoist
+	// every one of its children into unnamed definitions as well.
+	const citation = (polarity: EvidencePolarity) => z.strictObject({ anchorId, polarity: z.enum([polarity]) });
+	return {
+		anchorId,
+		entityKey,
+		aspectKey: z.enum(SENTIMENT_ASPECT_KEYS).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.aspectKey }),
+		confidence: z.number().min(0).max(1).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.confidence }),
+		citations: { positive: citation("positive"), negative: citation("negative"), neutral: citation("neutral") },
+	};
+}
+
+function citationListFor(polarity: EvidencePolarity, parts: SchemaParts) {
+	return z.array(parts.citations[polarity]).min(1).max(EVIDENCE_MAX_ITEMS);
 }
 
 /**
- * Strict contract for the classifier's structured answer, bound to one
- * answer's anchor ids and one request's candidate keys: an id outside the
- * answer or a key outside the candidates fails the provider-side schema
- * before it can reach local validation. Unknown keys, categories or aspects
- * are validation errors and are never coerced into a stored Neutral or
- * `other`.
+ * One judged target (an entity overall or one of its aspects) as the provider
+ * returns it — classifier contract `sent-classifier-v4`. The category is a
+ * discriminator: each branch admits only the score range and the citation
+ * polarities that belong to it, so a Positive target carrying a negative
+ * citation, a Negative target carrying a positive one, or a Mixed target
+ * without one citation of each polarity is not representable. Mixed may cite
+ * one both-sides anchor once per polarity. Everything is expressed with the
+ * strict structured-output subset only (`anyOf`, `enum`, `$ref`, numeric and
+ * array bounds), never with `if/then`, `contains`, `allOf`, `not` or `oneOf`.
  */
-export function sentimentClassificationResultSchemaFor(anchorIds: readonly string[], entityKeys: readonly string[]) {
-	return z.strictObject({ entities: z.array(entityResultSchemaFor(anchorIds, entityKeys)).min(1) });
+function targetBranchesFor<Extra extends z.ZodRawShape>(extra: Extra, parts: SchemaParts) {
+	return [
+		z.strictObject({
+			...extra,
+			category: z.enum(["positive"]),
+			score: z.number().int().min(51).max(100),
+			confidence: parts.confidence,
+			evidence: citationListFor("positive", parts),
+		}),
+		z.strictObject({
+			...extra,
+			category: z.enum(["negative"]),
+			score: z.number().int().min(0).max(49),
+			confidence: parts.confidence,
+			evidence: citationListFor("negative", parts),
+		}),
+		z.strictObject({
+			...extra,
+			category: z.enum(["neutral"]),
+			score: z.number().int().min(50).max(50),
+			confidence: parts.confidence,
+			evidence: citationListFor("neutral", parts),
+		}),
+		z.strictObject({
+			...extra,
+			category: z.enum(["mixed"]),
+			score: z.number().int().min(50).max(50),
+			confidence: parts.confidence,
+			positiveEvidence: citationListFor("positive", parts),
+			negativeEvidence: citationListFor("negative", parts),
+		}),
+	] as const;
 }
 
-/** The same contract without the per-answer id binding (anchor ids by pattern only). */
+function aspectTargetSchemaFor(parts: SchemaParts) {
+	return z.union(targetBranchesFor({ key: parts.aspectKey }, parts));
+}
+
+function entityTargetSchemaFor(parts: SchemaParts) {
+	const aspects = z.array(aspectTargetSchemaFor(parts)).max(SENTIMENT_ASPECT_KEYS.length);
+	return z.union(targetBranchesFor({ key: parts.entityKey, aspects }, parts));
+}
+
+/**
+ * Strict wire contract for the classifier's structured answer, bound to one
+ * answer's anchor ids and one request's candidate keys: an id outside the
+ * answer, a key outside the candidates, or a category/polarity combination
+ * the branches do not admit fails the provider-side schema before it can
+ * reach local validation. Unknown keys, categories or aspects are validation
+ * errors and are never coerced into a stored Neutral or `other`.
+ */
+export function sentimentProviderResultSchemaFor(anchorIds: readonly string[], entityKeys: readonly string[]) {
+	return z.strictObject({ entities: z.array(entityTargetSchemaFor(schemaPartsFor(anchorIds, entityKeys))).min(1) });
+}
+
+/** The same wire contract without the per-answer binding (anchor ids by pattern, keys by shape). */
+export const sentimentProviderResultSchema = z.strictObject({
+	entities: z.array(entityTargetSchemaFor(schemaPartsFor())).min(1),
+});
+
+export type SentimentProviderResult = z.infer<typeof sentimentProviderResultSchema>;
+export type SentimentProviderEntity = SentimentProviderResult["entities"][number];
+export type SentimentProviderAspect = SentimentProviderEntity["aspects"][number];
+
+/**
+ * Internal claim representation shared by validation, persistence, the canary
+ * and the golden corpus: one flat citation list per target, each citation an
+ * anchor id with its polarity. The wire shape above is translated into this
+ * form right after schema parsing; nothing downstream depends on the branch
+ * layout.
+ */
+const confidenceSchema = z.number().min(0).max(1);
+const evidenceRefSchema = z.strictObject({
+	anchorId: z.string().regex(ANCHOR_ID_PATTERN),
+	polarity: z.enum(EVIDENCE_POLARITIES),
+});
+const aspectResultSchema = z.strictObject({
+	key: z.enum(SENTIMENT_ASPECT_KEYS),
+	score: z.number().int().min(0).max(100),
+	category: z.enum(SENTIMENT_CATEGORIES),
+	confidence: confidenceSchema,
+	evidence: z
+		.array(evidenceRefSchema)
+		.min(1)
+		.max(EVIDENCE_MAX_ITEMS * 2),
+});
 export const sentimentClassificationResultSchema = z.strictObject({
-	entities: z.array(entityResultSchemaFor()).min(1),
+	entities: z
+		.array(
+			z.strictObject({
+				key: z.string().min(1),
+				score: z.number().int().min(0).max(100),
+				category: z.enum(SENTIMENT_CATEGORIES),
+				confidence: confidenceSchema,
+				evidence: z
+					.array(evidenceRefSchema)
+					.min(1)
+					.max(EVIDENCE_MAX_ITEMS * 2),
+				aspects: z.array(aspectResultSchema).max(SENTIMENT_ASPECT_KEYS.length),
+			}),
+		)
+		.min(1),
 });
 
 export type SentimentClassificationResult = z.infer<typeof sentimentClassificationResultSchema>;
 export type SentimentEntityResult = SentimentClassificationResult["entities"][number];
 export type SentimentAspectResult = SentimentEntityResult["aspects"][number];
 export type SentimentEvidenceRef = SentimentEntityResult["evidence"][number];
+
+type ProviderTarget = { category: SentimentCategory } & (
+	| { evidence: SentimentEvidenceRef[] }
+	| { positiveEvidence: SentimentEvidenceRef[]; negativeEvidence: SentimentEvidenceRef[] }
+);
+
+/** Citations of one wire target in one flat list: the positive list first for Mixed, in the provider's order otherwise. */
+function citationsOf(target: ProviderTarget): SentimentEvidenceRef[] {
+	if ("positiveEvidence" in target) return [...target.positiveEvidence, ...target.negativeEvidence];
+	return target.evidence;
+}
+
+/** Translate a parsed wire result into the internal claim representation; no rule is applied here. */
+export function toClassificationResult(provider: SentimentProviderResult): SentimentClassificationResult {
+	return {
+		entities: provider.entities.map((entity) => ({
+			key: entity.key,
+			score: entity.score,
+			category: entity.category,
+			confidence: entity.confidence,
+			evidence: citationsOf(entity),
+			aspects: entity.aspects.map((aspect) => ({
+				key: aspect.key,
+				score: aspect.score,
+				category: aspect.category,
+				confidence: aspect.confidence,
+				evidence: citationsOf(aspect),
+			})),
+		})),
+	};
+}
+
+/**
+ * Translate an internal result back into the wire shape. Only representable
+ * results translate: a target whose citations do not fit its category's
+ * branch (a Positive target with a negative citation, a Mixed target lacking
+ * one polarity) throws — the wire contract cannot express it.
+ */
+export function toProviderResult(raw: unknown): SentimentProviderResult {
+	const result = sentimentClassificationResultSchema.parse(raw);
+	const wire = (target: SentimentEntityResult | SentimentAspectResult) => {
+		const { evidence, ...rest } = target;
+		if (target.category === "mixed") {
+			const positiveEvidence = evidence.filter((e) => e.polarity === "positive");
+			const negativeEvidence = evidence.filter((e) => e.polarity === "negative");
+			if (
+				positiveEvidence.length === 0 ||
+				negativeEvidence.length === 0 ||
+				positiveEvidence.length + negativeEvidence.length !== evidence.length
+			)
+				throw new Error(`mixed target needs positive and negative citations only`);
+			return { ...rest, positiveEvidence, negativeEvidence };
+		}
+		if (evidence.some((e) => e.polarity !== target.category))
+			throw new Error(`${target.category} target may cite ${target.category} anchors only`);
+		return { ...rest, evidence };
+	};
+	return sentimentProviderResultSchema.parse({
+		entities: result.entities.map((entity) => ({ ...wire(entity), aspects: entity.aspects.map(wire) })),
+	});
+}
+
+/**
+ * JSON Schema keywords the strict structured-output mode of the locked
+ * provider supports. Anything else in a request schema is a contract defect
+ * caught by tests before a call is ever made.
+ */
+export const STRICT_STRUCTURED_OUTPUT_KEYWORDS = [
+	"$schema",
+	"$defs",
+	"$ref",
+	"type",
+	"properties",
+	"required",
+	"additionalProperties",
+	"items",
+	"anyOf",
+	"enum",
+	"minItems",
+	"maxItems",
+	"minimum",
+	"maximum",
+	"description",
+	"title",
+] as const;
+
+/** Throws when a serialized schema uses a keyword outside the supported subset (`if/then/else`, `contains`, `allOf`, `not`, `oneOf`, …). */
+export function assertStrictStructuredOutputSubset(schema: unknown): void {
+	const allowed = new Set<string>(STRICT_STRUCTURED_OUTPUT_KEYWORDS);
+	const walk = (node: unknown, path: string, underProperties: boolean) => {
+		if (Array.isArray(node)) {
+			for (const [i, item] of node.entries()) walk(item, `${path}[${i}]`, false);
+			return;
+		}
+		if (typeof node !== "object" || node === null) return;
+		for (const [key, value] of Object.entries(node)) {
+			if (!underProperties && !allowed.has(key)) {
+				throw new Error(`unsupported JSON Schema keyword "${key}" at ${path || "$"}`);
+			}
+			walk(value, `${path}.${key}`, key === "properties" || key === "$defs");
+		}
+	};
+	walk(schema, "", false);
+}
 
 /**
  * An exact excerpt of the stored answer body. `start`/`end` are UTF-16 offsets

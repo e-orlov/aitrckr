@@ -6,10 +6,11 @@
  * evidence claims were rejected instead of de-duplicated.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
+import { toStructuredOutputJsonSchema } from "../../providers/json-schema";
 import { segmentAnswer } from "../anchors";
-import { classifySentiment, validateSentimentResult } from "../classifier";
-import { type SentimentCandidate, sentimentClassificationResultSchemaFor } from "../types";
+import { classifySentiment, validateClassification, validateSentimentResult } from "../classifier";
+import { dereferenceSchema } from "../schema-budget";
+import { type SentimentCandidate, sentimentProviderResultSchemaFor } from "../types";
 
 /** Live shape 1 and 2: one candidate, the own brand with the generic opaque key `brand` and display name ARAG. */
 const brandOnly: SentimentCandidate[] = [
@@ -72,16 +73,26 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 
 	it("the request schema binds the entity key to the exact candidate keys (strict enum), not to any string", () => {
 		const ids = segmentAnswer(brandAnswer).map((a) => a.id);
-		type Shape = { properties: { entities: { items: { properties: { key: Record<string, unknown> } } } } };
-		const json = z.toJSONSchema(sentimentClassificationResultSchemaFor(ids, ["brand"])) as unknown as Shape;
-		expect(json.properties.entities.items.properties.key).toEqual({ type: "string", enum: ["brand"] });
-		const multi = z.toJSONSchema(
-			sentimentClassificationResultSchemaFor(
-				ids,
-				three.map((c) => c.key),
+		// Classifier v4: one branch per category; every branch binds the same exact key enum.
+		type Shape = { properties: { entities: { items: { anyOf: { properties: { key: Record<string, unknown> } }[] } } } };
+		const json = dereferenceSchema(
+			toStructuredOutputJsonSchema(sentimentProviderResultSchemaFor(ids, ["brand"])),
+		) as unknown as Shape;
+		expect(json.properties.entities.items.anyOf).toHaveLength(4);
+		for (const branch of json.properties.entities.items.anyOf) {
+			expect(branch.properties.key).toEqual({ type: "string", enum: ["brand"] });
+		}
+		const multi = dereferenceSchema(
+			toStructuredOutputJsonSchema(
+				sentimentProviderResultSchemaFor(
+					ids,
+					three.map((c) => c.key),
+				),
 			),
 		) as unknown as Shape;
-		expect(multi.properties.entities.items.properties.key.enum).toEqual(three.map((c) => c.key));
+		for (const branch of multi.properties.entities.items.anyOf) {
+			expect(branch.properties.key.enum).toEqual(three.map((c) => c.key));
+		}
 	});
 
 	it("the serialized OpenRouter request carries strict json_schema, the exact-key enum and require_parameters", async () => {
@@ -121,14 +132,19 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 				type: string;
 				json_schema: {
 					strict: boolean;
-					schema: { properties: { entities: { items: { properties: { key: { enum?: string[] } } } } } };
+					schema: { properties: { entities: { items: { anyOf: { properties: { key: { enum?: string[] } } }[] } } } };
 				};
 			};
 			provider?: { require_parameters?: boolean };
 		};
 		expect(body.response_format.type).toBe("json_schema");
 		expect(body.response_format.json_schema.strict).toBe(true);
-		expect(body.response_format.json_schema.schema.properties.entities.items.properties.key.enum).toEqual(["brand"]);
+		const sentSchema = dereferenceSchema(
+			body.response_format.json_schema.schema,
+		) as typeof body.response_format.json_schema.schema;
+		for (const branch of sentSchema.properties.entities.items.anyOf) {
+			expect(branch.properties.key.enum).toEqual(["brand"]);
+		}
 		expect(body.provider).toEqual({ require_parameters: true });
 		expect(result.request).toMatchObject({ strictJsonSchema: true, requireParameters: true });
 	});
@@ -142,7 +158,8 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 });
 
 describe("UT-SNT-CIT-003 live failure 3 — evidence-anchor-polarity-conflict is target-scoped", () => {
-	const validate = (raw: unknown) => validateSentimentResult(raw, { answerBody: threeAnswer, candidates: three });
+	// Internal claim representation: these are the rules behind the wire schema, which no longer admits most of the defects itself.
+	const validate = (raw: unknown) => validateClassification(raw, { answerBody: threeAnswer, candidates: three });
 	const base = () => [
 		entity("brand"),
 		entity(WGV, { evidence: [{ anchorId: "s0002", polarity: "neutral" }] }),
@@ -221,6 +238,7 @@ describe("UT-SNT-CIT-003 live failure 3 — evidence-anchor-polarity-conflict is
 	it("a differing pair on one anchor within one non-Mixed aspect is still rejected, naming the aspect", () => {
 		const entities = base();
 		entities[2] = entity(HUK, {
+			evidence: [{ anchorId: "s0003", polarity: "neutral" }],
 			aspects: [
 				{
 					key: "price",

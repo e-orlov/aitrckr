@@ -55,6 +55,7 @@ export {
 	sentimentInputHash,
 	type ValidatedAspect,
 	type ValidatedEntitySentiment,
+	validateClassification,
 	validateSentimentResult,
 } from "./classifier";
 export {
@@ -95,6 +96,14 @@ export {
 	sanitizeSentimentError,
 } from "./errors";
 export type { PaidResponseEnvelope } from "./errors-validation";
+export {
+	type AnchorContext,
+	type AnchorGrounding,
+	type GroundingMap,
+	groundAnchors,
+	isAttributable,
+	namesOnlyOthers,
+} from "./grounding";
 export { runSentimentJob, type SentimentJobDeps, type SentimentJobOptions, type SentimentJobOutcome } from "./job";
 export {
 	bucketForRange,
@@ -139,6 +148,21 @@ export {
 	type TextRange,
 } from "./ranges";
 export {
+	type SentimentRunCoverageStatus,
+	selectedSentimentAnalyses,
+	selectedSentimentAnalysisIds,
+	sentimentRunCoverageStatus,
+} from "./read-selection";
+export {
+	assertProviderSchemaBudget,
+	dereferenceSchema,
+	measureSchemaBudget,
+	PROVIDER_SCHEMA_LIMITS,
+	type SchemaBudget,
+	type SchemaBudgetViolation,
+	schemaBudgetViolations,
+} from "./schema-budget";
+export {
 	type AnalysisClaim,
 	type ClaimOptions,
 	type ClaimOutcome,
@@ -164,6 +188,7 @@ export {
 } from "./store";
 export { extractAnswerBody, type IndexedText, normalizeIndexed, normalizeText } from "./text";
 export {
+	assertStrictStructuredOutputSubset,
 	BRAND_ENTITY_KEY,
 	compareSentimentEntities,
 	EVIDENCE_MAX_ITEMS,
@@ -181,6 +206,8 @@ export {
 	SENTIMENT_MODEL,
 	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_QUEUE,
+	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
+	SENTIMENT_SCHEMA_DEFINITIONS,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 	type SentimentAspectKey,
@@ -191,9 +218,16 @@ export {
 	type SentimentEvidence,
 	type SentimentEvidenceRef,
 	type SentimentJobData,
+	type SentimentProviderAspect,
+	type SentimentProviderEntity,
+	type SentimentProviderResult,
+	STRICT_STRUCTURED_OUTPUT_KEYWORDS,
 	sentimentClassificationResultSchema,
-	sentimentClassificationResultSchemaFor,
 	sentimentJobSchema,
+	sentimentProviderResultSchema,
+	sentimentProviderResultSchemaFor,
 	sentimentSingletonKey,
 	sortSentimentEntities,
+	toClassificationResult,
+	toProviderResult,
 } from "./types";
