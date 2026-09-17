@@ -765,10 +765,21 @@ export const sentimentProviderAttempts = pgTable(
 		inputHash: text("input_hash").notNull(),
 		outcome: text("outcome").notNull().default("sending"),
 		actualCostUsd: numeric("actual_cost_usd", { precision: 10, scale: 6 }),
+		/**
+		 * The normalized, schema-valid candidate this answered attempt produced
+		 * (entity keys, scores, categories, anchor ids, polarities — never text),
+		 * owned by the attempt so a worker that lost its claim still leaves a
+		 * reusable result behind. Null for unanswered attempts and for verdicts.
+		 */
+		candidate: jsonb("candidate"),
 		startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
 		finishedAt: timestamp("finished_at", { withTimezone: true }),
 	},
 	(table) => ({
+		candidateCheck: check(
+			"sentiment_provider_attempts_candidate_check",
+			sql`${table.candidate} IS NULL OR jsonb_typeof(${table.candidate}) = 'object'`,
+		),
 		analysisOrdinalUnique: uniqueIndex("sentiment_provider_attempts_analysis_ordinal_idx").on(
 			table.analysisId,
 			table.ordinal,
