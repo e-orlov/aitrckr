@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { z } from "zod";
+import type { z } from "zod";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test stack");
@@ -23,6 +23,7 @@ if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test s
 const {
 	buildSentimentPrompt,
 	candidatesFromMentions,
+	dereferenceSchema,
 	inspectSentimentCanaryRun,
 	loadDetectableEntities,
 	loadMentions,
@@ -38,6 +39,7 @@ const {
 	sentimentInputHash,
 } = await import("@workspace/lib/sentiment");
 const { StructuredResearchResponseError } = await import("@workspace/lib/providers/types");
+const { toStructuredOutputJsonSchema } = await import("@workspace/lib/providers");
 const { loadSentimentOverview } = await import("@/server/sentiment-load");
 type Provider = import("@workspace/lib/providers/types").Provider;
 type StructuredResearchRequestSummary = import("@workspace/lib/providers/types").StructuredResearchRequestSummary;
@@ -419,7 +421,12 @@ describe("IT-SNT-CIT-001 digests and request contract", () => {
 				}),
 		});
 		expect(outcome).toMatchObject({ status: "classified", entities: 3, entityKeys: ["brand", ALPHA, BETA] });
-		const json = z.toJSONSchema(sent as unknown as z.ZodType) as unknown as {
+		// The schema as the provider sees it: per-request enums once under `$defs`, expanded here for the assertion.
+		const raw = toStructuredOutputJsonSchema(sent as unknown as z.ZodType) as {
+			$defs: Record<string, { enum?: string[] }>;
+		};
+		expect(raw.$defs.entityKey.enum).toEqual(["brand", ALPHA, BETA]);
+		const json = dereferenceSchema(raw) as unknown as {
 			properties: { entities: { items: { anyOf: { properties: { key: { enum?: string[] } } }[] } } };
 		};
 		expect(json.properties.entities.items.anyOf).toHaveLength(4);

@@ -13,6 +13,7 @@ import type { ModelConfig, Provider, ProviderAccess } from "./types";
 
 export { STATUS_TARGETS } from "@workspace/config/scrape-targets";
 export { parseScrapeTargets, validateScrapeTargets } from "./config";
+export { toStructuredOutputJsonSchema } from "./json-schema";
 export { selectTargetsForBrand } from "./runner";
 export type {
 	ModelConfig,
