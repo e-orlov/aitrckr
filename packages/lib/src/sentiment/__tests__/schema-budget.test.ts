@@ -12,7 +12,7 @@ import { MAX_COMPETITORS } from "../../constants";
 import { toStructuredOutputJsonSchema } from "../../providers/json-schema";
 import { openrouter } from "../../providers/registry/openrouter";
 import { ANCHOR_MAX_COUNT, segmentAnswer } from "../anchors";
-import { classifySentiment } from "../classifier";
+import { classifySentiment, SentimentValidationError } from "../classifier";
 import {
 	assertProviderSchemaBudget,
 	measureSchemaBudget,
@@ -112,6 +112,31 @@ describe("provider schema budget (D2)", () => {
 		);
 	});
 
+	it("a roster whose request schema would break a limit is refused before any request, terminally", async () => {
+		vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test");
+		vi.stubEnv("APP_URL", "http://localhost:1515");
+		const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const sentences = Array.from({ length: ANCHOR_MAX_COUNT }, (_, i) => `Arvo bietet Leistung Nummer ${i + 1} an.`);
+		const candidates: SentimentCandidate[] = [
+			{ key: "brand", entityType: "brand", competitorId: null, name: "Arvo", aliases: [] },
+			...Array.from({ length: MAX_COMPETITORS }, (_, i) => {
+				const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+				return { key: id, entityType: "competitor" as const, competitorId: id, name: `Mitbewerber ${i}`, aliases: [] };
+			}),
+		];
+		let thrown: unknown;
+		try {
+			await classifySentiment({ answerBody: sentences.join(" "), candidates }, { resolveProvider: () => openrouter });
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(SentimentValidationError);
+		expect((thrown as SentimentValidationError).code).toBe("schema-budget-exceeded");
+		expect((thrown as SentimentValidationError).requestSent).toBe(false);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it("the schema inside a real 400-anchor request body passes the verifier", async () => {
 		vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test");
 		vi.stubEnv("APP_URL", "http://localhost:1515");
@@ -148,7 +173,7 @@ describe("provider schema budget (D2)", () => {
 		);
 		vi.stubGlobal("fetch", fetchMock);
 		await classifySentiment({ answerBody: answer, candidates }, { resolveProvider: () => openrouter });
-		const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
 		const body = JSON.parse(String(init.body));
 		expect(body.response_format.json_schema.strict).toBe(true);
 		expect(body.provider).toEqual({ require_parameters: true });

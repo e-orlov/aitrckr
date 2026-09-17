@@ -12,6 +12,8 @@ export const DIAGNOSTIC_REASONS = [
 	"model-mismatch",
 	"no-candidates",
 	"answer-unsegmentable",
+	/** The request schema for this answer and roster would break a documented provider limit; refused before any request (classifier v4). */
+	"schema-budget-exceeded",
 	"unknown-entity",
 	"duplicate-entity",
 	"missing-entity",

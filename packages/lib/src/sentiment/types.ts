@@ -152,25 +152,62 @@ export function isScoreCategoryConsistent(score: number, category: SentimentCate
 export const ANCHOR_ID_PATTERN = /^s\d{4}$/;
 
 /**
+ * The reusable parts of one request's wire contract. Every part is a single
+ * Zod instance shared by all the places that use it, so the JSON Schema
+ * serialisation (`toStructuredOutputJsonSchema`, `reused: "ref"`) emits each
+ * of them exactly once under `$defs` and references it from every site: the
+ * per-request anchor-id enum appears in the document one time, whatever the
+ * number of evidence lists, and the entity-key enum likewise. The Zod schema
+ * remains the only source of truth — the provider schema and the local parser
+ * are the same object.
+ */
+export const SENTIMENT_SCHEMA_DEFINITIONS = Object.freeze({
+	anchorId: "anchorId",
+	entityKey: "entityKey",
+	aspectKey: "aspectKey",
+	confidence: "confidence",
+});
+
+interface SchemaParts {
+	anchorId: z.ZodType<string>;
+	entityKey: z.ZodType<string>;
+	aspectKey: z.ZodType<SentimentAspectKey>;
+	confidence: z.ZodType<number>;
+	citations: Record<EvidencePolarity, z.ZodType<{ anchorId: string; polarity: EvidencePolarity }>>;
+}
+
+/**
  * The provider never types an excerpt: it cites one of the answer's anchors
  * by id. The id is bound to the current answer when the ids are known (the
  * request schema) and to the anchor pattern otherwise (parsing a stored or
  * replayed result); the polarity is fixed by the list the citation sits in.
+ * The entity key is bound to the exact opaque candidate keys when they are
+ * known, so a display name, alias or variation can never be a schema-valid
+ * answer; parsing a stored or replayed result binds by shape only and the
+ * local allowlist decides.
  */
-function anchorIdSchemaFor(anchorIds?: readonly string[]) {
-	return anchorIds && anchorIds.length > 0
-		? z.enum(anchorIds as [string, ...string[]])
-		: z.string().regex(ANCHOR_ID_PATTERN);
+function schemaPartsFor(anchorIds?: readonly string[], entityKeys?: readonly string[]): SchemaParts {
+	const anchorId = (
+		anchorIds && anchorIds.length > 0 ? z.enum(anchorIds as [string, ...string[]]) : z.string().regex(ANCHOR_ID_PATTERN)
+	).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.anchorId });
+	const entityKey = (
+		entityKeys && entityKeys.length > 0 ? z.enum(entityKeys as [string, ...string[]]) : z.string().min(1)
+	).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.entityKey });
+	// Only leaf parts carry an id: a named composite makes the serializer hoist
+	// every one of its children into unnamed definitions as well.
+	const citation = (polarity: EvidencePolarity) => z.strictObject({ anchorId, polarity: z.enum([polarity]) });
+	return {
+		anchorId,
+		entityKey,
+		aspectKey: z.enum(SENTIMENT_ASPECT_KEYS).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.aspectKey }),
+		confidence: z.number().min(0).max(1).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.confidence }),
+		citations: { positive: citation("positive"), negative: citation("negative"), neutral: citation("neutral") },
+	};
 }
 
-function citationListFor(polarity: EvidencePolarity, anchorIds?: readonly string[]) {
-	return z
-		.array(z.strictObject({ anchorId: anchorIdSchemaFor(anchorIds), polarity: z.enum([polarity]) }))
-		.min(1)
-		.max(EVIDENCE_MAX_ITEMS);
+function citationListFor(polarity: EvidencePolarity, parts: SchemaParts) {
+	return z.array(parts.citations[polarity]).min(1).max(EVIDENCE_MAX_ITEMS);
 }
-
-const confidenceSchema = z.number().min(0).max(1);
 
 /**
  * One judged target (an entity overall or one of its aspects) as the provider
@@ -180,61 +217,50 @@ const confidenceSchema = z.number().min(0).max(1);
  * citation, a Negative target carrying a positive one, or a Mixed target
  * without one citation of each polarity is not representable. Mixed may cite
  * one both-sides anchor once per polarity. Everything is expressed with the
- * strict structured-output subset only (`anyOf`, `enum`, numeric and array
- * bounds), never with `if/then`, `contains`, `allOf`, `not` or `oneOf`.
+ * strict structured-output subset only (`anyOf`, `enum`, `$ref`, numeric and
+ * array bounds), never with `if/then`, `contains`, `allOf`, `not` or `oneOf`.
  */
-function targetBranchesFor<Extra extends z.ZodRawShape>(extra: Extra, anchorIds?: readonly string[]) {
+function targetBranchesFor<Extra extends z.ZodRawShape>(extra: Extra, parts: SchemaParts) {
 	return [
 		z.strictObject({
 			...extra,
 			category: z.enum(["positive"]),
 			score: z.number().int().min(51).max(100),
-			confidence: confidenceSchema,
-			evidence: citationListFor("positive", anchorIds),
+			confidence: parts.confidence,
+			evidence: citationListFor("positive", parts),
 		}),
 		z.strictObject({
 			...extra,
 			category: z.enum(["negative"]),
 			score: z.number().int().min(0).max(49),
-			confidence: confidenceSchema,
-			evidence: citationListFor("negative", anchorIds),
+			confidence: parts.confidence,
+			evidence: citationListFor("negative", parts),
 		}),
 		z.strictObject({
 			...extra,
 			category: z.enum(["neutral"]),
 			score: z.number().int().min(50).max(50),
-			confidence: confidenceSchema,
-			evidence: citationListFor("neutral", anchorIds),
+			confidence: parts.confidence,
+			evidence: citationListFor("neutral", parts),
 		}),
 		z.strictObject({
 			...extra,
 			category: z.enum(["mixed"]),
 			score: z.number().int().min(50).max(50),
-			confidence: confidenceSchema,
-			positiveEvidence: citationListFor("positive", anchorIds),
-			negativeEvidence: citationListFor("negative", anchorIds),
+			confidence: parts.confidence,
+			positiveEvidence: citationListFor("positive", parts),
+			negativeEvidence: citationListFor("negative", parts),
 		}),
 	] as const;
 }
 
-function aspectTargetSchemaFor(anchorIds?: readonly string[]) {
-	return z.union(targetBranchesFor({ key: z.enum(SENTIMENT_ASPECT_KEYS) }, anchorIds));
+function aspectTargetSchemaFor(parts: SchemaParts) {
+	return z.union(targetBranchesFor({ key: parts.aspectKey }, parts));
 }
 
-/**
- * The entity key is bound to the exact opaque candidate keys when they are
- * known (the request schema), so a display name, alias or variation can never
- * be a schema-valid answer; parsing a stored or replayed result binds by shape
- * only and the local allowlist decides.
- */
-function entityTargetSchemaFor(anchorIds?: readonly string[], entityKeys?: readonly string[]) {
-	const key = entityKeys && entityKeys.length > 0 ? z.enum(entityKeys as [string, ...string[]]) : z.string().min(1);
-	return z.union(
-		targetBranchesFor(
-			{ key, aspects: z.array(aspectTargetSchemaFor(anchorIds)).max(SENTIMENT_ASPECT_KEYS.length) },
-			anchorIds,
-		),
-	);
+function entityTargetSchemaFor(parts: SchemaParts) {
+	const aspects = z.array(aspectTargetSchemaFor(parts)).max(SENTIMENT_ASPECT_KEYS.length);
+	return z.union(targetBranchesFor({ key: parts.entityKey, aspects }, parts));
 }
 
 /**
@@ -246,12 +272,12 @@ function entityTargetSchemaFor(anchorIds?: readonly string[], entityKeys?: reado
  * errors and are never coerced into a stored Neutral or `other`.
  */
 export function sentimentProviderResultSchemaFor(anchorIds: readonly string[], entityKeys: readonly string[]) {
-	return z.strictObject({ entities: z.array(entityTargetSchemaFor(anchorIds, entityKeys)).min(1) });
+	return z.strictObject({ entities: z.array(entityTargetSchemaFor(schemaPartsFor(anchorIds, entityKeys))).min(1) });
 }
 
 /** The same wire contract without the per-answer binding (anchor ids by pattern, keys by shape). */
 export const sentimentProviderResultSchema = z.strictObject({
-	entities: z.array(entityTargetSchemaFor()).min(1),
+	entities: z.array(entityTargetSchemaFor(schemaPartsFor())).min(1),
 });
 
 export type SentimentProviderResult = z.infer<typeof sentimentProviderResultSchema>;
@@ -265,6 +291,7 @@ export type SentimentProviderAspect = SentimentProviderEntity["aspects"][number]
  * form right after schema parsing; nothing downstream depends on the branch
  * layout.
  */
+const confidenceSchema = z.number().min(0).max(1);
 const evidenceRefSchema = z.strictObject({
 	anchorId: z.string().regex(ANCHOR_ID_PATTERN),
 	polarity: z.enum(EVIDENCE_POLARITIES),

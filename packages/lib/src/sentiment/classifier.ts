@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import type { z } from "zod";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../providers/config";
+import { toStructuredOutputJsonSchema } from "../providers/json-schema";
 import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
 import { StructuredResearchResponseError } from "../providers/types";
 import { anchorMap, type EvidenceAnchor, segmentAnswer } from "./anchors";
@@ -9,6 +11,7 @@ import { type GroundingMap, groundAnchors, isAttributable, namesOnlyOthers } fro
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import { type AnalyzableText, analyzableText, analyzeAnswerRanges } from "./ranges";
+import { schemaBudgetViolations } from "./schema-budget";
 import { normalizeText } from "./text";
 import {
 	type EvidencePolarity,
@@ -429,6 +432,25 @@ function rangesBeforeRequest(answerBody: string): AnalyzableText {
 type ResearchResult = Awaited<ReturnType<NonNullable<Provider["runStructuredResearch"]>>>;
 
 /**
+ * The exact JSON Schema this request would carry is measured against the
+ * provider's documented strict structured-output limits before anything is
+ * sent. The schema is a deterministic function of the answer's anchors and the
+ * candidate roster, so a schema that breaks a limit is a terminal defect of
+ * this input, refused without spending; a retry could only produce the same
+ * schema.
+ */
+function assertRequestSchemaBudget(schema: z.ZodType): void {
+	const violations = schemaBudgetViolations(toStructuredOutputJsonSchema(schema));
+	if (violations.length === 0) return;
+	const first = violations[0];
+	throw new SentimentValidationError(
+		"schema-budget-exceeded",
+		`request schema breaks the provider limit ${first.rule}: ${first.actual} (limit ${first.limit})`,
+		diagnostic("provider-schema", "schema-budget-exceeded"),
+	).beforeRequest();
+}
+
+/**
  * The one provider request. A response the provider itself could not turn
  * into the requested object is a paid, terminal defect of this answer and is
  * rethrown as a validation error carrying the response envelope.
@@ -443,10 +465,12 @@ async function requestClassification(
 	if (!provider.runStructuredResearch) {
 		throw new Error(`Provider "${provider.id}" does not implement structured research`);
 	}
+	const schema = sentimentProviderResultSchemaFor(anchorIds, entityKeys);
+	assertRequestSchemaBudget(schema);
 	try {
 		return await provider.runStructuredResearch({
 			prompt,
-			schema: sentimentProviderResultSchemaFor(anchorIds, entityKeys),
+			schema,
 			webSearch: true,
 			signal,
 			maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,

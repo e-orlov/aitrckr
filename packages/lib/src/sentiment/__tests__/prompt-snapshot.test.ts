@@ -6,7 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
+import { toStructuredOutputJsonSchema } from "../../providers/json-schema";
 import { segmentAnswer } from "../anchors";
 import { buildSentimentPrompt } from "../prompt";
 import { type SentimentCandidate, sentimentProviderResultSchemaFor } from "../types";
@@ -31,7 +31,7 @@ describe("CT-SNT-008 provider-facing prompt and schema snapshots", () => {
 
 	it("binds the request schema to this answer's anchor ids and this request's entity keys", () => {
 		const ids = segmentAnswer(answer).map((anchor) => anchor.id);
-		const jsonSchema = z.toJSONSchema(
+		const jsonSchema = toStructuredOutputJsonSchema(
 			sentimentProviderResultSchemaFor(
 				ids,
 				candidates.map((c) => c.key),
@@ -39,7 +39,9 @@ describe("CT-SNT-008 provider-facing prompt and schema snapshots", () => {
 		);
 		expect(jsonSchema).toMatchSnapshot();
 		const serialized = JSON.stringify(jsonSchema);
-		expect(serialized).toContain('"enum":["s0001","s0002","s0003"]');
+		// The per-request enums are emitted exactly once each, under `$defs`, and referenced from every site.
+		expect(serialized.split('"enum":["s0001","s0002","s0003"]')).toHaveLength(2);
+		expect(serialized).toContain('"$ref":"#/$defs/anchorId"');
 		expect(serialized).toContain('"enum":["brand","c-huk","c-wgv"]');
 		expect(serialized).not.toContain('"quote"');
 	});

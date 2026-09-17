@@ -67,11 +67,8 @@ function isAnchorEnum(values: unknown[]): boolean {
 	return values.length > 0 && values.every((v) => typeof v === "string" && ANCHOR_ID_PATTERN.test(v));
 }
 
-export function measureSchemaBudget(schema: unknown): SchemaBudget {
-	const root = isNode(schema) ? schema : {};
-	const allowed = new Set<string>(STRICT_STRUCTURED_OUTPUT_KEYWORDS);
-	const unsupported = new Set<string>();
-	const budget: SchemaBudget = {
+function emptyBudget(root: Node, schema: unknown): SchemaBudget {
+	return {
 		rawEnumValues: 0,
 		dereferencedEnumValues: 0,
 		enumProperties: 0,
@@ -90,95 +87,140 @@ export function measureSchemaBudget(schema: unknown): SchemaBudget {
 		definitionNames: isNode(root.$defs) ? Object.keys(root.$defs) : [],
 		bytes: JSON.stringify(schema).length,
 	};
+}
 
-	// Raw pass: literal content of the document, keyword usage, object shape.
-	const raw = (node: unknown, underNames: boolean) => {
+/** Literal pass over the serialized document: enums, names, keywords and object shape. */
+class RawPass {
+	readonly unsupported = new Set<string>();
+	constructor(
+		private readonly budget: SchemaBudget,
+		private readonly allowed: ReadonlySet<string>,
+	) {}
+
+	/** `map` is a `properties` or `$defs` object: keys are names, values are schemas. */
+	names(map: Node, kind: "properties" | "$defs"): void {
+		for (const [name, value] of Object.entries(map)) {
+			this.budget.totalStringLength += name.length;
+			if (kind === "properties" && name === "anchorId" && isNode(value)) {
+				if (typeof value.$ref === "string") this.budget.anchorSitesWithRef += 1;
+				else this.budget.anchorSitesWithoutRef += 1;
+			}
+			this.schema(value);
+		}
+	}
+
+	enum(values: unknown[]): void {
+		this.budget.enumProperties += 1;
+		this.budget.rawEnumValues += values.length;
+		const chars = values.reduce<number>((n, v) => n + String(v).length, 0);
+		this.budget.totalStringLength += chars;
+		if (values.length > PROVIDER_SCHEMA_LIMITS.largeEnumThreshold) {
+			this.budget.largeEnumChars = Math.max(this.budget.largeEnumChars, chars);
+		}
+		if (isAnchorEnum(values)) this.budget.anchorEnumOccurrences += 1;
+	}
+
+	objectShape(node: Node): void {
+		if (node.type !== "object") return;
+		const props = isNode(node.properties) ? Object.keys(node.properties) : [];
+		const required = Array.isArray(node.required) ? node.required : [];
+		if (props.length !== required.length || props.some((p) => !required.includes(p))) {
+			this.budget.objectsWithOptionalProperties += 1;
+		}
+		if (node.additionalProperties !== false) this.budget.objectsWithoutAdditionalPropertiesFalse += 1;
+	}
+
+	schema(node: unknown): void {
 		if (Array.isArray(node)) {
-			for (const item of node) raw(item, false);
+			for (const item of node) this.schema(item);
 			return;
 		}
 		if (!isNode(node)) return;
-		if (underNames) {
-			// `node` is a `properties` or `$defs` map: keys are names, values are schemas.
-			for (const [name, value] of Object.entries(node)) {
-				budget.totalStringLength += name.length;
-				if (name === "anchorId" && isNode(value)) {
-					if (typeof value.$ref === "string") budget.anchorSitesWithRef += 1;
-					else budget.anchorSitesWithoutRef += 1;
-				}
-				raw(value, false);
-			}
-			return;
-		}
-		for (const [key, value] of Object.entries(node)) {
-			if (!allowed.has(key)) unsupported.add(key);
-			if (key === "enum" && Array.isArray(value)) {
-				budget.enumProperties += 1;
-				budget.rawEnumValues += value.length;
-				const chars = value.reduce<number>((n, v) => n + String(v).length, 0);
-				budget.totalStringLength += chars;
-				if (value.length > PROVIDER_SCHEMA_LIMITS.largeEnumThreshold) {
-					budget.largeEnumChars = Math.max(budget.largeEnumChars, chars);
-				}
-				if (isAnchorEnum(value)) budget.anchorEnumOccurrences += 1;
-				continue;
-			}
-			if (key === "const") {
-				budget.totalStringLength += String(value).length;
-				continue;
-			}
-			if (key === "properties" && isNode(value)) {
-				budget.objectProperties += Object.keys(value).length;
-				raw(value, true);
-				continue;
-			}
-			if (key === "$defs" && isNode(value)) {
-				raw(value, true);
-				continue;
-			}
-			raw(value, false);
-		}
-		if (node.type === "object") {
-			const props = isNode(node.properties) ? Object.keys(node.properties) : [];
-			const required = Array.isArray(node.required) ? node.required : [];
-			if (props.length !== required.length || props.some((p) => !required.includes(p))) {
-				budget.objectsWithOptionalProperties += 1;
-			}
-			if (node.additionalProperties !== false) budget.objectsWithoutAdditionalPropertiesFalse += 1;
-		}
-	};
-	raw(root, false);
-	budget.unsupportedKeywords = [...unsupported].sort();
+		for (const [key, value] of Object.entries(node)) this.keyword(key, value);
+		this.objectShape(node);
+	}
 
-	// Dereferenced pass: expand every `$ref` (bounded against cycles) for the conservative enum count and the object depth.
-	const expand = (node: unknown, depth: number, seen: string[]) => {
-		if (Array.isArray(node)) {
-			for (const item of node) expand(item, depth, seen);
-			return;
+	private keyword(key: string, value: unknown): void {
+		if (!this.allowed.has(key)) this.unsupported.add(key);
+		if (key === "enum" && Array.isArray(value)) {
+			this.enum(value);
+		} else if (key === "const") {
+			this.budget.totalStringLength += String(value).length;
+		} else if ((key === "properties" || key === "$defs") && isNode(value)) {
+			if (key === "properties") this.budget.objectProperties += Object.keys(value).length;
+			this.names(value, key);
+		} else {
+			this.schema(value);
 		}
-		if (!isNode(node)) return;
-		if (typeof node.$ref === "string") {
-			if (seen.includes(node.$ref) || seen.length > 64) return;
-			const target = resolveRef(root, node.$ref);
-			if (target) expand(target, depth, [...seen, node.$ref]);
+	}
+}
+
+/** Follows a `$ref` to its definition; null when it is unresolvable, cyclic or too deep. */
+function followRef(root: Node, node: Node, seen: readonly string[]): { target: Node; seen: string[] } | null {
+	const ref = node.$ref;
+	if (typeof ref !== "string" || seen.includes(ref) || seen.length > 64) return null;
+	const target = resolveRef(root, ref);
+	return target ? { target, seen: [...seen, ref] } : null;
+}
+
+/** Pass over the document with every `$ref` expanded: conservative enum count and object depth. */
+function expandPass(root: Node, budget: SchemaBudget): void {
+	/** The child schemas of a node, with `$defs` skipped and `properties` flattened to its values. */
+	const childrenOf = (node: Node): unknown[] =>
+		Object.entries(node)
+			.filter(([key]) => key !== "$defs" && key !== "enum")
+			.map(([key, value]) => (key === "properties" && isNode(value) ? Object.values(value) : value));
+	const visitNode = (node: Node, depth: number, seen: readonly string[]) => {
+		const next = typeof node.$ref === "string" ? followRef(root, node, seen) : null;
+		if (next) {
+			visit(next.target, depth, next.seen);
 			return;
 		}
 		const objectDepth = node.type === "object" ? depth + 1 : depth;
 		budget.nestingDepth = Math.max(budget.nestingDepth, objectDepth);
+		if (Array.isArray(node.enum)) budget.dereferencedEnumValues += node.enum.length;
+		visit(childrenOf(node), objectDepth, seen);
+	};
+	const visit = (node: unknown, depth: number, seen: readonly string[]) => {
+		if (Array.isArray(node)) for (const item of node) visit(item, depth, seen);
+		else if (isNode(node)) visitNode(node, depth, seen);
+	};
+	visit(root, 0, []);
+}
+
+/**
+ * A copy of the document with every `$ref` replaced by its definition and
+ * `$defs` removed — the shape a consumer that expands references would see.
+ * Bounded against cycles; used for inspection and for the conservative budget.
+ */
+export function dereferenceSchema(schema: unknown): unknown {
+	const root = isNode(schema) ? schema : {};
+	const inline = (node: unknown, seen: readonly string[]): unknown => {
+		if (Array.isArray(node)) return node.map((item) => inline(item, seen));
+		if (!isNode(node)) return node;
+		if (typeof node.$ref === "string") {
+			const next = followRef(root, node, seen);
+			return next ? inline(next.target, next.seen) : node;
+		}
+		const out: Node = {};
 		for (const [key, value] of Object.entries(node)) {
 			if (key === "$defs") continue;
-			if (key === "enum" && Array.isArray(value)) {
-				budget.dereferencedEnumValues += value.length;
-				continue;
-			}
-			if (key === "properties" && isNode(value)) {
-				for (const child of Object.values(value)) expand(child, objectDepth, seen);
-				continue;
-			}
-			expand(value, objectDepth, seen);
+			out[key] = key === "properties" && isNode(value) ? inlineMap(value, seen) : inline(value, seen);
 		}
+		return out;
 	};
-	expand(root, 0, []);
+	const inlineMap = (map: Node, seen: readonly string[]): Node =>
+		Object.fromEntries(Object.entries(map).map(([k, v]) => [k, inline(v, seen)]));
+	return inline(root, []);
+}
+
+export function measureSchemaBudget(schema: unknown): SchemaBudget {
+	const root = isNode(schema) ? schema : {};
+	const budget = emptyBudget(root, schema);
+	const raw = new RawPass(budget, new Set<string>(STRICT_STRUCTURED_OUTPUT_KEYWORDS));
+	raw.schema(root);
+	budget.unsupportedKeywords = [...raw.unsupported].sort();
+	expandPass(root, budget);
 	return budget;
 }
 
@@ -191,53 +233,27 @@ export interface SchemaBudgetViolation {
 /** Every documented limit and contract requirement the raw serialized schema breaks; empty when it passes. */
 export function schemaBudgetViolations(schema: unknown): SchemaBudgetViolation[] {
 	const b = measureSchemaBudget(schema);
-	const out: SchemaBudgetViolation[] = [];
-	const check = (rule: string, ok: boolean, actual: number | string | boolean, limit: number | string | boolean) => {
-		if (!ok) out.push({ rule, actual, limit });
-	};
-	check(
-		"enum-values",
-		b.rawEnumValues <= PROVIDER_SCHEMA_LIMITS.enumValues,
-		b.rawEnumValues,
-		PROVIDER_SCHEMA_LIMITS.enumValues,
-	);
-	check(
-		"large-enum-chars",
-		b.largeEnumChars <= PROVIDER_SCHEMA_LIMITS.largeEnumChars,
-		b.largeEnumChars,
-		PROVIDER_SCHEMA_LIMITS.largeEnumChars,
-	);
-	check(
-		"total-string-length",
-		b.totalStringLength <= PROVIDER_SCHEMA_LIMITS.totalStringLength,
-		b.totalStringLength,
-		PROVIDER_SCHEMA_LIMITS.totalStringLength,
-	);
-	check(
-		"object-properties",
-		b.objectProperties <= PROVIDER_SCHEMA_LIMITS.objectProperties,
-		b.objectProperties,
-		PROVIDER_SCHEMA_LIMITS.objectProperties,
-	);
-	check(
-		"nesting-depth",
-		b.nestingDepth <= PROVIDER_SCHEMA_LIMITS.nestingDepth,
-		b.nestingDepth,
-		PROVIDER_SCHEMA_LIMITS.nestingDepth,
-	);
-	check("root-object", b.rootIsObject, b.rootIsObject, true);
-	check("root-anyof", !b.rootHasAnyOf, b.rootHasAnyOf, false);
-	check("all-required", b.objectsWithOptionalProperties === 0, b.objectsWithOptionalProperties, 0);
-	check(
-		"additional-properties-false",
-		b.objectsWithoutAdditionalPropertiesFalse === 0,
-		b.objectsWithoutAdditionalPropertiesFalse,
-		0,
-	);
-	check("unsupported-keywords", b.unsupportedKeywords.length === 0, b.unsupportedKeywords.join(","), "");
-	check("anchor-enum-once", b.anchorEnumOccurrences === 1, b.anchorEnumOccurrences, 1);
-	check("anchor-sites-by-ref", b.anchorSitesWithoutRef === 0, b.anchorSitesWithoutRef, 0);
-	return out;
+	const L = PROVIDER_SCHEMA_LIMITS;
+	const rules: [string, boolean, number | string | boolean, number | string | boolean][] = [
+		["enum-values", b.rawEnumValues <= L.enumValues, b.rawEnumValues, L.enumValues],
+		["large-enum-chars", b.largeEnumChars <= L.largeEnumChars, b.largeEnumChars, L.largeEnumChars],
+		["total-string-length", b.totalStringLength <= L.totalStringLength, b.totalStringLength, L.totalStringLength],
+		["object-properties", b.objectProperties <= L.objectProperties, b.objectProperties, L.objectProperties],
+		["nesting-depth", b.nestingDepth <= L.nestingDepth, b.nestingDepth, L.nestingDepth],
+		["root-object", b.rootIsObject, b.rootIsObject, true],
+		["root-anyof", !b.rootHasAnyOf, b.rootHasAnyOf, false],
+		["all-required", b.objectsWithOptionalProperties === 0, b.objectsWithOptionalProperties, 0],
+		[
+			"additional-properties-false",
+			b.objectsWithoutAdditionalPropertiesFalse === 0,
+			b.objectsWithoutAdditionalPropertiesFalse,
+			0,
+		],
+		["unsupported-keywords", b.unsupportedKeywords.length === 0, b.unsupportedKeywords.join(","), ""],
+		["anchor-enum-once", b.anchorEnumOccurrences === 1, b.anchorEnumOccurrences, 1],
+		["anchor-sites-by-ref", b.anchorSitesWithoutRef === 0, b.anchorSitesWithoutRef, 0],
+	];
+	return rules.filter(([, ok]) => !ok).map(([rule, , actual, limit]) => ({ rule, actual, limit }));
 }
 
 /** Fails closed on the first schema that breaks a documented provider limit or the request contract. */

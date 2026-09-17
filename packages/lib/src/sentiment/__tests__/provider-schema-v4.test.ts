@@ -7,10 +7,11 @@
  * subset. The only network call is a stubbed fetch.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
+import { toStructuredOutputJsonSchema } from "../../providers/json-schema";
 import { openrouter } from "../../providers/registry/openrouter";
 import { segmentAnswer } from "../anchors";
 import { classifySentiment, SENTIMENT_MAX_OUTPUT_TOKENS } from "../classifier";
+import { dereferenceSchema } from "../schema-budget";
 import {
 	assertStrictStructuredOutputSubset,
 	type SentimentCandidate,
@@ -82,7 +83,7 @@ function keywordsOf(schema: unknown): Set<string> {
 		if (typeof node !== "object" || node === null) return;
 		for (const [key, value] of Object.entries(node)) {
 			if (!underProperties) out.add(key);
-			walk(value, key === "properties");
+			walk(value, key === "properties" || key === "$defs");
 		}
 	};
 	walk(schema, false);
@@ -117,9 +118,14 @@ describe("CP3 provider request contract (classifier v4)", () => {
 		expect(body.response_format.type).toBe("json_schema");
 		expect(body.response_format.json_schema.strict).toBe(true);
 
-		const schema = body.response_format.json_schema.schema;
-		expect(schema.type).toBe("object");
-		expect(schema.additionalProperties).toBe(false);
+		const rawSchema = body.response_format.json_schema.schema;
+		expect(rawSchema.type).toBe("object");
+		expect(rawSchema.additionalProperties).toBe(false);
+		// The document carries the anchor-id and entity-key enums once, under `$defs`; the branches reference them.
+		expect(rawSchema.$defs.anchorId).toEqual({ type: "string", enum: anchorIds });
+		expect(rawSchema.$defs.entityKey).toEqual({ type: "string", enum: ["brand", "c-beltra"] });
+		expect(JSON.stringify(rawSchema).split(JSON.stringify(anchorIds))).toHaveLength(2);
+		const schema = dereferenceSchema(rawSchema) as any;
 		const entityBranches = schema.properties.entities.items.anyOf;
 		expect(entityBranches).toHaveLength(4);
 		const categories = entityBranches.flatMap((b: any) => b.properties.category.enum).sort();
@@ -145,9 +151,9 @@ describe("CP3 provider request contract (classifier v4)", () => {
 		expect(aspectBranches).toHaveLength(4);
 		expect(aspectBranches[0].properties.key.enum).toEqual(["price", "coverage", "service", "other"]);
 
-		const used = keywordsOf(schema);
+		const used = keywordsOf(rawSchema);
 		for (const keyword of used) expect(STRICT_STRUCTURED_OUTPUT_KEYWORDS, keyword).toContain(keyword);
-		expect(() => assertStrictStructuredOutputSubset(schema)).not.toThrow();
+		expect(() => assertStrictStructuredOutputSubset(rawSchema)).not.toThrow();
 	});
 
 	it("the compatibility guard rejects unsupported constructs", () => {
@@ -163,7 +169,9 @@ describe("CP3 provider request contract (classifier v4)", () => {
 			expect(() => assertStrictStructuredOutputSubset(JSON.parse(bad)), bad).toThrow();
 		}
 		expect(() =>
-			assertStrictStructuredOutputSubset(z.toJSONSchema(sentimentProviderResultSchemaFor(anchorIds, ["brand"]))),
+			assertStrictStructuredOutputSubset(
+				toStructuredOutputJsonSchema(sentimentProviderResultSchemaFor(anchorIds, ["brand"])),
+			),
 		).not.toThrow();
 	});
 
@@ -173,7 +181,7 @@ describe("CP3 provider request contract (classifier v4)", () => {
 			"brand",
 			...Array.from({ length: 12 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`),
 		];
-		const json = z.toJSONSchema(sentimentProviderResultSchemaFor(many, keys));
+		const json = toStructuredOutputJsonSchema(sentimentProviderResultSchemaFor(many, keys));
 		let enumChars = 0;
 		JSON.stringify(json, (key, value) => {
 			if (key === "enum" && Array.isArray(value)) enumChars += value.join("").length;

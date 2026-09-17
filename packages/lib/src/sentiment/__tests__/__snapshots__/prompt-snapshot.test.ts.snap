@@ -2,1535 +2,454 @@
 
 exports[`CT-SNT-008 provider-facing prompt and schema snapshots > binds the request schema to this answer's anchor ids and this request's entity keys 1`] = `
 {
+  "$defs": {
+    "__schema0": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aspects": {
+              "$ref": "#/$defs/__schema1",
+            },
+            "category": {
+              "enum": [
+                "positive",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema3",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/entityKey",
+            },
+            "score": {
+              "maximum": 100,
+              "minimum": 51,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "aspects",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aspects": {
+              "$ref": "#/$defs/__schema1",
+            },
+            "category": {
+              "enum": [
+                "negative",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema4",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/entityKey",
+            },
+            "score": {
+              "maximum": 49,
+              "minimum": 0,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "aspects",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aspects": {
+              "$ref": "#/$defs/__schema1",
+            },
+            "category": {
+              "enum": [
+                "neutral",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema5",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/entityKey",
+            },
+            "score": {
+              "maximum": 50,
+              "minimum": 50,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "aspects",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aspects": {
+              "$ref": "#/$defs/__schema1",
+            },
+            "category": {
+              "enum": [
+                "mixed",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "key": {
+              "$ref": "#/$defs/entityKey",
+            },
+            "negativeEvidence": {
+              "items": {
+                "$ref": "#/$defs/__schema4",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "positiveEvidence": {
+              "items": {
+                "$ref": "#/$defs/__schema3",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "score": {
+              "maximum": 50,
+              "minimum": 50,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "aspects",
+            "category",
+            "score",
+            "confidence",
+            "positiveEvidence",
+            "negativeEvidence",
+          ],
+          "type": "object",
+        },
+      ],
+    },
+    "__schema1": {
+      "items": {
+        "$ref": "#/$defs/__schema2",
+      },
+      "maxItems": 4,
+      "type": "array",
+    },
+    "__schema2": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "positive",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema3",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/aspectKey",
+            },
+            "score": {
+              "maximum": 100,
+              "minimum": 51,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "negative",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema4",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/aspectKey",
+            },
+            "score": {
+              "maximum": 49,
+              "minimum": 0,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "neutral",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/__schema5",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "key": {
+              "$ref": "#/$defs/aspectKey",
+            },
+            "score": {
+              "maximum": 50,
+              "minimum": 50,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "category",
+            "score",
+            "confidence",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "mixed",
+              ],
+              "type": "string",
+            },
+            "confidence": {
+              "$ref": "#/$defs/confidence",
+            },
+            "key": {
+              "$ref": "#/$defs/aspectKey",
+            },
+            "negativeEvidence": {
+              "items": {
+                "$ref": "#/$defs/__schema4",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "positiveEvidence": {
+              "items": {
+                "$ref": "#/$defs/__schema3",
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+            },
+            "score": {
+              "maximum": 50,
+              "minimum": 50,
+              "type": "integer",
+            },
+          },
+          "required": [
+            "key",
+            "category",
+            "score",
+            "confidence",
+            "positiveEvidence",
+            "negativeEvidence",
+          ],
+          "type": "object",
+        },
+      ],
+    },
+    "__schema3": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorId": {
+          "$ref": "#/$defs/anchorId",
+        },
+        "polarity": {
+          "enum": [
+            "positive",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "anchorId",
+        "polarity",
+      ],
+      "type": "object",
+    },
+    "__schema4": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorId": {
+          "$ref": "#/$defs/anchorId",
+        },
+        "polarity": {
+          "enum": [
+            "negative",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "anchorId",
+        "polarity",
+      ],
+      "type": "object",
+    },
+    "__schema5": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorId": {
+          "$ref": "#/$defs/anchorId",
+        },
+        "polarity": {
+          "enum": [
+            "neutral",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "anchorId",
+        "polarity",
+      ],
+      "type": "object",
+    },
+    "anchorId": {
+      "enum": [
+        "s0001",
+        "s0002",
+        "s0003",
+      ],
+      "type": "string",
+    },
+    "aspectKey": {
+      "enum": [
+        "price",
+        "coverage",
+        "service",
+        "other",
+      ],
+      "type": "string",
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number",
+    },
+    "entityKey": {
+      "enum": [
+        "brand",
+        "c-huk",
+        "c-wgv",
+      ],
+      "type": "string",
+    },
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
     "entities": {
       "items": {
-        "anyOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "aspects": {
-                "items": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "positive",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "positive",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 100,
-                          "minimum": 51,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "negative",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "negative",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 49,
-                          "minimum": 0,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "neutral",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "neutral",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 50,
-                          "minimum": 50,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "mixed",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "negativeEvidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "negative",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "positiveEvidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "positive",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "score": {
-                          "maximum": 50,
-                          "minimum": 50,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "positiveEvidence",
-                        "negativeEvidence",
-                      ],
-                      "type": "object",
-                    },
-                  ],
-                },
-                "maxItems": 4,
-                "type": "array",
-              },
-              "category": {
-                "enum": [
-                  "positive",
-                ],
-                "type": "string",
-              },
-              "confidence": {
-                "maximum": 1,
-                "minimum": 0,
-                "type": "number",
-              },
-              "evidence": {
-                "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "anchorId": {
-                      "enum": [
-                        "s0001",
-                        "s0002",
-                        "s0003",
-                      ],
-                      "type": "string",
-                    },
-                    "polarity": {
-                      "enum": [
-                        "positive",
-                      ],
-                      "type": "string",
-                    },
-                  },
-                  "required": [
-                    "anchorId",
-                    "polarity",
-                  ],
-                  "type": "object",
-                },
-                "maxItems": 3,
-                "minItems": 1,
-                "type": "array",
-              },
-              "key": {
-                "enum": [
-                  "brand",
-                  "c-huk",
-                  "c-wgv",
-                ],
-                "type": "string",
-              },
-              "score": {
-                "maximum": 100,
-                "minimum": 51,
-                "type": "integer",
-              },
-            },
-            "required": [
-              "key",
-              "aspects",
-              "category",
-              "score",
-              "confidence",
-              "evidence",
-            ],
-            "type": "object",
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "aspects": {
-                "items": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "positive",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "positive",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 100,
-                          "minimum": 51,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "negative",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "negative",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 49,
-                          "minimum": 0,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "neutral",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "neutral",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 50,
-                          "minimum": 50,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "mixed",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "negativeEvidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "negative",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "positiveEvidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "positive",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "score": {
-                          "maximum": 50,
-                          "minimum": 50,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "positiveEvidence",
-                        "negativeEvidence",
-                      ],
-                      "type": "object",
-                    },
-                  ],
-                },
-                "maxItems": 4,
-                "type": "array",
-              },
-              "category": {
-                "enum": [
-                  "negative",
-                ],
-                "type": "string",
-              },
-              "confidence": {
-                "maximum": 1,
-                "minimum": 0,
-                "type": "number",
-              },
-              "evidence": {
-                "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "anchorId": {
-                      "enum": [
-                        "s0001",
-                        "s0002",
-                        "s0003",
-                      ],
-                      "type": "string",
-                    },
-                    "polarity": {
-                      "enum": [
-                        "negative",
-                      ],
-                      "type": "string",
-                    },
-                  },
-                  "required": [
-                    "anchorId",
-                    "polarity",
-                  ],
-                  "type": "object",
-                },
-                "maxItems": 3,
-                "minItems": 1,
-                "type": "array",
-              },
-              "key": {
-                "enum": [
-                  "brand",
-                  "c-huk",
-                  "c-wgv",
-                ],
-                "type": "string",
-              },
-              "score": {
-                "maximum": 49,
-                "minimum": 0,
-                "type": "integer",
-              },
-            },
-            "required": [
-              "key",
-              "aspects",
-              "category",
-              "score",
-              "confidence",
-              "evidence",
-            ],
-            "type": "object",
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "aspects": {
-                "items": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "positive",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "positive",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 100,
-                          "minimum": 51,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "negative",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "negative",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 49,
-                          "minimum": 0,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "neutral",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "neutral",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 50,
-                          "minimum": 50,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "mixed",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "negativeEvidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "negative",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "positiveEvidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "positive",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "score": {
-                          "maximum": 50,
-                          "minimum": 50,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "positiveEvidence",
-                        "negativeEvidence",
-                      ],
-                      "type": "object",
-                    },
-                  ],
-                },
-                "maxItems": 4,
-                "type": "array",
-              },
-              "category": {
-                "enum": [
-                  "neutral",
-                ],
-                "type": "string",
-              },
-              "confidence": {
-                "maximum": 1,
-                "minimum": 0,
-                "type": "number",
-              },
-              "evidence": {
-                "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "anchorId": {
-                      "enum": [
-                        "s0001",
-                        "s0002",
-                        "s0003",
-                      ],
-                      "type": "string",
-                    },
-                    "polarity": {
-                      "enum": [
-                        "neutral",
-                      ],
-                      "type": "string",
-                    },
-                  },
-                  "required": [
-                    "anchorId",
-                    "polarity",
-                  ],
-                  "type": "object",
-                },
-                "maxItems": 3,
-                "minItems": 1,
-                "type": "array",
-              },
-              "key": {
-                "enum": [
-                  "brand",
-                  "c-huk",
-                  "c-wgv",
-                ],
-                "type": "string",
-              },
-              "score": {
-                "maximum": 50,
-                "minimum": 50,
-                "type": "integer",
-              },
-            },
-            "required": [
-              "key",
-              "aspects",
-              "category",
-              "score",
-              "confidence",
-              "evidence",
-            ],
-            "type": "object",
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "aspects": {
-                "items": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "positive",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "positive",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 100,
-                          "minimum": 51,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "negative",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "negative",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 49,
-                          "minimum": 0,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "neutral",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "evidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "neutral",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "score": {
-                          "maximum": 50,
-                          "minimum": 50,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "evidence",
-                      ],
-                      "type": "object",
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "category": {
-                          "enum": [
-                            "mixed",
-                          ],
-                          "type": "string",
-                        },
-                        "confidence": {
-                          "maximum": 1,
-                          "minimum": 0,
-                          "type": "number",
-                        },
-                        "key": {
-                          "enum": [
-                            "price",
-                            "coverage",
-                            "service",
-                            "other",
-                          ],
-                          "type": "string",
-                        },
-                        "negativeEvidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "negative",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "positiveEvidence": {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "anchorId": {
-                                "enum": [
-                                  "s0001",
-                                  "s0002",
-                                  "s0003",
-                                ],
-                                "type": "string",
-                              },
-                              "polarity": {
-                                "enum": [
-                                  "positive",
-                                ],
-                                "type": "string",
-                              },
-                            },
-                            "required": [
-                              "anchorId",
-                              "polarity",
-                            ],
-                            "type": "object",
-                          },
-                          "maxItems": 3,
-                          "minItems": 1,
-                          "type": "array",
-                        },
-                        "score": {
-                          "maximum": 50,
-                          "minimum": 50,
-                          "type": "integer",
-                        },
-                      },
-                      "required": [
-                        "key",
-                        "category",
-                        "score",
-                        "confidence",
-                        "positiveEvidence",
-                        "negativeEvidence",
-                      ],
-                      "type": "object",
-                    },
-                  ],
-                },
-                "maxItems": 4,
-                "type": "array",
-              },
-              "category": {
-                "enum": [
-                  "mixed",
-                ],
-                "type": "string",
-              },
-              "confidence": {
-                "maximum": 1,
-                "minimum": 0,
-                "type": "number",
-              },
-              "key": {
-                "enum": [
-                  "brand",
-                  "c-huk",
-                  "c-wgv",
-                ],
-                "type": "string",
-              },
-              "negativeEvidence": {
-                "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "anchorId": {
-                      "enum": [
-                        "s0001",
-                        "s0002",
-                        "s0003",
-                      ],
-                      "type": "string",
-                    },
-                    "polarity": {
-                      "enum": [
-                        "negative",
-                      ],
-                      "type": "string",
-                    },
-                  },
-                  "required": [
-                    "anchorId",
-                    "polarity",
-                  ],
-                  "type": "object",
-                },
-                "maxItems": 3,
-                "minItems": 1,
-                "type": "array",
-              },
-              "positiveEvidence": {
-                "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "anchorId": {
-                      "enum": [
-                        "s0001",
-                        "s0002",
-                        "s0003",
-                      ],
-                      "type": "string",
-                    },
-                    "polarity": {
-                      "enum": [
-                        "positive",
-                      ],
-                      "type": "string",
-                    },
-                  },
-                  "required": [
-                    "anchorId",
-                    "polarity",
-                  ],
-                  "type": "object",
-                },
-                "maxItems": 3,
-                "minItems": 1,
-                "type": "array",
-              },
-              "score": {
-                "maximum": 50,
-                "minimum": 50,
-                "type": "integer",
-              },
-            },
-            "required": [
-              "key",
-              "aspects",
-              "category",
-              "score",
-              "confidence",
-              "positiveEvidence",
-              "negativeEvidence",
-            ],
-            "type": "object",
-          },
-        ],
+        "$ref": "#/$defs/__schema0",
       },
       "minItems": 1,
       "type": "array",

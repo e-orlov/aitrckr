@@ -6,9 +6,10 @@
  * evidence claims were rejected instead of de-duplicated.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
+import { toStructuredOutputJsonSchema } from "../../providers/json-schema";
 import { segmentAnswer } from "../anchors";
 import { classifySentiment, validateClassification, validateSentimentResult } from "../classifier";
+import { dereferenceSchema } from "../schema-budget";
 import { type SentimentCandidate, sentimentProviderResultSchemaFor } from "../types";
 
 /** Live shape 1 and 2: one candidate, the own brand with the generic opaque key `brand` and display name ARAG. */
@@ -74,15 +75,19 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 		const ids = segmentAnswer(brandAnswer).map((a) => a.id);
 		// Classifier v4: one branch per category; every branch binds the same exact key enum.
 		type Shape = { properties: { entities: { items: { anyOf: { properties: { key: Record<string, unknown> } }[] } } } };
-		const json = z.toJSONSchema(sentimentProviderResultSchemaFor(ids, ["brand"])) as unknown as Shape;
+		const json = dereferenceSchema(
+			toStructuredOutputJsonSchema(sentimentProviderResultSchemaFor(ids, ["brand"])),
+		) as unknown as Shape;
 		expect(json.properties.entities.items.anyOf).toHaveLength(4);
 		for (const branch of json.properties.entities.items.anyOf) {
 			expect(branch.properties.key).toEqual({ type: "string", enum: ["brand"] });
 		}
-		const multi = z.toJSONSchema(
-			sentimentProviderResultSchemaFor(
-				ids,
-				three.map((c) => c.key),
+		const multi = dereferenceSchema(
+			toStructuredOutputJsonSchema(
+				sentimentProviderResultSchemaFor(
+					ids,
+					three.map((c) => c.key),
+				),
 			),
 		) as unknown as Shape;
 		for (const branch of multi.properties.entities.items.anyOf) {
@@ -134,7 +139,10 @@ describe("UT-SNT-CIT-003 live failure 1/2 — unknown-entity: the display name i
 		};
 		expect(body.response_format.type).toBe("json_schema");
 		expect(body.response_format.json_schema.strict).toBe(true);
-		for (const branch of body.response_format.json_schema.schema.properties.entities.items.anyOf) {
+		const sentSchema = dereferenceSchema(
+			body.response_format.json_schema.schema,
+		) as typeof body.response_format.json_schema.schema;
+		for (const branch of sentSchema.properties.entities.items.anyOf) {
 			expect(branch.properties.key.enum).toEqual(["brand"]);
 		}
 		expect(body.provider).toEqual({ require_parameters: true });

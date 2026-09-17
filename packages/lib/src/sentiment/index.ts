@@ -154,6 +154,15 @@ export {
 	sentimentRunCoverageStatus,
 } from "./read-selection";
 export {
+	assertProviderSchemaBudget,
+	dereferenceSchema,
+	measureSchemaBudget,
+	PROVIDER_SCHEMA_LIMITS,
+	type SchemaBudget,
+	type SchemaBudgetViolation,
+	schemaBudgetViolations,
+} from "./schema-budget";
+export {
 	type AnalysisClaim,
 	type ClaimOptions,
 	type ClaimOutcome,
@@ -198,6 +207,7 @@ export {
 	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_QUEUE,
 	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
+	SENTIMENT_SCHEMA_DEFINITIONS,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 	type SentimentAspectKey,
