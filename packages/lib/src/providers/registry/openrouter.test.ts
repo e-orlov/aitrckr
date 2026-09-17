@@ -644,10 +644,10 @@ describe("openrouter non-2xx responses are typed refusals", () => {
 		vi.unstubAllEnvs();
 	});
 
-	it("a structured 429 rate-limit envelope is rate_limit_exceeded with its Retry-After", async () => {
+	it("the canonical error.metadata.error_type is carried verbatim, whatever the human-readable message says", async () => {
 		const error = await refusal(
 			429,
-			{ error: { code: 429, message: "Rate limit exceeded: 10 rpm" } },
+			{ error: { code: 429, message: "Too many cats", metadata: { error_type: "rate_limit_exceeded" } } },
 			{ "retry-after": "12" },
 		);
 		expect(error).toBeInstanceOf(StructuredResearchRequestError);
@@ -659,61 +659,88 @@ describe("openrouter non-2xx responses are typed refusals", () => {
 			retryAfterMs: 12_000,
 		});
 		expect((error as Error).message).toBe(
-			'OpenRouter API error (429): {"error":{"code":429,"message":"Rate limit exceeded: 10 rpm"}}',
+			'OpenRouter API error (429): {"error":{"code":429,"message":"Too many cats","metadata":{"error_type":"rate_limit_exceeded"}}}',
 		);
 		expect((error as Error).message).not.toContain("sk-or-secret-value");
-	});
-
-	it("a structured 503 is provider_overloaded only when the provider says so; routing refusals are provider_unavailable; anything else is unmapped", async () => {
 		expect(
 			await refusal(503, {
-				error: { code: 503, message: "Provider returned error", metadata: { raw: "Engine is currently overloaded" } },
+				error: { code: 503, message: "Provider returned error", metadata: { error_type: "provider_overloaded" } },
 			}),
-		).toMatchObject({ errorType: "provider_overloaded", structured: true });
-		expect(
-			await refusal(503, {
-				error: { code: 503, message: "No available model provider meets your routing requirements" },
-			}),
-		).toMatchObject({ errorType: "provider_unavailable" });
-		expect(await refusal(503, { error: { code: 503, message: "Service Unavailable" } })).toMatchObject({
-			errorType: "unmapped",
-		});
-	});
-
-	it("deterministic refusals, ambiguous 5xx and timeouts carry their canonical type", async () => {
-		const expectations: [number, string][] = [
-			[400, "bad_request"],
-			[401, "unauthorized"],
-			[402, "insufficient_credits"],
-			[403, "forbidden"],
-			[404, "not_found"],
-			[408, "request_timeout"],
-			[409, "conflict"],
-			[422, "unprocessable"],
-			[500, "server"],
-			[502, "server"],
-			[504, "server"],
-			[524, "timeout"],
-			[529, "server"],
-			[418, "unmapped"],
-		];
-		for (const [status, type] of expectations) {
-			expect(await refusal(status, { error: { code: status, message: "x" } })).toMatchObject({
-				httpStatus: status,
+		).toMatchObject({ httpStatus: 503, errorType: "provider_overloaded", structured: true });
+		// Any well-formed canonical value is passed through untouched; the adapter never renames or maps it.
+		for (const type of [
+			"provider_unavailable",
+			"authentication",
+			"payment_required",
+			"invalid_request",
+			"server",
+			"timeout",
+			"unmapped",
+			"some_future_type",
+		]) {
+			expect(await refusal(400, { error: { code: 400, message: "x", metadata: { error_type: type } } })).toMatchObject({
 				errorType: type,
 			});
 		}
 	});
 
-	it("a body that is not the OpenRouter error envelope is unmapped and not structured; a body carrying output is flagged", async () => {
+	it("message text, metadata.raw and provider_code never produce an error type: without the canonical field it is null", async () => {
+		expect(await refusal(429, { error: { code: 429, message: "Rate limit exceeded: 10 rpm" } })).toMatchObject({
+			httpStatus: 429,
+			structured: true,
+			errorType: null,
+		});
+		expect(
+			await refusal(503, {
+				error: {
+					code: 503,
+					message: "Provider is overloaded",
+					metadata: {
+						raw: "Engine is currently overloaded",
+						provider_code: "overloaded_error",
+						provider_name: "OpenAI",
+					},
+				},
+			}),
+		).toMatchObject({ httpStatus: 503, structured: true, errorType: null });
+		for (const status of [400, 401, 402, 403, 404, 408, 409, 422, 500, 502, 504, 524, 529]) {
+			expect(await refusal(status, { error: { code: status, message: "rate limit overloaded" } })).toMatchObject({
+				httpStatus: status,
+				errorType: null,
+			});
+		}
+	});
+
+	it("a malformed error_type is null, not a type", async () => {
+		for (const malformed of [
+			429,
+			"",
+			" rate_limit_exceeded",
+			"rate limit exceeded",
+			"RATE_LIMIT_EXCEEDED",
+			"a".repeat(65),
+			{ type: "rate_limit_exceeded" },
+			null,
+		]) {
+			expect(
+				await refusal(429, { error: { code: 429, message: "x", metadata: { error_type: malformed } } }),
+			).toMatchObject({ errorType: null });
+		}
+	});
+
+	it("a body that is not the OpenRouter error envelope is not structured and untyped; a body carrying output is flagged", async () => {
 		expect(await refusal(429, "<html>rate limited</html>")).toMatchObject({
 			structured: false,
-			errorType: "unmapped",
+			errorType: null,
 			carriesOutput: false,
+		});
+		expect(await refusal(429, { metadata: { error_type: "rate_limit_exceeded" } })).toMatchObject({
+			structured: false,
+			errorType: null,
 		});
 		expect(
 			await refusal(429, {
-				error: { code: 429, message: "Rate limit exceeded" },
+				error: { code: 429, message: "x", metadata: { error_type: "rate_limit_exceeded" } },
 				id: "gen-partial",
 				usage: { cost: 0.01 },
 			}),
@@ -723,12 +750,10 @@ describe("openrouter non-2xx responses are typed refusals", () => {
 			carriesOutput: true,
 		});
 		expect(
-			await refusal(429, {
-				error: { code: 429, message: "Rate limit exceeded" },
+			await refusal(503, {
+				error: { code: 503, message: "x", metadata: { error_type: "provider_overloaded" } },
 				choices: [{ message: { content: "partial" } }],
 			}),
-		).toMatchObject({
-			carriesOutput: true,
-		});
+		).toMatchObject({ errorType: "provider_overloaded", carriesOutput: true });
 	});
 });

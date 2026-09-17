@@ -139,26 +139,35 @@ function harness(
 	return { d, fakes, row, marks, classify };
 }
 
+/** A refusal as the adapter builds it: `errorType` is the canonical `error.metadata.error_type` or null; the message is free text. */
 const typed = (
 	httpStatus: number,
-	errorType: string,
-	over: Partial<{ structured: boolean; carriesOutput: boolean; retryAfterMs: number | null }> = {},
+	errorType: string | null,
+	over: Partial<{ structured: boolean; carriesOutput: boolean; retryAfterMs: number | null; message: string }> = {},
 ) =>
 	new StructuredResearchRequestError({
 		provider: "openrouter",
 		httpStatus,
-		errorType: errorType as never,
+		errorType,
 		structured: true,
 		carriesOutput: false,
 		retryAfterMs: null,
+		message: `OpenRouter API error (${httpStatus}): ${errorType ?? "no canonical type"}`,
 		...over,
-		message: `OpenRouter API error (${httpStatus}): ${errorType}`,
 	});
 
 describe("A1 closed automatic-retry allow-list", () => {
 	const retryable: [string, () => unknown][] = [
-		["HTTP 429 + rate_limit_exceeded", () => typed(429, "rate_limit_exceeded")],
-		["HTTP 503 + provider_overloaded", () => typed(503, "provider_overloaded")],
+		["HTTP 429 + canonical rate_limit_exceeded", () => typed(429, "rate_limit_exceeded")],
+		["HTTP 503 + canonical provider_overloaded", () => typed(503, "provider_overloaded")],
+		[
+			"HTTP 429 + canonical rate_limit_exceeded with an arbitrary message",
+			() => typed(429, "rate_limit_exceeded", { message: "OpenRouter API error (429): Too many cats" }),
+		],
+		[
+			"HTTP 503 + canonical provider_overloaded with an arbitrary message",
+			() => typed(503, "provider_overloaded", { message: "OpenRouter API error (503): Provider returned error" }),
+		],
 	];
 	for (const [name, make] of retryable) {
 		it(`${name}: an unpaid provider-error attempt, retry_wait, the queue retries and the next run completes`, async () => {
@@ -219,6 +228,20 @@ describe("A1 everything outside the allow-list makes exactly one call and parks 
 		["generic 503 (unmapped)", () => typed(503, "unmapped"), "sending"],
 		["503 provider_unavailable", () => typed(503, "provider_unavailable"), "sending"],
 		["429 with an unknown error type", () => typed(429, "something_new"), "sending"],
+		[
+			"429 whose message says 'rate limit' but has no canonical error_type",
+			() => typed(429, null, { message: "OpenRouter API error (429): Rate limit exceeded: 10 rpm" }),
+			"sending",
+		],
+		[
+			"503 whose message and raw payload say 'overloaded' but has no canonical error_type",
+			() =>
+				typed(503, null, { message: "OpenRouter API error (503): Provider is overloaded (raw: Engine overloaded)" }),
+			"sending",
+		],
+		["mismatched pair 429 + provider_overloaded", () => typed(429, "provider_overloaded"), "sending"],
+		["mismatched pair 503 + rate_limit_exceeded", () => typed(503, "rate_limit_exceeded"), "sending"],
+		["mismatched pair 502 + provider_overloaded", () => typed(502, "provider_overloaded"), "sending"],
 		[
 			"typed 429 rate_limit_exceeded that carries output",
 			() => typed(429, "rate_limit_exceeded", { carriesOutput: true }),
