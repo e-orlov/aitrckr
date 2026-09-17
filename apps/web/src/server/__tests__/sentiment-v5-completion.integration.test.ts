@@ -421,4 +421,20 @@ describe("V5-RED-014 / V5-RED-015 read selection v5 → v4 → v3", () => {
 		const brandRow = overview.entities.find((e) => e.entityType === "brand");
 		expect(brandRow?.mentions).toBe(7);
 	});
+
+	it("V5-RED-018: aspect denominators count persisted aspect rows only — the dropped price claim is not a price sample", async () => {
+		const scope = { brandId: BRAND, lookback: "1m" as const, timezone: "UTC" };
+		const overall = await loadSentimentOverview({ ...scope, aspect: "overall" });
+		expect(overall.availableAspects.find((a) => a.key === "coverage")?.count).toBe(1);
+		expect(overall.availableAspects.find((a) => a.key === "price")?.count).toBe(0);
+		const price = await loadSentimentOverview({ ...scope, aspect: "price" });
+		const brandPrice = price.entities.find((e) => e.entityType === "brand");
+		expect(brandPrice?.sample).toBe(0);
+		expect(brandPrice?.metrics.sentiment).toBeNull();
+		const coverage = await loadSentimentOverview({ ...scope, aspect: "coverage" });
+		expect(coverage.entities.find((e) => e.entityType === "brand")).toMatchObject({
+			sample: 1,
+			metrics: { sentiment: 80 },
+		});
+	});
 });

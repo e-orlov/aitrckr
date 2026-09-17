@@ -922,6 +922,47 @@ describe("E1: the post-call gate runs before persistence", () => {
 		expect(report.verdict).toEqual({ status: "accept" });
 		expect(deps.persist).toHaveBeenCalledTimes(1);
 	});
+
+	it("V5-RED-016: a completed analysis whose every aspect claim was unsupported is accepted with zero aspects", async () => {
+		// WGV's price aspect cites the ARAG sentence only: dropped on its own (classifier v5); both overall verdicts stand.
+		const answer = {
+			entities: [
+				goodAnswer.entities[0],
+				{
+					...goodAnswer.entities[1],
+					aspects: [
+						{
+							key: "price",
+							score: 85,
+							category: "positive",
+							confidence: 0.9,
+							evidence: [{ anchorId: "s0001", polarity: "positive" }],
+						},
+					],
+				},
+			],
+		};
+		const { deps, usage, marks } = storeFakes(goodProvider(undefined, answer));
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(report.verdict).toEqual({ status: "accept" });
+		expect(report.outcome).toMatchObject({
+			status: "classified",
+			entities: 2,
+			filteredClaimCount: 1,
+			filteredClaimCodes: { "evidence-entity-unbound": 1 },
+		});
+		expect(deps.persist).toHaveBeenCalledTimes(1);
+		const persisted = (deps.persist as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+			classification: { entities: { aspects: unknown[] }[]; filteredClaims: unknown[] };
+		};
+		expect(persisted.classification.entities.every((entity) => entity.aspects.length === 0)).toBe(true);
+		expect(persisted.classification.filteredClaims).toEqual([
+			{ entityKey: WGV, aspectKey: "price", code: "evidence-entity-unbound", anchorIds: ["s0001"] },
+		]);
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 })]);
+		expect(marks).toEqual([]);
+		expect(JSON.stringify(report)).not.toMatch(/partial|excluded/i);
+	});
 });
 
 describe("canary deadline and watchdog share one abort signal", () => {
