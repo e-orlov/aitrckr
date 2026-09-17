@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { WEB_QUERIES_UNAVAILABLE } from "../../constants";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../config";
-import { StructuredResearchResponseError } from "../types";
+import { StructuredResearchRequestError, StructuredResearchResponseError } from "../types";
 import { openrouter, parseOpenRouterUsage } from "./openrouter";
 
 function stubFetch(
@@ -620,5 +620,115 @@ describe("parseOpenRouterUsage numeric validation", () => {
 			"webSearchRequestsConflict",
 		]);
 		expect(JSON.stringify(usage)).not.toMatch(/sk-or-|req-1|byok|upstream|cached|other_tool|total/);
+	});
+});
+
+describe("openrouter non-2xx responses are typed refusals", () => {
+	const schema = z.object({ summary: z.string() });
+	const refusal = (status: number, body: unknown, headers: Record<string, string> = {}) => {
+		vi.stubEnv("OPENROUTER_API_KEY", "sk-or-secret-value");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue({
+				ok: false,
+				status,
+				headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
+				text: async () => (typeof body === "string" ? body : JSON.stringify(body)),
+				json: async () => body,
+			}),
+		);
+		return openrouter.runStructuredResearch!({ prompt: "research", schema }).catch((error: unknown) => error);
+	};
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
+	});
+
+	it("a structured 429 rate-limit envelope is rate_limit_exceeded with its Retry-After", async () => {
+		const error = await refusal(
+			429,
+			{ error: { code: 429, message: "Rate limit exceeded: 10 rpm" } },
+			{ "retry-after": "12" },
+		);
+		expect(error).toBeInstanceOf(StructuredResearchRequestError);
+		expect(error).toMatchObject({
+			httpStatus: 429,
+			errorType: "rate_limit_exceeded",
+			structured: true,
+			carriesOutput: false,
+			retryAfterMs: 12_000,
+		});
+		expect((error as Error).message).toBe(
+			'OpenRouter API error (429): {"error":{"code":429,"message":"Rate limit exceeded: 10 rpm"}}',
+		);
+		expect((error as Error).message).not.toContain("sk-or-secret-value");
+	});
+
+	it("a structured 503 is provider_overloaded only when the provider says so; routing refusals are provider_unavailable; anything else is unmapped", async () => {
+		expect(
+			await refusal(503, {
+				error: { code: 503, message: "Provider returned error", metadata: { raw: "Engine is currently overloaded" } },
+			}),
+		).toMatchObject({ errorType: "provider_overloaded", structured: true });
+		expect(
+			await refusal(503, {
+				error: { code: 503, message: "No available model provider meets your routing requirements" },
+			}),
+		).toMatchObject({ errorType: "provider_unavailable" });
+		expect(await refusal(503, { error: { code: 503, message: "Service Unavailable" } })).toMatchObject({
+			errorType: "unmapped",
+		});
+	});
+
+	it("deterministic refusals, ambiguous 5xx and timeouts carry their canonical type", async () => {
+		const expectations: [number, string][] = [
+			[400, "bad_request"],
+			[401, "unauthorized"],
+			[402, "insufficient_credits"],
+			[403, "forbidden"],
+			[404, "not_found"],
+			[408, "request_timeout"],
+			[409, "conflict"],
+			[422, "unprocessable"],
+			[500, "server"],
+			[502, "server"],
+			[504, "server"],
+			[524, "timeout"],
+			[529, "server"],
+			[418, "unmapped"],
+		];
+		for (const [status, type] of expectations) {
+			expect(await refusal(status, { error: { code: status, message: "x" } })).toMatchObject({
+				httpStatus: status,
+				errorType: type,
+			});
+		}
+	});
+
+	it("a body that is not the OpenRouter error envelope is unmapped and not structured; a body carrying output is flagged", async () => {
+		expect(await refusal(429, "<html>rate limited</html>")).toMatchObject({
+			structured: false,
+			errorType: "unmapped",
+			carriesOutput: false,
+		});
+		expect(
+			await refusal(429, {
+				error: { code: 429, message: "Rate limit exceeded" },
+				id: "gen-partial",
+				usage: { cost: 0.01 },
+			}),
+		).toMatchObject({
+			structured: true,
+			errorType: "rate_limit_exceeded",
+			carriesOutput: true,
+		});
+		expect(
+			await refusal(429, {
+				error: { code: 429, message: "Rate limit exceeded" },
+				choices: [{ message: { content: "partial" } }],
+			}),
+		).toMatchObject({
+			carriesOutput: true,
+		});
 	});
 });

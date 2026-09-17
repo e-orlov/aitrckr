@@ -6,7 +6,7 @@
  * a provider failure never calls the provider again.
  */
 import { describe, expect, it, vi } from "vitest";
-import type { Provider } from "../../providers/types";
+import { type Provider, StructuredResearchRequestError } from "../../providers/types";
 import { SENTIMENT_EVIDENCE_VERSION } from "../anchors";
 import {
 	inspectSentimentCanaryRunState,
@@ -127,7 +127,15 @@ const failingProvider = () =>
 	({
 		id: "openrouter",
 		runStructuredResearch: vi.fn(async () => {
-			throw new Error("OpenRouter API error (503): upstream unavailable");
+			throw new StructuredResearchRequestError({
+				provider: "openrouter",
+				httpStatus: 503,
+				errorType: "provider_overloaded",
+				structured: true,
+				carriesOutput: false,
+				retryAfterMs: null,
+				message: "OpenRouter API error (503): upstream overloaded",
+			});
 		}),
 	}) as unknown as Provider;
 

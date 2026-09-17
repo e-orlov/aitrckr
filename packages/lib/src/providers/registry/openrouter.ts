@@ -8,7 +8,9 @@ import {
 	type Provider,
 	type ProviderOptions,
 	type ScrapeResult,
+	type StructuredResearchErrorType,
 	type StructuredResearchOptions,
+	StructuredResearchRequestError,
 	type StructuredResearchRequestSummary,
 	StructuredResearchResponseError,
 	type StructuredResearchResult,
@@ -68,6 +70,96 @@ function webSearchRequestFields(): Record<string, unknown> {
  */
 function bareModelSlug(modelSlug: string): string {
 	return modelSlug.replace(/:online$/, "");
+}
+
+/**
+ * Canonical type of a non-2xx OpenRouter response. OpenRouter reports errors
+ * as `{ error: { code, message, metadata? } }`; the type is decided from the
+ * status and, for the two statuses that mix refusals of different nature, the
+ * error text OpenRouter uses for them. Anything that does not match exactly is
+ * `unmapped` and is never treated as a safe refusal downstream.
+ */
+function classifyOpenRouterError(status: number, error: { message: string; raw: string }): StructuredResearchErrorType {
+	const text = `${error.message} ${error.raw}`;
+	switch (status) {
+		case 400:
+			return "bad_request";
+		case 401:
+			return "unauthorized";
+		case 402:
+			return "insufficient_credits";
+		case 403:
+			return "forbidden";
+		case 404:
+			return "not_found";
+		case 408:
+			return "request_timeout";
+		case 409:
+			return "conflict";
+		case 422:
+			return "unprocessable";
+		case 429:
+			return /rate limit/i.test(error.message) ? "rate_limit_exceeded" : "unmapped";
+		case 500:
+		case 502:
+		case 504:
+		case 529:
+			return "server";
+		case 503:
+			if (/overloaded/i.test(text)) return "provider_overloaded";
+			return /no available model provider|routing requirements/i.test(error.message)
+				? "provider_unavailable"
+				: "unmapped";
+		case 524:
+			return "timeout";
+		default:
+			return "unmapped";
+	}
+}
+
+function retryAfterMs(res: { headers?: { get?(name: string): string | null } }): number | null {
+	const header = res.headers?.get?.("retry-after");
+	if (!header) return null;
+	const seconds = Number(header);
+	if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+	const at = Date.parse(header);
+	return Number.isNaN(at) ? null : Math.max(0, at - Date.now());
+}
+
+/**
+ * The typed refusal for a non-2xx structured-research response. The body is
+ * read once: a structured OpenRouter error envelope yields the canonical type;
+ * a body that also carries a generation id, usage, choices or content is
+ * flagged, because such a response was not a free refusal. The message keeps
+ * the status and the body text (never the credential) for logs.
+ */
+async function structuredRequestError(res: Response): Promise<StructuredResearchRequestError> {
+	const status = res.status;
+	const text = await res.text();
+	let body: any = null;
+	try {
+		body = JSON.parse(text);
+	} catch {
+		body = null;
+	}
+	const error = body?.error;
+	const structured =
+		error !== null && typeof error === "object" && typeof error.message === "string" && typeof error.code === "number";
+	const raw = typeof error?.metadata?.raw === "string" ? error.metadata.raw : "";
+	const carriesOutput =
+		typeof body?.id === "string" ||
+		(body?.usage !== undefined && body?.usage !== null) ||
+		(Array.isArray(body?.choices) && body.choices.length > 0) ||
+		typeof body?.output === "string";
+	return new StructuredResearchRequestError({
+		provider: "openrouter",
+		httpStatus: status,
+		errorType: structured ? classifyOpenRouterError(status, { message: error.message, raw }) : "unmapped",
+		structured,
+		carriesOutput,
+		retryAfterMs: retryAfterMs(res),
+		message: `OpenRouter API error (${status}): ${text}`,
+	});
 }
 
 function openrouterHeaders(): Record<string, string> {
@@ -242,9 +334,7 @@ export const openrouter: Provider = {
 			body: JSON.stringify(body),
 			signal,
 		});
-		if (!res.ok) {
-			throw new Error(`OpenRouter API error (${res.status}): ${await res.text()}`);
-		}
+		if (!res.ok) throw await structuredRequestError(res);
 		const data: any = await res.json();
 		// The response is charged whatever its content: the audit envelope is
 		// read first so a content defect never loses the generation or the cost.

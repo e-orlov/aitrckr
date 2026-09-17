@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { StructuredResearchRequestError } from "../../providers/types";
 import type { SentimentClassification } from "../classifier";
 import { SentimentValidationError, sentimentInputHash } from "../classifier";
 import type { DetectableEntity } from "../detector";
@@ -294,7 +295,15 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	it("fence: a provider failure whose routing write is refused still throws for the queue", async () => {
 		const { d } = deps({
 			classify: vi.fn(async () => {
-				throw new Error("OpenRouter API error (503)");
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): upstream overloaded",
+				});
 			}),
 			markAnalysis: vi.fn(async () => false),
 		});
@@ -501,10 +510,18 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(again.d.classify).not.toHaveBeenCalled();
 	});
 
-	it("a proven refusal keeps the queue's retry path: the job throws, the parked row carries no input hash, the case waits", async () => {
+	it("an allow-listed typed refusal keeps the queue's retry path: the job throws, the parked row carries no input hash, the case waits", async () => {
 		const { d, marks, usage, fakes } = deps({
 			classify: vi.fn(async () => {
-				throw new Error("OpenRouter API error (503)");
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): upstream overloaded",
+				});
 			}),
 		});
 		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
@@ -554,7 +571,15 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			`while classifying "${run.answerBody}" Authorization: Bearer sk-or-should-not-leak-1234567890`;
 		const { d, marks, fakes } = deps({
 			classify: vi.fn(async () => {
-				const error = new Error(leaky);
+				const error = new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 429,
+					errorType: "rate_limit_exceeded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: leaky,
+				});
 				(error as { cause?: unknown }).cause = { responseBody: leaky, answer: run.answerBody };
 				throw error;
 			}),
@@ -577,7 +602,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		}
 		expect(failed.errorCode).toBe("provider");
 		expect(failed.errorMessage).toBe(
-			`provider provider (Error) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL} HTTP 429`,
+			`provider provider (StructuredResearchRequestError) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL} HTTP 429`,
 		);
 		expect(thrown).toBeInstanceOf(SentimentJobError);
 		expect(thrown).toMatchObject({

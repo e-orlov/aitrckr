@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type Provider,
+	StructuredResearchRequestError,
 	type StructuredResearchRequestSummary,
 	StructuredResearchResponseError,
 	type StructuredResearchUsage,
@@ -677,7 +678,15 @@ describe("canary verdict after the one call", () => {
 		const provider = {
 			id: "openrouter",
 			runStructuredResearch: vi.fn(async () => {
-				throw new Error("OpenRouter API error (503): upstream unavailable; Authorization: Bearer sk-or-leak");
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): upstream unavailable; Authorization: Bearer sk-or-leak",
+				});
 			}),
 		} as unknown as Provider;
 		const { report, marks, usage, deps } = await rejected(provider, ["provider-error"]);
@@ -701,7 +710,9 @@ describe("canary verdict after the one call", () => {
 		});
 		const report = await runSentimentCanary({ contract, deps, ...fast });
 		expect(report.providerCalls).toBe(0);
-		expect(codes(report)).toEqual(["provider-calls", "provider-unconfigured"]);
+		// A configuration defect parks the run for the operator; the queue never repeats it.
+		expect(report.outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect" });
+		expect(codes(report)).toEqual(["provider-calls", "job-outcome"]);
 	});
 
 	it("a lost pristine claim is a refusal with the row's status and no provider call", async () => {
@@ -791,7 +802,8 @@ describe("E2: the exact classifier input is re-checked at the provider boundary"
 		expect(deps.persist).not.toHaveBeenCalled();
 		expect(usage).toEqual([]);
 		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: "canary-input-drift" })]);
-		expect(report.outcome).toMatchObject({ status: "error", name: "SentimentJobError", code: "canary-input-drift" });
+		// A local contract defect before dispatch is the operator's, not a transient retry.
+		expect(report.outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect" });
 		expect(codes(report)).toEqual(expected);
 	};
 
@@ -1067,7 +1079,7 @@ describe("canary deadline and watchdog share one abort signal", () => {
 		expect(report.outcome).toMatchObject({ status: "error", name: "TimeoutError", code: "aborted" });
 		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "request-deadline" }] });
 		// The aborted request's outcome is unknown: parked for reconciliation, never retried automatically.
-		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: null })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: "aborted" })]);
 		// An aborted request never received an answer: nothing was paid, nothing is attributed.
 		expect(usage).toEqual([]);
 	});

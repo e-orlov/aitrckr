@@ -1,6 +1,6 @@
 import type { SentimentAnalysis } from "../db/schema";
 import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
-import { StructuredResearchResponseError } from "../providers/types";
+import { StructuredResearchRequestError, StructuredResearchResponseError } from "../providers/types";
 import { type EvidenceAnchor, segmentAnswer } from "./anchors";
 import {
 	assessCandidate,
@@ -204,17 +204,37 @@ const SETTLE_ATTEMPTS = 3;
 const SETTLE_RETRY_MS = 250;
 
 /**
- * Only a provider response that is itself the refusal proves that nothing was
- * billed: a definite 4xx or 503 with no generation id, or a request that never
- * left. Timeouts, aborts, connection loss, status-less errors and every other
- * 5xx (500, 502, 504, 524, 529 …) leave the outcome unknown and are never
- * repeated automatically.
+ * The closed allow-list of refusals the workflow may repeat on its own: the
+ * provider's own structured error envelope, with exactly this status and
+ * canonical type, carrying no generation id, usage, cost, content or partial
+ * output. Nothing is inferred from an HTTP class or from a missing generation
+ * id alone.
  */
-function isProvenRejection(safe: SafeSentimentError): boolean {
-	if (!safe.requestSent) return true;
-	if (safe.envelope?.generationId) return false;
-	if (safe.kind !== "provider" || safe.httpStatus === null) return false;
-	return (safe.httpStatus >= 400 && safe.httpStatus < 500) || safe.httpStatus === 503;
+const AUTOMATIC_RETRY_ALLOW_LIST: ReadonlySet<string> = new Set(["429:rate_limit_exceeded", "503:provider_overloaded"]);
+
+/** Deterministic refusals of the request itself (request, authentication, permission, credit, configuration): the operator's, never repeated. */
+const REVIEW_STATUSES: ReadonlySet<number> = new Set([400, 401, 402, 403, 404, 409, 422]);
+
+type FailureRoute = { route: "retry"; retryAfterMs: number | null } | { route: "review" } | { route: "reconcile" };
+
+/**
+ * Where a failed request goes. `retry`: only an allow-listed typed refusal,
+ * or a request that demonstrably never left for a transient local reason.
+ * `review`: a deterministic refusal or a local contract/configuration defect —
+ * repeating it cannot help. `reconcile`: everything whose billing outcome is
+ * unknown — timeouts, aborts, connection loss, status-less errors, HTTP 408,
+ * ambiguous or untyped 5xx, unknown types, and any refusal that carried
+ * output. No exactly-once or non-billing claim is made for those.
+ */
+function routeFailure(error: unknown, safe: SafeSentimentError): FailureRoute {
+	if (!safe.requestSent) return { route: "review" };
+	if (!(error instanceof StructuredResearchRequestError)) return { route: "reconcile" };
+	if (!error.structured || error.carriesOutput) return { route: "reconcile" };
+	if (AUTOMATIC_RETRY_ALLOW_LIST.has(`${error.httpStatus}:${error.errorType}`)) {
+		return { route: "retry", retryAfterMs: error.retryAfterMs };
+	}
+	if (REVIEW_STATUSES.has(error.httpStatus)) return { route: "review" };
+	return { route: "reconcile" };
 }
 
 /** Thrown inside the workflow to leave the automatic path; never escapes `resolve`. */
@@ -222,6 +242,8 @@ class HandOver extends Error {
 	constructor(
 		readonly reason: ReviewReason,
 		readonly attemptOrdinal = 0,
+		/** The safe failure that caused the hand-over, kept on the parked analysis row for the operator. */
+		readonly safe: SafeSentimentError | null = null,
 	) {
 		super(`resolution handed over: ${reason}`);
 		this.name = "HandOver";
@@ -315,9 +337,10 @@ async function paidCall<T>(
 	if (w.paidCalls >= w.policy.maxPaidCalls) throw new HandOver("call-limit");
 	if (w.costUsd >= w.policy.maxCostUsd) throw new HandOver("cost-limit");
 	if (w.options.signal?.aborted) {
-		// The job was cancelled (shutdown, expiry, canary deadline) before the request left: nothing billed; the case waits.
+		// The job was cancelled (shutdown, expiry, canary deadline) before the request left: a transient local
+		// failure with the request demonstrably never sent — the one pre-dispatch case the queue may repeat.
 		const safe = sanitizeSentimentError(new DOMException("job aborted before the request", "AbortError"));
-		await retryLater(w, 1);
+		await retryLater(w, 1, null);
 		await park(w.claim, safe, w.deps);
 		throw new SentimentJobError({ ...safe, requestSent: false });
 	}
@@ -348,16 +371,22 @@ async function paidCall<T>(
 			);
 			throw new HandOver("contract-defect");
 		}
-		if (isProvenRejection(safe)) {
+		const routed = routeFailure(error, safe);
+		if (routed.route === "retry") {
 			await finish(attempt.id, { outcome: "provider-error" });
 			w.consecutiveFailures += 1;
-			await retryLater(w, w.consecutiveFailures);
+			await retryLater(w, w.consecutiveFailures, routed.retryAfterMs);
 			await park(w.claim, safe, w.deps);
 			throw new SentimentJobError(safe);
 		}
+		if (routed.route === "review") {
+			// The provider refused the request itself, or it never left for a local defect: the operator's, not the queue's.
+			await finish(attempt.id, { outcome: "provider-error" });
+			throw new HandOver("contract-defect", attempt.ordinal, safe);
+		}
 		// Unknown outcome: the row keeps `sending` (or `aborted`) as the reconciliation record; no automatic repeat.
 		if (safe.kind === "aborted") await finish(attempt.id, { outcome: "aborted" });
-		throw new HandOver("unknown-provider-outcome", attempt.ordinal);
+		throw new HandOver("unknown-provider-outcome", attempt.ordinal, safe);
 	}
 	await settlePaidAnswer(
 		w,
@@ -374,11 +403,17 @@ async function paidCall<T>(
 	return answer.value;
 }
 
-/** Park the case for the queue's bounded retry after an unpaid attempt. */
-function retryLater(w: Workflow, failures: number): Promise<void> {
+/**
+ * Park the case for the queue's bounded retry after an unpaid attempt. A
+ * `Retry-After` the provider sent controls the wait; otherwise the policy's
+ * backoff does. Either way the wait never exceeds the policy's maximum.
+ */
+function retryLater(w: Workflow, failures: number, retryAfterMs: number | null): Promise<void> {
+	const wait =
+		retryAfterMs === null ? backoffMs(failures, w.policy) : Math.min(Math.max(retryAfterMs, 0), w.policy.backoffMaxMs);
 	return (w.deps.updateResolutionCase ?? updateResolutionCase)(
 		w.claim.analysisId,
-		{ status: "retry_wait", nextAttemptAt: new Date(Date.now() + backoffMs(failures, w.policy)) },
+		{ status: "retry_wait", nextAttemptAt: new Date(Date.now() + wait) },
 		w.claim,
 	);
 }
@@ -594,7 +629,7 @@ async function persistVerified(w: Workflow, assessment: CandidateAssessment): Pr
 		// keeps its candidate for the next run and waits. No provider call is
 		// needed to finish — the next run persists from the stored candidate.
 		const safe = sanitizeSentimentError(error, "persist");
-		await retryLater(w, 1);
+		await retryLater(w, 1, null);
 		const owned = await park(w.claim, safe, w.deps);
 		if (!owned) return { status: "claim-lost", generation: w.claim.generation };
 		throw new SentimentJobError(safe);
@@ -628,6 +663,7 @@ async function handOver(
 	candidate: SentimentClassificationResult | null,
 	unresolved: UnresolvedTarget[],
 	attemptOrdinal: number,
+	safe: SafeSentimentError | null = null,
 ): Promise<SentimentJobOutcome> {
 	const reconcile = reason === "unknown-provider-outcome";
 	await (w.deps.updateResolutionCase ?? updateResolutionCase)(
@@ -641,7 +677,7 @@ async function handOver(
 		},
 		w.claim,
 	);
-	await park(w.claim, null, w.deps);
+	await park(w.claim, safe, w.deps);
 	if (reconcile) return { status: "awaiting-reconciliation", attemptOrdinal };
 	return {
 		status: "awaiting-review",
@@ -703,7 +739,7 @@ async function leaveWorkflow(
 	if (!(error instanceof HandOver)) throw error;
 	const unresolved = candidate ? assess(w, candidate).unresolved : [];
 	try {
-		return await handOver(w, error.reason, candidate, [...unresolved, ...pending], error.attemptOrdinal);
+		return await handOver(w, error.reason, candidate, [...unresolved, ...pending], error.attemptOrdinal, error.safe);
 	} catch (inner) {
 		if (inner instanceof ClaimLostError) return { status: "claim-lost", generation: w.claim.generation };
 		throw inner;
@@ -766,9 +802,25 @@ async function classifyAndPersist(
 	try {
 		provider = deps.resolveProvider ? deps.resolveProvider() : resolveSentimentProvider();
 	} catch (error) {
-		const safe = sanitizeSentimentError(error);
+		const safe = { ...sanitizeSentimentError(error), requestSent: false };
+		if (safe.kind === "configuration") {
+			// No provider is configured: a configuration defect the queue cannot repeat away; the operator's work item.
+			await (deps.updateResolutionCase ?? updateResolutionCase)(
+				claim.analysisId,
+				{ status: "awaiting_review", reviewReason: "contract-defect", nextAttemptAt: null },
+				claim,
+			);
+			await park(claim, safe, deps);
+			return {
+				status: "awaiting-review",
+				reason: "contract-defect",
+				paidCalls: kase.automatedProviderCalls,
+				costUsd: Number(kase.totalActualCostUsd),
+				unresolved: 0,
+			};
+		}
 		await park(claim, safe, deps);
-		throw new SentimentJobError({ ...safe, requestSent: false });
+		throw new SentimentJobError(safe);
 	}
 	const analysis = analyzeAnswerRanges(run.answerBody);
 	const anchors = segmentAnswer(run.answerBody, analysis);

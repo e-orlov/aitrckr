@@ -43,6 +43,7 @@ const {
 	updateResolutionCase,
 } = await import("@workspace/lib/sentiment");
 const { loadSentimentOverview } = await import("@/server/sentiment-load");
+const { StructuredResearchRequestError } = await import("@workspace/lib/providers/types");
 type Provider = import("@workspace/lib/providers/types").Provider;
 type JobDeps = import("@workspace/lib/sentiment").SentimentJobDeps;
 
@@ -476,9 +477,20 @@ describe("E unknown provider outcomes are never repeated automatically", () => {
 });
 
 describe("F a proven non-billable rejection is retried with bounded backoff", () => {
-	it("a 429 response with no generation is an unpaid provider-error; the run waits as pending_resolution and the next job run completes", async () => {
+	it("a typed 429 rate_limit_exceeded refusal with no output is an unpaid provider-error; the run waits as pending_resolution and the next job run completes", async () => {
 		const { provider, script } = scripted([
-			{ phase: "classify", error: new Error("OpenRouter request failed (429) Too Many Requests") },
+			{
+				phase: "classify",
+				error: new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 429,
+					errorType: "rate_limit_exceeded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (429): Rate limit exceeded",
+				}),
+			},
 			{ phase: "classify", answer: { entities: [brandOk] } },
 			{ phase: "verify", answer: ACCEPT },
 		]);

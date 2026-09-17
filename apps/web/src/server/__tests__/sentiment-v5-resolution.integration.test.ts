@@ -33,6 +33,7 @@ const {
 	sentimentProviderResultSchema,
 } = await import("@workspace/lib/sentiment");
 const { loadSentimentEvidence, loadSentimentOverview } = await import("@/server/sentiment-load");
+const { StructuredResearchRequestError } = await import("@workspace/lib/providers/types");
 type Provider = import("@workspace/lib/providers/types").Provider;
 type JobDeps = import("@workspace/lib/sentiment").SentimentJobDeps;
 
@@ -497,9 +498,20 @@ describe("S7 first repair invalid, second repair valid", () => {
 });
 
 describe("S8 transient provider error → bounded backoff → completed", () => {
-	it("a 503 is an unpaid attempt, the case waits, the next job run completes; no duplicate charge", async () => {
+	it("a typed 503 provider_overloaded refusal is an unpaid attempt, the case waits, the next job run completes; no duplicate charge", async () => {
 		const { provider } = scripted([
-			{ phase: "classify", error: new Error("OpenRouter request failed (503) Service Unavailable") },
+			{
+				phase: "classify",
+				error: new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): Provider returned error: overloaded",
+				}),
+			},
 			{ phase: "classify", answer: { entities: [brandOk()] } },
 			{ phase: "verify", answer: ACCEPT },
 		]);
