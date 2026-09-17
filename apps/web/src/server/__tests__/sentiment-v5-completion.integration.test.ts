@@ -356,7 +356,11 @@ describe("V5-RED-012 persistence failure rolls observations, aspects and audit b
 			});
 		};
 		await expect(
-			runSentimentJob(payload(RUN_PERSIST_FAIL), { resolveProvider: () => withResolutionPhases(caveatProvider(() => undefined)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 }, persist }),
+			runSentimentJob(payload(RUN_PERSIST_FAIL), {
+				resolveProvider: () => withResolutionPhases(caveatProvider(() => undefined)),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+				persist,
+			}),
 		).rejects.toMatchObject({ kind: "store" });
 		const analysis = await client.query<{ status: string; error_code: string }>(
 			"SELECT status, error_code FROM sentiment_analyses WHERE prompt_run_id = $1",

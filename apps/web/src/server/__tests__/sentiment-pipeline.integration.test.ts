@@ -36,6 +36,7 @@ const { explainSentimentEvidence, loadRunSources, loadSentimentEvidence, loadSen
 	"@/server/sentiment-load"
 );
 const { loadMentions } = await import("@workspace/lib/sentiment");
+const { StructuredResearchRequestError } = await import("@workspace/lib/providers/types");
 type Provider = import("@workspace/lib/providers/types").Provider;
 type StructuredResearchUsage = import("@workspace/lib/providers/types").StructuredResearchUsage;
 type StructuredResearchRequestSummary = import("@workspace/lib/providers/types").StructuredResearchRequestSummary;
@@ -137,6 +138,65 @@ function fakeProvider(
 		},
 	} as unknown as Provider;
 }
+
+/**
+ * Legacy state-machine scenarios poke the analysis row directly (`failed`,
+ * `processing`). Under the resolution contract a resolved instance for the
+ * same input is immutable and answers `already-completed` regardless of the
+ * row, so the fixture removes the instance first: the row alone then drives
+ * the scenario, as it did before resolution cases existed.
+ */
+async function dropResolutionInstance(runId: string) {
+	await client.query(
+		"DELETE FROM sentiment_resolution_cases WHERE analysis_id IN (SELECT id FROM sentiment_analyses WHERE prompt_run_id = $1)",
+		[runId],
+	);
+}
+
+/**
+ * Stands in for the operator's reconciliation of a request whose outcome is
+ * unknown (no automatic path exists by design): the dangling ledger row is
+ * closed and the parked run is completed through adjudication — the same
+ * deterministic validators and atomic persistence as the automatic path.
+ */
+async function reconcileAndAdjudicate(runId: string, entities: unknown[]) {
+	const { adjudicationTemplate, applyAdjudication } = await import("@workspace/lib/sentiment");
+	await client.query(
+		"UPDATE sentiment_provider_attempts SET outcome = 'aborted', finished_at = now() WHERE outcome = 'sending' AND analysis_id IN (SELECT id FROM sentiment_analyses WHERE prompt_run_id = $1)",
+		[runId],
+	);
+	const template = await adjudicationTemplate(runId);
+	expect(template.status).toBe("awaiting_reconciliation");
+	const applied = await applyAdjudication({
+		analysisId: template.analysisId,
+		inputHash: template.inputHash,
+		decidedBy: "pipeline-fixture",
+		entities,
+	});
+	expect(applied).toMatchObject({ status: "applied" });
+}
+
+/** The entities the fake provider answers for the ANSWER fixture, as an adjudication decision. */
+const decisionFor = (keys: string[]) =>
+	keys.map((key) => ({
+		key,
+		score: key === "brand" ? 60 : 82,
+		category: "positive",
+		confidence: 0.9,
+		evidence: [{ anchorId: key === ALPHA ? "s0001" : key === NEWCO ? "s0002" : "s0003", polarity: "positive" }],
+		aspects:
+			key === ALPHA
+				? [
+						{
+							key: "service",
+							score: 85,
+							category: "positive",
+							confidence: 0.9,
+							evidence: [{ anchorId: "s0001", polarity: "positive" }],
+						},
+					]
+				: [],
+	}));
 
 async function insertRun(id: string, promptId: string, rawOutput: unknown, minutesAgo: number) {
 	await client.query(
@@ -307,7 +367,10 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 		const provider = fakeProvider({ hold: barrier, onCall: () => calls++, costUsd: 0.0312 });
 		const outcomes = await Promise.all(
 			Array.from({ length: N }, () =>
-				runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(provider), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } }).then((outcome) => {
+				runSentimentJob(payload, {
+					resolveProvider: () => withResolutionPhases(provider),
+					resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+				}).then((outcome) => {
 					settled++;
 					if (settled === N - 1) release();
 					return outcome;
@@ -378,11 +441,17 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 	it("a live processing claim is not stolen; an abandoned one (older than the claim timeout) is recovered", async () => {
 		let calls = 0;
 		const provider = fakeProvider({ onCall: () => calls++ });
+		await dropResolutionInstance(RUN_MENTIONS);
 		await client.query(
 			"UPDATE sentiment_analyses SET status = 'processing', started_at = now() WHERE prompt_run_id = $1",
 			[RUN_MENTIONS],
 		);
-		expect(await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(provider), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toEqual({
+		expect(
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(provider),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toEqual({
 			status: "claimed-elsewhere",
 			analysisStatus: "processing",
 		});
@@ -391,7 +460,12 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 			"UPDATE sentiment_analyses SET status = 'processing', started_at = now() - interval '16 minutes' WHERE prompt_run_id = $1",
 			[RUN_MENTIONS],
 		);
-		expect(await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(provider), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toMatchObject({
+		expect(
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(provider),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
@@ -406,18 +480,31 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 	});
 
 	it("a failed attempt is attributed to the locked provider and model without exposing anything else", async () => {
+		await dropResolutionInstance(RUN_MENTIONS);
 		await client.query("UPDATE sentiment_analyses SET status = 'failed' WHERE prompt_run_id = $1", [RUN_MENTIONS]);
 		const leaky = `OpenRouter API error (429): {"error":"rate limited"} Authorization: Bearer sk-or-should-not-leak while classifying "${ANSWER}"`;
 		const failing = {
 			...fakeProvider(),
 			id: "openrouter",
 			runStructuredResearch: async () => {
-				throw new Error(leaky);
+				// The provider's own structured rate-limit refusal: the one 429 the workflow may repeat.
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 429,
+					errorType: "rate_limit_exceeded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: leaky,
+				});
 			},
 		} as unknown as Provider;
 		let thrown: unknown;
 		try {
-			await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(failing), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } });
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(failing),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			});
 		} catch (error) {
 			thrown = error;
 		}
@@ -442,17 +529,20 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 				RUN_MENTIONS,
 			])
 		).rows;
+		// Parked inside its resolution workflow, never `failed`; the safe code and status stay for the operator.
 		expect(row).toMatchObject({
-			status: "failed",
+			status: "pending_resolution",
 			provider: "openrouter",
 			model: SENTIMENT_MODEL,
 			error_code: "provider",
-			error_message: `provider provider (Error) via openrouter/${SENTIMENT_MODEL} HTTP 429`,
+			error_message: `provider provider (StructuredResearchRequestError) via openrouter/${SENTIMENT_MODEL} HTTP 429`,
 		});
 		for (const forbidden of ["sk-or-", "rate limited", "Authorization", ANSWER])
 			expect(JSON.stringify(row)).not.toContain(forbidden);
 		// A transport failure never received an answer: nothing was paid, nothing is attributed; the case waits.
-		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'", [BRAND])).toBe(0);
+		expect(
+			await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'", [BRAND]),
+		).toBe(0);
 		expect(
 			(
 				await client.query<{ status: string }>(
@@ -462,7 +552,12 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 			).rows,
 		).toEqual([{ status: "retry_wait" }]);
 		// Recover for the following tests.
-		expect(await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(fakeProvider()), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toMatchObject({
+		expect(
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(fakeProvider()),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
@@ -495,6 +590,7 @@ describe("IT-SNT-013 claim generation fence (stale lease takeover)", () => {
 		).rows.map((r) => r.id);
 
 	async function takeoverScenario(aOutcome: "success" | "failure") {
+		await dropResolutionInstance(RUN_MENTIONS);
 		await client.query("UPDATE sentiment_analyses SET status = 'failed' WHERE prompt_run_id = $1", [RUN_MENTIONS]);
 		let releaseA: () => void = () => {};
 		const holdA = new Promise<void>((resolve) => {
@@ -508,29 +604,49 @@ describe("IT-SNT-013 claim generation fence (stale lease takeover)", () => {
 						...fakeProvider(),
 						runStructuredResearch: async () => {
 							await holdA;
-							throw new Error("OpenRouter API error (503): late failure of the stale attempt");
+							throw new StructuredResearchRequestError({
+								provider: "openrouter",
+								httpStatus: 503,
+								errorType: "provider_overloaded",
+								structured: true,
+								carriesOutput: false,
+								retryAfterMs: null,
+								message: "OpenRouter API error (503): upstream overloaded",
+							});
 						},
 					} as unknown as Provider);
-		const attemptA = runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(providerA), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } });
+		const attemptA = runSentimentJob(payload, {
+			resolveProvider: () => withResolutionPhases(providerA),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		});
 		await new Promise((resolve) => setTimeout(resolve, 200));
 		const afterA = await rowState();
 		expect(afterA.status).toBe("processing");
 		const generationA = afterA.claim_generation;
-		// Its lease is made stale; attempt B claims and completes.
+		// Its lease is made stale; attempt B claims. A's request is still in flight — its ledger row is `sending`,
+		// its billing outcome unknown — so B must not buy another answer: it parks the run for reconciliation.
 		await staleLease();
-		const outcomeB = await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(fakeProvider()), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } });
-		expect(outcomeB.status).toBe("classified");
+		const outcomeB = await runSentimentJob(payload, {
+			resolveProvider: () => withResolutionPhases(fakeProvider()),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		});
+		expect(outcomeB).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: expect.any(Number) });
 		const afterB = await rowState();
 		expect(afterB.claim_generation).toBe(generationA + 1);
-		expect(afterB.status).toBe("completed");
+		expect(afterB.status).toBe("pending_resolution");
+		// The earlier verified result's observations stay untouched while the run is parked.
 		const observationsB = await observationIds();
-		expect(observationsB).toHaveLength(outcomeB.status === "classified" ? outcomeB.entities : -1);
-		// A resolves late: it must not touch B's status or observations.
+		expect(observationsB).toHaveLength(2);
+		// A resolves late: it must not touch B's status, the case or the observations.
 		releaseA();
 		const outcomeA = await attemptA;
 		expect(outcomeA).toEqual({ status: "claim-lost", generation: generationA });
 		expect(await rowState()).toEqual(afterB);
 		expect(await observationIds()).toEqual(observationsB);
+		// The operator reconciles the unknown request and adjudicates; the run reaches its one verified result.
+		await reconcileAndAdjudicate(RUN_MENTIONS, decisionFor(["brand", ALPHA]));
+		expect(await rowState()).toMatchObject({ status: "completed", error_code: null });
+		expect(await observationIds()).toHaveLength(2);
 	}
 
 	it("A claims, its lease goes stale, B completes, A then succeeds: B remains intact", async () => {
@@ -584,7 +700,12 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 		let calls = 0;
 		const inventory = await runSentimentEnqueue({ enqueue: false, brandId: BRAND });
 		expect(inventory.counts).toMatchObject({ completed: 1, eligible: 0, eligibleStale: 0 });
-		expect(await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(fakeProvider({ onCall: () => calls++ })), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toEqual({
+		expect(
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(fakeProvider({ onCall: () => calls++ })),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toEqual({
 			status: "already-completed",
 		});
 		expect(calls).toBe(0);
@@ -596,20 +717,24 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 		expect(inventory.counts).toMatchObject({ completed: 0, eligible: 1, eligibleStale: 1 });
 		let calls = 0;
 		expect(
-			await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(fakeProvider({ onCall: () => calls++ })), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } }),
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(fakeProvider({ onCall: () => calls++ })),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
 		).toMatchObject({
 			status: "classified",
 			entities: 2,
 		});
 		expect(calls).toBe(1);
-		// No usage reported by the provider → the tunable estimate (null for an unknown provider id), never a fabricated cost.
+		// No usage reported by the classification double → the tunable estimate (null for an unknown provider id), never a
+		// fabricated cost; the verifier's answer (newest) carries the cost its double reports.
 		const events = (
 			await client.query<{ estimated_cost_usd: string | null }>(
-				"SELECT estimated_cost_usd FROM usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification' ORDER BY created_at DESC LIMIT 1",
+				"SELECT estimated_cost_usd FROM usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification' ORDER BY created_at DESC LIMIT 2",
 				[BRAND],
 			)
 		).rows;
-		expect(events[0].estimated_cost_usd).toBeNull();
+		expect(events.map((e) => e.estimated_cost_usd)).toEqual(["0.001000", null]);
 		expect(await count("sentiment_analyses", "prompt_run_id = $1", [RUN_MENTIONS])).toBe(1);
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_MENTIONS])).toBe(2);
 		expect((await runSentimentEnqueue({ enqueue: false, brandId: BRAND })).counts).toMatchObject({
@@ -625,7 +750,12 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			[NEWCO, BRAND],
 		);
 		// The job never re-scans a run with a receipt; the mention backfill does.
-		expect(await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(fakeProvider()), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toEqual({
+		expect(
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(fakeProvider()),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toEqual({
 			status: "already-completed",
 		});
 		const apply = await runMentionBackfill({ apply: true, brandId: BRAND });
@@ -642,7 +772,12 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			eligible: 1,
 			eligibleStale: 1,
 		});
-		expect(await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(fakeProvider()), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toMatchObject({
+		expect(
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(fakeProvider()),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toMatchObject({
 			status: "classified",
 			entities: 3,
 		});
@@ -666,10 +801,22 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			timezone: "UTC",
 		});
 		expect(overview.entities.find((e) => e.key === ALPHA)?.classified).toBe(0);
-		expect(await runSentimentJob(payload, { resolveProvider: () => withResolutionPhases(fakeProvider()), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toMatchObject({
-			status: "classified",
-			entities: 3,
+		// A resolution instance is identified by run, input hash and classifier version: the resolved instance stands and
+		// the job makes no call. A taxonomy change ships as a classifier version, which opens a new analysis row.
+		let calls = 0;
+		expect(
+			await runSentimentJob(payload, {
+				resolveProvider: () => withResolutionPhases(fakeProvider({ onCall: () => calls++ })),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toEqual({
+			status: "already-completed",
 		});
+		expect(calls).toBe(0);
+		await client.query("UPDATE sentiment_analyses SET taxonomy_version = $2 WHERE prompt_run_id = $1", [
+			RUN_MENTIONS,
+			SENTIMENT_TAXONOMY_VERSION,
+		]);
 		expect((await runSentimentEnqueue({ enqueue: false, brandId: BRAND })).counts).toMatchObject({ completed: 1 });
 	});
 });
@@ -701,7 +848,13 @@ describe("IT-SNT-014 superseded mention lifecycle", () => {
 			}),
 		} as unknown as Provider;
 		expect(
-			await runSentimentJob({ ...payload, promptRunId: RUN_ALIAS }, { resolveProvider: () => withResolutionPhases(aliasProvider), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } }),
+			await runSentimentJob(
+				{ ...payload, promptRunId: RUN_ALIAS },
+				{
+					resolveProvider: () => withResolutionPhases(aliasProvider),
+					resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+				},
+			),
 		).toMatchObject({ status: "classified", entities: 1 });
 		const overviewBefore = await loadSentimentOverview({
 			brandId: BRAND,
@@ -759,7 +912,10 @@ describe("IT-SNT-014 superseded mention lifecycle", () => {
 		let calls = 0;
 		const outcome = await runSentimentJob(
 			{ ...payload, promptRunId: RUN_ALIAS },
-			{ resolveProvider: () => withResolutionPhases(fakeProvider({ onCall: () => calls++ })), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } },
+			{
+				resolveProvider: () => withResolutionPhases(fakeProvider({ onCall: () => calls++ })),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			},
 		);
 		expect(["no-mentions", "already-completed"]).toContain(outcome.status);
 		expect(calls).toBe(0);
@@ -816,7 +972,7 @@ describe("IT-SNT-016 coverage follows the current taxonomy contract", () => {
 			[RUN_OLD_TAXONOMY, BRAND, ALPHA, SENTIMENT_DETECTOR_VERSION],
 		);
 		const { rows: a } = await client.query<{ id: string }>(
-			`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, input_hash, completed_at) VALUES ($1, $2, $3, 'sent-aspects-v0', 'completed', 'old', now()) RETURNING id`,
+			`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, input_hash, completed_at, verifier_version, verified_at) VALUES ($1, $2, $3, 'sent-aspects-v0', 'completed', 'old', now(), 'sent-verifier-v1', now()) RETURNING id`,
 			[RUN_OLD_TAXONOMY, BRAND, SENTIMENT_CLASSIFIER_VERSION],
 		);
 		await client.query(
@@ -863,8 +1019,8 @@ describe("IT-SNT-007 bounded evidence at high cardinality (B5)", () => {
 			   INSERT INTO prompt_run_entity_mentions (prompt_run_id, brand_id, entity_type, competitor_id, entity_key, entity_name, detector_version)
 			   SELECT id, $2, 'competitor', $5::uuid, $5::text, 'Alpha', $4 FROM r RETURNING id AS mention_id, prompt_run_id
 			 ), a AS (
-			   INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, input_hash, completed_at)
-			   SELECT id, $2, $6, $7, 'completed', 'bulk', now() FROM r RETURNING id AS analysis_id, prompt_run_id
+			   INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, input_hash, completed_at, verifier_version, verified_at)
+			   SELECT id, $2, $6, $7, 'completed', 'bulk', now(), 'sent-verifier-v1', now() FROM r RETURNING id AS analysis_id, prompt_run_id
 			 )
 			 INSERT INTO sentiment_observations (analysis_id, mention_id, prompt_run_id, brand_id, entity_type, competitor_id, entity_key, score, category, confidence, evidence)
 			 SELECT a.analysis_id, m.mention_id, a.prompt_run_id, $2, 'competitor', $5::uuid, $5::text,
@@ -976,7 +1132,11 @@ describe("IT-SNT-018 usage attribution when the write fails after a paid answer 
 		try {
 			await runSentimentJob(
 				{ ...payload, promptRunId: RUN_PERSIST_FAIL },
-				{ resolveProvider: () => withResolutionPhases(provider), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 }, persist },
+				{
+					resolveProvider: () => withResolutionPhases(provider),
+					resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+					persist,
+				},
 			);
 		} catch (error) {
 			thrown = error;
@@ -987,32 +1147,40 @@ describe("IT-SNT-018 usage attribution when the write fails after a paid answer 
 		for (const forbidden of ["violates", "foreign key", "23503", "mention_id", ANSWER])
 			expect(thrownText).not.toContain(forbidden);
 
-		// Exactly one new usage event: the paid success, with the cost the provider reported.
-		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		// Two paid answers (classification, verification), each attributed exactly once with the cost its provider reported.
+		expect(await count("usage_events")).toBe(eventsBefore + 2);
 		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
 			failedBefore,
 		);
-		const [event] = (
+		const events = (
 			await client.query<{ event_type: string; estimated_cost_usd: string; provider: string; model: string }>(
-				"SELECT event_type, estimated_cost_usd, provider, model FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 1",
+				"SELECT event_type, estimated_cost_usd, provider, model FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 2",
 				[BRAND],
 			)
 		).rows;
-		expect(event).toEqual({
-			event_type: "sentiment_classification",
-			estimated_cost_usd: "0.045600",
-			provider: "fake-openrouter",
-			model: SENTIMENT_MODEL,
-		});
+		expect(events).toEqual([
+			{
+				event_type: "sentiment_classification",
+				estimated_cost_usd: "0.001000",
+				provider: "fake-openrouter",
+				model: SENTIMENT_MODEL,
+			},
+			{
+				event_type: "sentiment_classification",
+				estimated_cost_usd: "0.045600",
+				provider: "fake-openrouter",
+				model: SENTIMENT_MODEL,
+			},
+		]);
 
-		// The analysis is ours and failed with the persistence code; the rolled-back write left nothing behind.
+		// The analysis is ours, parked with the persistence code; the rolled-back write left nothing behind.
 		const [analysis] = (
 			await client.query<{ status: string; error_code: string; error_message: string; attempts: number }>(
 				"SELECT status, error_code, error_message, attempts FROM sentiment_analyses WHERE prompt_run_id = $1",
 				[RUN_PERSIST_FAIL],
 			)
 		).rows;
-		expect(analysis).toMatchObject({ status: "failed", error_code: "persistence", attempts: 1 });
+		expect(analysis).toMatchObject({ status: "pending_resolution", error_code: "persistence", attempts: 1 });
 		expect(analysis.error_message).toMatch(/^store persistence \(\w+\) via openrouter\/openai\/gpt-5-mini$/);
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(0);
 		expect(
@@ -1023,13 +1191,20 @@ describe("IT-SNT-018 usage attribution when the write fails after a paid answer 
 			),
 		).toBe(0);
 
-		// Once the mention rows are repaired, the next attempt completes normally and is attributed again.
+		// Once the mention rows are repaired, the next attempt resumes from the stored candidate: no second paid
+		// classification, one more verification, then the result persists.
 		await runMentionBackfill({ apply: true, brandId: BRAND });
 		expect(
-			await runSentimentJob({ ...payload, promptRunId: RUN_PERSIST_FAIL }, { resolveProvider: () => withResolutionPhases(provider), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } }),
+			await runSentimentJob(
+				{ ...payload, promptRunId: RUN_PERSIST_FAIL },
+				{
+					resolveProvider: () => withResolutionPhases(provider),
+					resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+				},
+			),
 		).toMatchObject({ status: "classified", entities: 3 });
-		expect(calls).toBe(2);
-		expect(await count("usage_events")).toBe(eventsBefore + 2);
+		expect(calls).toBe(1);
+		expect(await count("usage_events")).toBe(eventsBefore + 3);
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(3);
 	});
 });
@@ -1066,13 +1241,14 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 			"observation_id IN (SELECT id FROM sentiment_observations WHERE prompt_run_id = $1)",
 			[runId],
 		);
-	const newestEvent = async () =>
+	/** The two newest usage events: the verifier's (0.001) and the classification's, newest first. */
+	const newestEvents = async () =>
 		(
 			await client.query<{ event_type: string; estimated_cost_usd: string | null }>(
-				"SELECT event_type, estimated_cost_usd FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 1",
+				"SELECT event_type, estimated_cost_usd FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 2",
 				[BRAND],
 			)
-		).rows[0];
+		).rows;
 
 	/** Every scenario gets its own pristine run: the canary is one authorized attempt per run. */
 	async function pristineContract(runId: string, minutesAgo: number) {
@@ -1108,25 +1284,32 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		});
 		const rejected = await runSentimentCanary({
 			contract: costContract,
-			deps: { resolveProvider: () => withResolutionPhases(expensive), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } },
+			deps: {
+				resolveProvider: () => withResolutionPhases(expensive),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			},
 			...fast,
 		});
 		expect(calls).toBe(1);
-		expect(rejected.providerCalls).toBe(1);
+		// Two paid answers per canary attempt: the classification and the independent verification.
+		expect(rejected.providerCalls).toBe(2);
 		expect(rejected.verdict).toEqual({ status: "reject", reasons: [{ code: "cost-exceeded" }] });
 		expect(rejected.outcome).toMatchObject({ status: "error", code: "canary-contract" });
 		expect(await analysisRow(RUN_CANARY_COST)).toEqual({
-			status: "failed",
+			status: "pending_resolution",
 			error_code: "canary-contract",
 			attempts: 1,
 		});
 		expect(await observations(RUN_CANARY_COST)).toBe(0);
 		expect(await aspects(RUN_CANARY_COST)).toBe(0);
-		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		expect(await count("usage_events")).toBe(eventsBefore + 2);
 		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
 			failedBefore,
 		);
-		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.100100" });
+		expect(await newestEvents()).toEqual([
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.001000" },
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.100100" },
+		]);
 
 		// 2. Conflicting web-search counters: rejected the same way, cost still attributed.
 		const conflictContract = await pristineContract(RUN_CANARY_CONFLICT, 3);
@@ -1137,20 +1320,26 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		});
 		const conflict = await runSentimentCanary({
 			contract: conflictContract,
-			deps: { resolveProvider: () => withResolutionPhases(conflicting), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } },
+			deps: {
+				resolveProvider: () => withResolutionPhases(conflicting),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			},
 			...fast,
 		});
 		expect(calls).toBe(2);
-		expect(conflict.providerCalls).toBe(1);
+		expect(conflict.providerCalls).toBe(2);
 		expect(conflict.verdict).toEqual({ status: "reject", reasons: [{ code: "web-search-count-conflict" }] });
 		expect(await analysisRow(RUN_CANARY_CONFLICT)).toEqual({
-			status: "failed",
+			status: "pending_resolution",
 			error_code: "canary-contract",
 			attempts: 1,
 		});
 		expect(await observations(RUN_CANARY_CONFLICT)).toBe(0);
-		expect(await count("usage_events")).toBe(eventsBefore + 2);
-		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.020000" });
+		expect(await count("usage_events")).toBe(eventsBefore + 4);
+		expect(await newestEvents()).toEqual([
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.001000" },
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.020000" },
+		]);
 
 		// 3. Unknown (unreported) count: same outcome with the cost the provider did report.
 		const unknownContract = await pristineContract(RUN_CANARY_UNKNOWN, 2);
@@ -1161,22 +1350,35 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		});
 		const unreported = await runSentimentCanary({
 			contract: unknownContract,
-			deps: { resolveProvider: () => withResolutionPhases(unknown), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } },
+			deps: {
+				resolveProvider: () => withResolutionPhases(unknown),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			},
 			...fast,
 		});
 		expect(unreported.verdict).toEqual({ status: "reject", reasons: [{ code: "web-search-count-unknown" }] });
 		expect(await observations(RUN_CANARY_UNKNOWN)).toBe(0);
-		expect(await newestEvent()).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.030000" });
+		expect(await newestEvents()).toEqual([
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.001000" },
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.030000" },
+		]);
 
 		// 4. A conforming answer is the only thing that persists.
 		const okContract = await pristineContract(RUN_CANARY, 1);
 		const good = fakeProvider({ onCall: () => calls++, usage: usageOf({}), request: lockedRequest });
-		const accepted = await runSentimentCanary({ contract: okContract, deps: { resolveProvider: () => withResolutionPhases(good), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } }, ...fast });
+		const accepted = await runSentimentCanary({
+			contract: okContract,
+			deps: {
+				resolveProvider: () => withResolutionPhases(good),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			},
+			...fast,
+		});
 		expect(accepted.verdict).toEqual({ status: "accept" });
 		expect(calls).toBe(4);
 		expect(await analysisRow(RUN_CANARY)).toEqual({ status: "completed", error_code: null, attempts: 1 });
 		expect(await observations(RUN_CANARY)).toBe(3);
-		expect(await count("usage_events")).toBe(eventsBefore + 4);
+		expect(await count("usage_events")).toBe(eventsBefore + 8);
 		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
 			failedBefore,
 		);
@@ -1210,45 +1412,76 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 			id: "openrouter",
 			runStructuredResearch: async () => {
 				firstCalls++;
-				throw new Error("OpenRouter API error (503): upstream unavailable");
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): upstream overloaded",
+				});
 			},
 		} as unknown as Provider;
-		const first = await runSentimentCanary({ contract, deps: { resolveProvider: () => withResolutionPhases(failing), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } }, ...fast });
+		const first = await runSentimentCanary({
+			contract,
+			deps: {
+				resolveProvider: () => withResolutionPhases(failing),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			},
+			...fast,
+		});
 		expect(first.preflight).toEqual({ status: "passed" });
 		expect(firstCalls).toBe(1);
 		expect(first.providerCalls).toBe(1);
 		expect(first.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error", detail: "503" }] });
-		expect(await analysisRow(RUN_CANARY_RETRY)).toEqual({ status: "failed", error_code: "provider", attempts: 1 });
+		expect(await analysisRow(RUN_CANARY_RETRY)).toEqual({
+			status: "pending_resolution",
+			error_code: "provider",
+			attempts: 1,
+		});
 		expect(await observations(RUN_CANARY_RETRY)).toBe(0);
 		expect(await aspects(RUN_CANARY_RETRY)).toBe(0);
-		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		// A refusal without an answer was not paid: the ledger has the attempt, usage has nothing.
+		expect(await count("usage_events")).toBe(eventsBefore);
 		expect(await count("usage_events", "brand_id = $1 AND event_type = 'sentiment_classification_failed'")).toBe(
-			failedBefore + 1,
+			failedBefore,
 		);
 		expect(await inspectSentimentCanaryRunState(RUN_CANARY_RETRY)).toEqual({
-			analysis: { status: "failed", attempts: 1, observations: 0 },
+			analysis: { status: "pending_resolution", attempts: 1, observations: 0 },
 			pristine: false,
 		});
 
 		// The same contract again: refused in preflight, the second provider is never touched, nothing changes.
 		let secondCalls = 0;
 		const second = fakeProvider({ onCall: () => secondCalls++, usage: usageOf({}), request: lockedRequest });
-		const again = await runSentimentCanary({ contract, deps: { resolveProvider: () => withResolutionPhases(second), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } }, ...fast });
+		const again = await runSentimentCanary({
+			contract,
+			deps: {
+				resolveProvider: () => withResolutionPhases(second),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			},
+			...fast,
+		});
 		expect(again.preflight).toEqual({
 			status: "refused",
-			reasons: [{ code: "run-not-pristine", detail: "failed/1/0" }],
+			reasons: [{ code: "run-not-pristine", detail: "pending_resolution/1/0" }],
 		});
 		expect(again.attempts).toBe(0);
 		expect(again.providerCalls).toBe(0);
 		expect(secondCalls).toBe(0);
 		expect(again.verdict).toEqual({
 			status: "reject",
-			reasons: [{ code: "run-not-pristine", detail: "failed/1/0" }],
+			reasons: [{ code: "run-not-pristine", detail: "pending_resolution/1/0" }],
 		});
-		expect(await analysisRow(RUN_CANARY_RETRY)).toEqual({ status: "failed", error_code: "provider", attempts: 1 });
+		expect(await analysisRow(RUN_CANARY_RETRY)).toEqual({
+			status: "pending_resolution",
+			error_code: "provider",
+			attempts: 1,
+		});
 		expect(await observations(RUN_CANARY_RETRY)).toBe(0);
 		expect(await aspects(RUN_CANARY_RETRY)).toBe(0);
-		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		expect(await count("usage_events")).toBe(eventsBefore);
 	});
 
 	it("IT-SNT-024: two canaries that both pass preflight race for the atomic pristine claim — exactly one reaches the provider, the loser writes nothing", {
@@ -1281,7 +1514,15 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 			id: "openrouter",
 			runStructuredResearch: async () => {
 				aCalls++;
-				throw new Error("OpenRouter API error (503): upstream unavailable");
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): upstream overloaded",
+				});
 			},
 		} as unknown as Provider;
 		const providerB = fakeProvider({ onCall: () => bCalls++, usage: usageOf({}), request: lockedRequest });
@@ -1300,7 +1541,11 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 
 		const a = runSentimentCanary({
 			contract,
-			deps: { resolveProvider: () => withResolutionPhases(providerA), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 }, claimAnalysis: gatedClaim(aMayClaim) },
+			deps: {
+				resolveProvider: () => withResolutionPhases(providerA),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+				claimAnalysis: gatedClaim(aMayClaim),
+			},
 			...fast,
 		}).then((report) => {
 			releaseBClaim();
@@ -1309,7 +1554,8 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		const b = runSentimentCanary({
 			contract,
 			deps: {
-				resolveProvider: () => withResolutionPhases(providerB), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+				resolveProvider: () => withResolutionPhases(providerB),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 				claimAnalysis: gatedClaim(bMayClaim),
 				loadAnalysisState: bPreflightSeen,
 			},
@@ -1327,14 +1573,21 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		expect(reportB.attempts).toBe(1);
 		expect(reportB.providerCalls).toBe(0);
 		expect(reportB.outcome).toEqual({ status: "claimed-elsewhere" });
-		expect(reportB.verdict).toEqual({ status: "reject", reasons: [{ code: "run-state-drift", detail: "failed" }] });
+		expect(reportB.verdict).toEqual({
+			status: "reject",
+			reasons: [{ code: "run-state-drift", detail: "pending_resolution" }],
+		});
 
-		expect(await analysisRow(RUN_CANARY_RACE)).toEqual({ status: "failed", error_code: "provider", attempts: 1 });
+		expect(await analysisRow(RUN_CANARY_RACE)).toEqual({
+			status: "pending_resolution",
+			error_code: "provider",
+			attempts: 1,
+		});
 		expect(await observations(RUN_CANARY_RACE)).toBe(0);
 		expect(await aspects(RUN_CANARY_RACE)).toBe(0);
-		expect(await count("usage_events")).toBe(eventsBefore + 1);
+		expect(await count("usage_events")).toBe(eventsBefore);
 		expect(await inspectSentimentCanaryRunState(RUN_CANARY_RACE)).toEqual({
-			analysis: { status: "failed", attempts: 1, observations: 0 },
+			analysis: { status: "pending_resolution", attempts: 1, observations: 0 },
 			pristine: false,
 		});
 	});
@@ -1381,7 +1634,7 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 	});
 });
 
-describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (grounded evidence)", () => {
+describe("IT-SNT-025 a rejected overall claim is repaired, not terminal (grounded evidence)", () => {
 	const TERMINAL_ANSWER = "Alpha settles claims slowly. Newco is fine. Sent Pipe is mentioned too.";
 	const terminalPayload = { ...payload, promptRunId: RUN_TERMINAL };
 	const usage = {
@@ -1453,70 +1706,70 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 			)
 		).rows[0];
 
-	it("one paid call: the analysis fails with the exact input hash and the bounded diagnostic, the charged cost is attributed once, nothing is observed", {
+	it("the misattributed overall becomes a repair target; the repaired candidate is verified and persisted; every paid answer is attributed once", {
 		timeout: 120_000,
 	}, async () => {
 		await insertRun(RUN_TERMINAL, PROMPT, { choices: [{ message: { content: TERMINAL_ANSWER } }] }, 5);
 		await runMentionBackfill({ apply: true, brandId: BRAND });
 		const before = (await failedEvents()).rows.length;
 		const calls = { n: 0 };
-		const outcome = await runSentimentJob(terminalPayload, { resolveProvider: () => withResolutionPhases(rejectingProvider(calls)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } });
-		expect(calls.n).toBe(1);
-		expect(outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "evidence-entity-unbound",
-			requestSent: true,
-			envelope: { generationId: "gen-terminal-01", usage: { costUsd: 0.020047 }, request },
-			diagnostic: {
-				stage: "evidence",
-				reason: "evidence-entity-unbound",
-				entityKey: ALPHA,
-				evidenceIndex: 0,
-				anchorId: "s0002",
-			},
+		const phases: string[] = [];
+		const repair = {
+			entities: [
+				{
+					key: ALPHA,
+					score: 50,
+					category: "neutral",
+					confidence: 0.9,
+					evidence: [{ anchorId: "s0001", polarity: "neutral" }],
+					aspects: [],
+				},
+			],
+		};
+		const outcome = await runSentimentJob(terminalPayload, {
+			resolveProvider: () =>
+				withResolutionPhases(rejectingProvider(calls), { repair, onPhase: (phase) => phases.push(phase) }),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
+		expect(calls.n).toBe(1);
+		expect(phases).toEqual(["classify", "repair", "verify"]);
+		expect(outcome).toMatchObject({ status: "classified", entities: 3, paidCalls: 3, repairs: 1, verified: true });
 		const entities = await loadDetectableEntities(BRAND, "historical");
 		const expectedHash = sentimentInputHash(
 			TERMINAL_ANSWER,
 			candidatesFromMentions(await loadMentions(RUN_TERMINAL), entities),
 		);
-		const failed = await row();
-		expect(failed).toMatchObject({
-			status: "failed",
-			input_hash: expectedHash,
-			error_code: "evidence-entity-unbound",
-			attempts: 1,
-		});
-		const message = failed.error_message ?? "";
-		const diagnosticJson = message.slice(message.indexOf(" diagnostic=") + " diagnostic=".length);
-		expect(
-			message.startsWith(
-				`validation evidence-entity-unbound (SentimentValidationError) via openrouter/${SENTIMENT_MODEL}`,
-			),
-		).toBe(true);
-		expect(JSON.parse(diagnosticJson)).toMatchObject({
-			stage: "evidence",
-			reason: "evidence-entity-unbound",
-			entityKey: ALPHA,
-			generationId: "gen-terminal-01",
-		});
-		expect(Buffer.byteLength(diagnosticJson, "utf8")).toBeLessThanOrEqual(512);
+		const completed = await row();
+		expect(completed).toMatchObject({ status: "completed", input_hash: expectedHash, error_code: null, attempts: 1 });
 		for (const forbidden of ["settles claims slowly", TERMINAL_ANSWER, "sk-or-", "Bearer"]) {
-			expect(JSON.stringify(failed)).not.toContain(forbidden);
+			expect(JSON.stringify(completed)).not.toContain(forbidden);
 		}
-		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_TERMINAL])).toBe(0);
-		const events = (await failedEvents()).rows.slice(before);
-		expect(events).toEqual([{ estimated_cost_usd: "0.020047", provider: "openrouter", model: SENTIMENT_MODEL }]);
+		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_TERMINAL])).toBe(3);
+		const ledger = await client.query<{ phase: string; outcome: string }>(
+			"SELECT t.phase, t.outcome FROM sentiment_provider_attempts t JOIN sentiment_analyses a ON a.id = t.analysis_id WHERE a.prompt_run_id = $1 ORDER BY t.ordinal",
+			[RUN_TERMINAL],
+		);
+		expect(ledger.rows).toEqual([
+			{ phase: "classify", outcome: "rejected" },
+			{ phase: "repair", outcome: "accepted" },
+			{ phase: "verify", outcome: "accepted" },
+		]);
+		// The rejected classification was paid and is attributed as a success event (an answer arrived); nothing failed.
+		expect((await failedEvents()).rows.slice(before)).toEqual([]);
 	});
 
-	it("the same input under the same versions is skipped without a claim or a request, by the job and by the enqueue inventory", {
+	it("the same input under the same versions is already complete: no claim, no request, not eligible for the enqueue inventory", {
 		timeout: 120_000,
 	}, async () => {
 		const calls = { n: 0 };
 		const before = await row();
-		expect(await runSentimentJob(terminalPayload, { resolveProvider: () => withResolutionPhases(rejectingProvider(calls)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toMatchObject({
-			status: "skipped",
-			reason: expect.stringContaining("terminal validation failure evidence-entity-unbound"),
+		expect(
+			await runSentimentJob(terminalPayload, {
+				resolveProvider: () => withResolutionPhases(rejectingProvider(calls)),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toEqual({
+			status: "already-completed",
 		});
 		expect(calls.n).toBe(0);
 		expect(await row()).toEqual(before);
@@ -1530,16 +1783,16 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 		// The brand carries many eligible runs from earlier tests; the limit must not stop the scan before this run.
 		const inventory = await runSentimentEnqueue({ enqueue: { limit: 100_000 }, sender, brandId: BRAND });
 		expect(inventory.limitReached).toBe(false);
-		expect(inventory.counts.terminalFailed).toBe(1);
+		expect(inventory.counts.terminalFailed).toBe(0);
 		expect(sent.length).toBe(inventory.counts.accepted);
 		expect(sent).not.toContain(RUN_TERMINAL);
 		expect(await row()).toEqual(before);
 	});
 
-	it("a transient provider failure keeps the retry path: the job throws, the failed row carries no input hash and the next attempt classifies", {
+	it("an allow-listed typed refusal keeps the retry path: the job throws, the parked row carries no input hash and the next attempt classifies", {
 		timeout: 120_000,
 	}, async () => {
-		// A changed answer is a new input: the terminal mark no longer applies.
+		// A changed answer is a new input and a new resolution instance.
 		await client.query("UPDATE prompt_runs SET raw_output = $2 WHERE id = $1", [
 			RUN_TERMINAL,
 			JSON.stringify({ choices: [{ message: { content: `${TERMINAL_ANSWER} Updated.` } }] }),
@@ -1548,15 +1801,33 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 			...fakeProvider(),
 			id: "openrouter",
 			runStructuredResearch: async () => {
-				throw new Error("OpenRouter API error (503): upstream unavailable");
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): upstream overloaded",
+				});
 			},
 		} as unknown as Provider;
-		await expect(runSentimentJob(terminalPayload, { resolveProvider: () => withResolutionPhases(flaky), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).rejects.toMatchObject({
+		await expect(
+			runSentimentJob(terminalPayload, {
+				resolveProvider: () => withResolutionPhases(flaky),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).rejects.toMatchObject({
 			name: "SentimentJobError",
 			code: "provider",
 			httpStatus: 503,
 		});
-		expect(await row()).toMatchObject({ status: "failed", input_hash: null, error_code: "provider", attempts: 2 });
+		expect(await row()).toMatchObject({
+			status: "pending_resolution",
+			input_hash: null,
+			error_code: "provider",
+			attempts: 2,
+		});
 		const calls = { n: 0 };
 		const good = {
 			...fakeProvider(),
@@ -1578,12 +1849,22 @@ describe("IT-SNT-025 a rejected paid answer is terminal for its exact input (gro
 				};
 			},
 		} as unknown as Provider;
-		expect(await runSentimentJob(terminalPayload, { resolveProvider: () => withResolutionPhases(good), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toMatchObject({
+		expect(
+			await runSentimentJob(terminalPayload, {
+				resolveProvider: () => withResolutionPhases(good),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toMatchObject({
 			status: "classified",
 		});
 		expect(calls.n).toBe(1);
 		expect(await row()).toMatchObject({ status: "completed", error_code: null, attempts: 3 });
-		expect(await runSentimentJob(terminalPayload, { resolveProvider: () => withResolutionPhases(rejectingProvider(calls)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toEqual({
+		expect(
+			await runSentimentJob(terminalPayload, {
+				resolveProvider: () => withResolutionPhases(rejectingProvider(calls)),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toEqual({
 			status: "already-completed",
 		});
 	});
@@ -1600,7 +1881,13 @@ describe("IT-SNT-012 prompt deletion with a full sentiment graph (B6)", () => {
 		await runMentionBackfill({ apply: true, brandId: BRAND });
 		await ensureAnalysis({ promptRunId: RUN_DELETE, brandId: BRAND });
 		expect(
-			await runSentimentJob({ ...payload, promptRunId: RUN_DELETE }, { resolveProvider: () => withResolutionPhases(fakeProvider()), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } }),
+			await runSentimentJob(
+				{ ...payload, promptRunId: RUN_DELETE },
+				{
+					resolveProvider: () => withResolutionPhases(fakeProvider()),
+					resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+				},
+			),
 		).toMatchObject({ status: "classified", entities: 3 });
 		expect(await count("sentiment_detections", "prompt_run_id = $1", [RUN_DELETE])).toBe(1);
 		expect(await count("prompt_run_entity_mentions", "prompt_run_id = $1", [RUN_DELETE])).toBe(3);

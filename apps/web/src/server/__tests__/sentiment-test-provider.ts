@@ -29,7 +29,14 @@ export function withResolutionPhases(
 				object: opts.schema.parse(answer),
 				modelVersion: "openai/gpt-5-mini",
 				generationId: `gen-${phase}-${Math.random().toString(36).slice(2, 10)}`,
-				usage: { inputTokens: 100, outputTokens: 20, reasoningTokens: 0, costUsd: 0.001, webSearchRequests: 0, webSearchRequestsConflict: false },
+				usage: {
+					inputTokens: 100,
+					outputTokens: 20,
+					reasoningTokens: 0,
+					costUsd: 0.001,
+					webSearchRequests: 0,
+					webSearchRequestsConflict: false,
+				},
 			};
 		},
 	} as unknown as Provider;
