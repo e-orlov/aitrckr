@@ -109,39 +109,32 @@ export class StructuredResearchResponseError extends Error {
 }
 
 /**
- * Canonical classification of a non-2xx structured-research response. Derived
- * by the provider adapter from the HTTP status and the structured error body;
- * `unmapped` is everything the adapter could not classify with certainty and
- * is never treated as safe to repeat.
+ * The typed error code the provider itself put on a refusal — for OpenRouter
+ * the canonical `error.metadata.error_type` (`rate_limit_exceeded`,
+ * `provider_overloaded`, `provider_unavailable`, `authentication`,
+ * `payment_required`, `invalid_request`, `server`, `timeout`, `unmapped`, …).
+ * Carried verbatim; never derived from the HTTP status, the message text or
+ * any raw upstream payload. Null when the response carried no well-formed
+ * typed code, which no consumer may treat as safe to repeat.
  */
-export type StructuredResearchErrorType =
-	| "rate_limit_exceeded"
-	| "provider_overloaded"
-	| "provider_unavailable"
-	| "bad_request"
-	| "unauthorized"
-	| "insufficient_credits"
-	| "forbidden"
-	| "not_found"
-	| "request_timeout"
-	| "conflict"
-	| "unprocessable"
-	| "server"
-	| "timeout"
-	| "unmapped";
+export type StructuredResearchErrorType = string;
+
+/** The shape a provider-supplied typed code must have to be carried at all. */
+export const STRUCTURED_RESEARCH_ERROR_TYPE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 
 /**
  * The provider refused the structured-research request with a non-2xx
  * response. `structured` says the body was the provider's own error envelope
- * (so the status and type describe a refusal the provider itself reported);
- * `carriesOutput` says the body nevertheless carried a generation id, usage,
- * cost, content or partial output — such a response was not a free refusal.
- * Only the safe fields land here; the message never includes a credential.
+ * (so the status describes a refusal the provider itself reported);
+ * `errorType` is the provider's own typed code or null; `carriesOutput` says
+ * the body nevertheless carried a generation id, usage, cost, content or
+ * partial output — such a response was not a free refusal. Only the safe
+ * fields land here; the message never includes a credential.
  */
 export class StructuredResearchRequestError extends Error {
 	readonly provider: string;
 	readonly httpStatus: number;
-	readonly errorType: StructuredResearchErrorType;
+	readonly errorType: StructuredResearchErrorType | null;
 	readonly structured: boolean;
 	readonly carriesOutput: boolean;
 	/** Parsed `Retry-After`, when the response carried one. */
@@ -150,7 +143,7 @@ export class StructuredResearchRequestError extends Error {
 	constructor(args: {
 		provider: string;
 		httpStatus: number;
-		errorType: StructuredResearchErrorType;
+		errorType: StructuredResearchErrorType | null;
 		structured: boolean;
 		carriesOutput: boolean;
 		retryAfterMs: number | null;

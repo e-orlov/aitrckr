@@ -8,7 +8,7 @@ import {
 	type Provider,
 	type ProviderOptions,
 	type ScrapeResult,
-	type StructuredResearchErrorType,
+	STRUCTURED_RESEARCH_ERROR_TYPE_PATTERN,
 	type StructuredResearchOptions,
 	StructuredResearchRequestError,
 	type StructuredResearchRequestSummary,
@@ -73,48 +73,17 @@ function bareModelSlug(modelSlug: string): string {
 }
 
 /**
- * Canonical type of a non-2xx OpenRouter response. OpenRouter reports errors
- * as `{ error: { code, message, metadata? } }`; the type is decided from the
- * status and, for the two statuses that mix refusals of different nature, the
- * error text OpenRouter uses for them. Anything that does not match exactly is
- * `unmapped` and is never treated as a safe refusal downstream.
+ * OpenRouter's canonical typed code, `error.metadata.error_type`, which its
+ * documentation designates as the field to switch on programmatically instead
+ * of the HTTP status. It is the only source of a refusal's type: the status,
+ * the message, `metadata.raw` and `metadata.provider_code` never stand in for
+ * it. Absent or malformed → null.
  */
-function classifyOpenRouterError(status: number, error: { message: string; raw: string }): StructuredResearchErrorType {
-	const text = `${error.message} ${error.raw}`;
-	switch (status) {
-		case 400:
-			return "bad_request";
-		case 401:
-			return "unauthorized";
-		case 402:
-			return "insufficient_credits";
-		case 403:
-			return "forbidden";
-		case 404:
-			return "not_found";
-		case 408:
-			return "request_timeout";
-		case 409:
-			return "conflict";
-		case 422:
-			return "unprocessable";
-		case 429:
-			return /rate limit/i.test(error.message) ? "rate_limit_exceeded" : "unmapped";
-		case 500:
-		case 502:
-		case 504:
-		case 529:
-			return "server";
-		case 503:
-			if (/overloaded/i.test(text)) return "provider_overloaded";
-			return /no available model provider|routing requirements/i.test(error.message)
-				? "provider_unavailable"
-				: "unmapped";
-		case 524:
-			return "timeout";
-		default:
-			return "unmapped";
-	}
+function canonicalErrorType(error: { metadata?: unknown }): string | null {
+	const metadata = error.metadata;
+	if (metadata === null || typeof metadata !== "object") return null;
+	const type = (metadata as { error_type?: unknown }).error_type;
+	return typeof type === "string" && STRUCTURED_RESEARCH_ERROR_TYPE_PATTERN.test(type) ? type : null;
 }
 
 function retryAfterMs(res: { headers?: { get?(name: string): string | null } }): number | null {
@@ -128,10 +97,11 @@ function retryAfterMs(res: { headers?: { get?(name: string): string | null } }):
 
 /**
  * The typed refusal for a non-2xx structured-research response. The body is
- * read once: a structured OpenRouter error envelope yields the canonical type;
- * a body that also carries a generation id, usage, choices or content is
- * flagged, because such a response was not a free refusal. The message keeps
- * the status and the body text (never the credential) for logs.
+ * read once: a structured OpenRouter error envelope may carry the canonical
+ * `error.metadata.error_type`; a body that also carries a generation id,
+ * usage, choices or content is flagged, because such a response was not a
+ * free refusal. The message keeps the status and the body text (never the
+ * credential) for logs.
  */
 async function structuredRequestError(res: Response): Promise<StructuredResearchRequestError> {
 	const status = res.status;
@@ -145,7 +115,6 @@ async function structuredRequestError(res: Response): Promise<StructuredResearch
 	const error = body?.error;
 	const structured =
 		error !== null && typeof error === "object" && typeof error.message === "string" && typeof error.code === "number";
-	const raw = typeof error?.metadata?.raw === "string" ? error.metadata.raw : "";
 	const carriesOutput =
 		typeof body?.id === "string" ||
 		(body?.usage !== undefined && body?.usage !== null) ||
@@ -154,7 +123,7 @@ async function structuredRequestError(res: Response): Promise<StructuredResearch
 	return new StructuredResearchRequestError({
 		provider: "openrouter",
 		httpStatus: status,
-		errorType: structured ? classifyOpenRouterError(status, { message: error.message, raw }) : "unmapped",
+		errorType: structured ? canonicalErrorType(error) : null,
 		structured,
 		carriesOutput,
 		retryAfterMs: retryAfterMs(res),
