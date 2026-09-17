@@ -639,9 +639,9 @@ export const sentimentAspectObservations = pgTable(
  * analysis, which completes on the grounded claims, and this row records that
  * it was proposed. Identifiers and the allow-listed validation code only —
  * no text of the answer, the prompt or the provider payload ever lands here.
- * Internal: the Sentiment page never reads it. One row per distinct
- * (analysis, entity, aspect, code); rows are replaced with the observations
- * of their analysis.
+ * Internal: the Sentiment page never reads it. At most one row per
+ * (analysis, entity, aspect) — an aspect is dropped for one reason — enforced
+ * by the database; rows are replaced with the observations of their analysis.
  */
 export const sentimentFilteredClaims = pgTable(
 	"sentiment_filtered_claims",
@@ -660,11 +660,10 @@ export const sentimentFilteredClaims = pgTable(
 		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 	},
 	(table) => ({
-		analysisClaimUnique: uniqueIndex("sentiment_filtered_claims_analysis_claim_idx").on(
+		analysisAspectUnique: uniqueIndex("sentiment_filtered_claims_analysis_aspect_idx").on(
 			table.analysisId,
 			table.entityKey,
 			table.aspectKey,
-			table.validationCode,
 		),
 		aspectKeyCheck: check(
 			"sentiment_filtered_claims_aspect_key_check",

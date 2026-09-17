@@ -22,6 +22,8 @@ import { isValidationCode } from "./diagnostics";
 import { ClaimLostError } from "./errors";
 import { extractAnswerBody } from "./text";
 import {
+	compareSentimentEntities,
+	SENTIMENT_ASPECT_KEYS,
 	SENTIMENT_ASPECTS,
 	SENTIMENT_CLAIM_TIMEOUT_SECONDS,
 	SENTIMENT_CLASSIFIER_VERSION,
@@ -30,6 +32,7 @@ import {
 	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
+	type SentimentAspectKey,
 	type SentimentCandidate,
 	type SentimentDetectionStatus,
 	sortSentimentEntities,
@@ -533,11 +536,16 @@ export async function persistClassification(args: {
 				);
 			}
 		}
+		// One audit row per (entity, aspect) — an aspect is dropped for exactly one
+		// reason — in the canonical entity order and the taxonomy's aspect order, so
+		// two databases persisting the same classification hold identical rows.
 		const audit = new Map<string, typeof sentimentFilteredClaims.$inferInsert>();
 		for (const claim of args.classification.filteredClaims) {
 			const mention = mentionByKey.get(claim.entityKey);
 			if (!mention) throw new Error(`filtered claim for entity "${claim.entityKey}" has no mention row`);
-			audit.set(`${claim.entityKey}|${claim.aspectKey}|${claim.code}`, {
+			const identity = `${claim.entityKey}|${claim.aspectKey}`;
+			if (audit.has(identity)) throw new Error(`filtered claim for "${identity}" reported twice`);
+			audit.set(identity, {
 				analysisId: args.claim.analysisId,
 				entityType: mention.entityType,
 				entityKey: mention.key,
@@ -547,7 +555,16 @@ export async function persistClassification(args: {
 				anchorIds: claim.anchorIds,
 			});
 		}
-		if (audit.size > 0) await tx.insert(sentimentFilteredClaims).values([...audit.values()]);
+		const rows = [...audit.values()].sort(
+			(a, b) =>
+				compareSentimentEntities(
+					{ entityType: a.entityType as "brand" | "competitor", key: a.entityKey },
+					{ entityType: b.entityType as "brand" | "competitor", key: b.entityKey },
+				) ||
+				SENTIMENT_ASPECT_KEYS.indexOf(a.aspectKey as SentimentAspectKey) -
+					SENTIMENT_ASPECT_KEYS.indexOf(b.aspectKey as SentimentAspectKey),
+		);
+		for (const row of rows) await tx.insert(sentimentFilteredClaims).values(row);
 	});
 }
 

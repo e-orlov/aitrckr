@@ -1,5 +1,5 @@
 {
-  "id": "1448f158-054d-4b92-a25f-304fb2a6ae8a",
+  "id": "86d66917-485f-40c7-9439-95f216b9ccb7",
   "prevId": "5283aae9-afc0-49fc-84e5-b994a92d973a",
   "version": "7",
   "dialect": "postgresql",
@@ -1855,8 +1855,8 @@
         }
       },
       "indexes": {
-        "sentiment_filtered_claims_analysis_claim_idx": {
-          "name": "sentiment_filtered_claims_analysis_claim_idx",
+        "sentiment_filtered_claims_analysis_aspect_idx": {
+          "name": "sentiment_filtered_claims_analysis_aspect_idx",
           "columns": [
             {
               "expression": "analysis_id",
@@ -1872,12 +1872,6 @@
             },
             {
               "expression": "aspect_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "validation_code",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

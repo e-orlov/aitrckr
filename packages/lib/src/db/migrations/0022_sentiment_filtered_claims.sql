@@ -15,4 +15,4 @@ CREATE TABLE "sentiment_filtered_claims" (
 --> statement-breakpoint
 ALTER TABLE "sentiment_filtered_claims" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "sentiment_filtered_claims" ADD CONSTRAINT "sentiment_filtered_claims_analysis_id_sentiment_analyses_id_fk" FOREIGN KEY ("analysis_id") REFERENCES "public"."sentiment_analyses"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE UNIQUE INDEX "sentiment_filtered_claims_analysis_claim_idx" ON "sentiment_filtered_claims" USING btree ("analysis_id","entity_key","aspect_key","validation_code");
+CREATE UNIQUE INDEX "sentiment_filtered_claims_analysis_aspect_idx" ON "sentiment_filtered_claims" USING btree ("analysis_id","entity_key","aspect_key");
