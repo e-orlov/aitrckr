@@ -150,6 +150,12 @@ export interface SentimentJobDeps extends SentimentClassifierDeps {
 	finishProviderAttempt?: typeof finishProviderAttempt;
 	loadProviderAttempts?: typeof loadProviderAttempts;
 	loadResolutionCase?: typeof loadResolutionCase;
+	/**
+	 * Queue an idempotent re-invocation of this run's job (the worker passes the
+	 * singleton-keyed send). Fired by a worker that lost its claim after its paid
+	 * answer's evidence was committed, so the parked case can resume from it.
+	 */
+	enqueueResume?: (promptRunId: string) => Promise<unknown>;
 	/** Runs the settlement of one paid answer (ledger row, usage event, case budget) as one transaction. */
 	transaction?: <T>(fn: (tx: Executor) => Promise<T>) => Promise<T>;
 	/** Overrides of the automatic budget and backoff (tests); production uses `RESOLUTION_POLICY`. */
@@ -341,9 +347,25 @@ async function settlePaidAnswer(
 			}
 		}),
 	);
-	const charged = await retryDbOnly(w, attempt.ordinal, () => charge(w.claim.analysisId, w.claim));
+	let charged: Awaited<ReturnType<typeof charge>>;
+	try {
+		charged = await retryDbOnly(w, attempt.ordinal, () => charge(w.claim.analysisId, w.claim));
+	} catch (error) {
+		// The claim is gone but the evidence is durable: wake the run so its current owner can resume from it.
+		if (error instanceof ClaimLostError) await wakeResume(w);
+		throw error;
+	}
 	w.paidCalls = charged.automatedProviderCalls;
 	w.costUsd = charged.totalActualCostUsd;
+}
+
+async function wakeResume(w: Workflow): Promise<void> {
+	if (!w.deps.enqueueResume) return;
+	try {
+		await w.deps.enqueueResume(w.run.id);
+	} catch (error) {
+		console.error("sentiment resume wake-up failed:", error instanceof Error ? error.name : typeof error);
+	}
 }
 
 /**
@@ -796,6 +818,44 @@ function reviewOutcome(kase: StoredResolutionCase, attemptOrdinal = 0): Sentimen
 const isParked = (kase: StoredResolutionCase) =>
 	kase.status === "awaiting_review" || kase.status === "awaiting_reconciliation";
 
+type StoredAttempt = Awaited<ReturnType<typeof loadProviderAttempts>>[number];
+
+/**
+ * The durable evidence that lets a case parked for an unknown provider outcome
+ * resume without repeating the call: exactly `awaiting_reconciliation` for
+ * `unknown-provider-outcome`; the latest classify/repair attempt of the same
+ * instance, built for the frozen current input, `accepted`, carrying a
+ * candidate that still passes the runtime schema; no `sending` attempt
+ * anywhere on the analysis. Verdicts, refusals, aborts, other instances or
+ * inputs and malformed candidates never qualify.
+ */
+function resumableEvidence(
+	kase: StoredResolutionCase,
+	inputHash: string,
+	attempts: StoredAttempt[],
+): { attempt: StoredAttempt; candidate: SentimentClassificationResult } | null {
+	if (kase.status !== "awaiting_reconciliation" || kase.reviewReason !== "unknown-provider-outcome") return null;
+	if (kase.inputHash !== inputHash) return null;
+	if (attempts.some((a) => a.outcome === "sending")) return null;
+	const latest = attempts
+		.filter((a) => a.instanceId === kase.instanceId && (a.phase === "classify" || a.phase === "repair"))
+		.at(-1);
+	if (!latest || latest.outcome !== "accepted" || latest.inputHash !== inputHash) return null;
+	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
+	return parsed.success ? { attempt: latest, candidate: parsed.data } : null;
+}
+
+/** What the ledger says the instance has paid for: answered attempts and their charged cost. */
+function ledgerTotals(kase: StoredResolutionCase, attempts: StoredAttempt[]): { calls: number; costUsd: number } {
+	const answered = attempts.filter(
+		(a) => a.instanceId === kase.instanceId && (a.outcome === "accepted" || a.outcome === "rejected"),
+	);
+	return {
+		calls: answered.length,
+		costUsd: answered.reduce((sum, a) => sum + Number(a.actualCostUsd ?? 0), 0),
+	};
+}
+
 async function classifyAndPersist(
 	run: StoredRunForSentiment & { answerBody: string },
 	analysisClaim: AnalysisClaim,
@@ -807,18 +867,51 @@ async function classifyAndPersist(
 ): Promise<SentimentJobOutcome> {
 	const policy: ResolutionPolicy = { ...RESOLUTION_POLICY, ...deps.resolutionPolicy };
 	// A case of another input rotates to a new instance here (fenced on the claim); the same input's case is reused.
-	const kase = await (deps.ensureResolutionCase ?? ensureResolutionCase)(
+	let kase = await (deps.ensureResolutionCase ?? ensureResolutionCase)(
 		analysisClaim.analysisId,
 		inputHash,
 		analysisClaim,
 	);
 	const claim: ResolutionOwner = { ...analysisClaim, instanceId: kase.instanceId };
-	if (kase.status === "resolved" || isParked(kase)) {
+	if (kase.status === "resolved") {
 		// Decided between the pre-claim check and the claim (a racing owner): hand the row back untouched.
 		await park(claim, null, deps);
-		return kase.status === "resolved" ? { status: "already-completed" } : reviewOutcome(kase);
+		return { status: "already-completed" };
 	}
 	const attempts = await (deps.loadProviderAttempts ?? loadProviderAttempts)(claim.analysisId);
+	if (isParked(kase)) {
+		// Re-checked under the new claim: only exact same-instance evidence may move a parked case, and only its new owner.
+		const evidence = resumableEvidence(kase, inputHash, attempts);
+		if (!evidence) {
+			await park(claim, null, deps);
+			return reviewOutcome(kase);
+		}
+		const ledger = ledgerTotals(kase, attempts);
+		if (kase.automatedProviderCalls > ledger.calls || Number(kase.totalActualCostUsd) > ledger.costUsd + 1e-9) {
+			// The case claims more than its ledger shows: never lower a counter by guessing; leave it parked and say so.
+			console.error(
+				`sentiment budget drift on analysis ${claim.analysisId}: case ${kase.automatedProviderCalls}/${kase.totalActualCostUsd} vs ledger ${ledger.calls}/${ledger.costUsd.toFixed(6)}`,
+			);
+			await park(claim, null, deps);
+			return reviewOutcome(kase, evidence.attempt.ordinal);
+		}
+		// The late call the previous owner never got to charge is counted before any budget decision.
+		const charged = await (deps.chargeResolutionCase ?? chargeResolutionCase)(claim.analysisId, claim);
+		const resumed = {
+			status: "verifying" as const,
+			provisionalResult: evidence.candidate,
+			unresolvedTargets: [],
+			reviewReason: null,
+			nextAttemptAt: null,
+		};
+		await (deps.updateResolutionCase ?? updateResolutionCase)(claim.analysisId, resumed, claim);
+		kase = {
+			...kase,
+			...resumed,
+			automatedProviderCalls: charged.automatedProviderCalls,
+			totalActualCostUsd: charged.totalActualCostUsd.toFixed(6),
+		};
+	}
 	const dangling = attempts.find((a) => a.outcome === "sending");
 	if (dangling) {
 		await (deps.updateResolutionCase ?? updateResolutionCase)(
@@ -980,5 +1073,8 @@ async function settledWithoutClaim(
 	const kase = await (deps.loadResolutionCase ?? loadResolutionCase)(analysis.id);
 	if (!kase || kase.inputHash !== inputHash) return null;
 	if (kase.status === "resolved") return { status: "already-completed" };
-	return isParked(kase) ? reviewOutcome(kase) : null;
+	if (!isParked(kase)) return null;
+	// A parked case with resumable evidence of its own is claimed and resumed; the claim re-checks the evidence.
+	const attempts = await (deps.loadProviderAttempts ?? loadProviderAttempts)(analysis.id);
+	return resumableEvidence(kase, inputHash, attempts) ? null : reviewOutcome(kase);
 }

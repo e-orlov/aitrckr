@@ -1,5 +1,6 @@
-import { runSentimentJob, type SentimentJobData } from "@workspace/lib/sentiment";
+import { runSentimentJob, type SentimentJobData, sendSentimentJob } from "@workspace/lib/sentiment";
 import type { Job } from "pg-boss";
+import boss from "../boss";
 
 /**
  * Sentiment classification for one stored prompt run. All semantics (payload
@@ -16,7 +17,13 @@ import type { Job } from "pg-boss";
 export async function classifySentimentJob(jobs: Job<SentimentJobData>[]): Promise<void> {
 	for (const job of jobs) {
 		const runId = job.data?.promptRunId;
-		const outcome = await runSentimentJob(job.data, {}, { signal: job.signal });
+		const outcome = await runSentimentJob(
+			job.data,
+			// A worker that lost its claim after its paid answer was recorded re-queues the run once; the exclusive
+			// queue's singleton key deduplicates it against any job already queued or active for the run.
+			{ enqueueResume: (promptRunId) => sendSentimentJob(boss, promptRunId) },
+			{ signal: job.signal },
+		);
 		switch (outcome.status) {
 			case "classified":
 				console.log(
@@ -41,6 +48,14 @@ export async function classifySentimentJob(jobs: Job<SentimentJobData>[]): Promi
 				break;
 			case "skipped":
 				console.log(`[classify-sentiment] run ${runId}: skipped (${outcome.reason})`);
+				break;
+			case "awaiting-review":
+				console.warn(
+					`[classify-sentiment] run ${runId}: awaiting review (${outcome.reason}), paid=${outcome.paidCalls} cost=${outcome.costUsd.toFixed(6)}`,
+				);
+				break;
+			case "awaiting-reconciliation":
+				console.warn(`[classify-sentiment] run ${runId}: awaiting reconciliation of attempt ${outcome.attemptOrdinal}`);
 				break;
 			case "terminal-validation-failure":
 				console.warn(

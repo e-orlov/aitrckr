@@ -239,10 +239,7 @@ describe("A2B-1 a parked case resumes from its own late classification candidate
 			total_actual_cost_usd: "0.000000",
 		});
 
-		const resumed = resumeWith(run(1), [
-			{ phase: "classify", answer: { entities: [brandOk] } },
-			{ phase: "verify", answer: ACCEPT },
-		]);
+		const resumed = resumeWith(run(1), [{ phase: "verify", answer: ACCEPT }]);
 		expect(await resumed.outcome).toMatchObject({ status: "classified", paidCalls: 2, verified: true });
 		expect(phases(resumed.script)).toEqual(["verify"]);
 		expect((await attemptsOf(run(1))).map((t) => `${t.phase}:${t.outcome}`)).toEqual([
@@ -350,10 +347,7 @@ describe("A2B-5 a stored repair candidate continues to verification without anot
 			"classify:rejected",
 			"repair:accepted",
 		]);
-		const resumed = resumeWith(run(9), [
-			{ phase: "repair", answer: { entities: [brandOk] } },
-			{ phase: "verify", answer: ACCEPT },
-		]);
+		const resumed = resumeWith(run(9), [{ phase: "verify", answer: ACCEPT }]);
 		expect(await resumed.outcome).toMatchObject({ status: "classified", paidCalls: 3 });
 		expect(phases(resumed.script)).toEqual(["verify"]);
 		expect(await caseOf(run(9))).toMatchObject({
