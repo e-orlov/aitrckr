@@ -17,6 +17,7 @@ import {
 	validateClassification,
 	validateClassificationDetailed,
 	validateSentimentResult,
+	validateSentimentResultDetailed,
 } from "../classifier";
 import { GOLDEN_V4_CASES } from "../golden/v4-cases";
 import { runSentimentJob, type SentimentJobDeps } from "../job";
@@ -147,7 +148,7 @@ describe("V5-RED-002 run 9c472bf5 — the checklist price aspect is dropped, the
 	});
 
 	it("validates to a completed positive verdict with zero aspects and one filtered claim", () => {
-		const { entities, filteredClaims } = validateClassificationDetailed(checklist.result, {
+		const { entities, filteredClaims } = validateSentimentResultDetailed(checklist.result, {
 			answerBody: checklist.answer,
 			candidates: checklist.candidates,
 		});
@@ -167,7 +168,7 @@ describe("V5-RED-003 runs 996deaca / 24fda1eb — a defective mandatory overall 
 
 	it("entity swap: terminal evidence-entity-unbound, nothing validated", () => {
 		const error = rejection(() =>
-			validateClassificationDetailed(swap.result, { answerBody: swap.answer, candidates: swap.candidates }),
+			validateSentimentResultDetailed(swap.result, { answerBody: swap.answer, candidates: swap.candidates }),
 		);
 		expect(error.code).toBe("evidence-entity-unbound");
 		expect(error.diagnostic?.aspectKey).toBeNull();
@@ -183,14 +184,14 @@ describe("V5-RED-003 runs 996deaca / 24fda1eb — a defective mandatory overall 
 			})),
 		};
 		const error = rejection(() =>
-			validateClassificationDetailed(withAspects, { answerBody: swap.answer, candidates: swap.candidates }),
+			validateSentimentResultDetailed(withAspects, { answerBody: swap.answer, candidates: swap.candidates }),
 		);
 		expect(error.code).toBe("evidence-entity-unbound");
 	});
 
 	it("foreign-only overall evidence: terminal", () => {
 		const error = rejection(() =>
-			validateClassificationDetailed(foreign.result, { answerBody: foreign.answer, candidates: foreign.candidates }),
+			validateSentimentResultDetailed(foreign.result, { answerBody: foreign.answer, candidates: foreign.candidates }),
 		);
 		expect(error.code).toBe("evidence-entity-unbound");
 	});
@@ -294,8 +295,17 @@ describe("V5-RED-005 the aspect-local allow-list is closed and fails closed", ()
 
 	it.each([
 		["evidence-unknown-anchor", [{ key: "price", ...positive(70, "s0042") }]],
-		["duplicate-aspect", [{ key: "price", ...positive(70, "s0001") }, { key: "price", ...positive(70, "s0001") }]],
-		["score-category", [{ key: "price", category: "positive", score: 20, confidence: 0.9, evidence: cite("positive", "s0001") }]],
+		[
+			"duplicate-aspect",
+			[
+				{ key: "price", ...positive(70, "s0001") },
+				{ key: "price", ...positive(70, "s0001") },
+			],
+		],
+		[
+			"score-category",
+			[{ key: "price", category: "positive", score: 20, confidence: 0.9, evidence: cite("positive", "s0001") }],
+		],
 	])("a code outside the allow-list on an aspect (%s) stays terminal", (code, aspects) => {
 		const error = rejection(() =>
 			validateClassificationDetailed(
@@ -399,7 +409,10 @@ describe("V5-RED-008 job semantics of a completed analysis with a filtered claim
 		const persisted: unknown[] = [];
 		const deps: SentimentJobDeps = {
 			loadRun: vi.fn(async () => run),
-			loadEntities: vi.fn(async () => [{ key: "brand", entityType: "brand", competitorId: null, name: "ARAG", aliases: [], terms: [] }] as never),
+			loadEntities: vi.fn(
+				async () =>
+					[{ key: "brand", entityType: "brand", competitorId: null, name: "ARAG", aliases: [], terms: [] }] as never,
+			),
 			loadDetection: vi.fn(async () => ({ status: "mentions", mentionCount: 1 }) as never),
 			loadMentions: vi.fn(async () => mentions),
 			ensureAnalysis: vi.fn(
@@ -412,7 +425,11 @@ describe("V5-RED-008 job semantics of a completed analysis with a filtered claim
 						inputHash: null,
 					}) as never,
 			),
-			claimAnalysis: vi.fn(async () => ({ claimed: true as const, attempts: 1, claim: { analysisId: "a1", generation: 1 } })),
+			claimAnalysis: vi.fn(async () => ({
+				claimed: true as const,
+				attempts: 1,
+				claim: { analysisId: "a1", generation: 1 },
+			})),
 			markAnalysis: vi.fn(async (_claim: unknown, patch: unknown) => {
 				marks.push(patch);
 				return true;
@@ -426,7 +443,11 @@ describe("V5-RED-008 job semantics of a completed analysis with a filtered claim
 			}),
 		};
 		const outcome = await runSentimentJob(
-			{ promptRunId: run.id, classifierVersion: SENTIMENT_CLASSIFIER_VERSION, taxonomyVersion: SENTIMENT_TAXONOMY_VERSION },
+			{
+				promptRunId: run.id,
+				classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
+				taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+			},
 			deps,
 		);
 		expect(outcome).toEqual({

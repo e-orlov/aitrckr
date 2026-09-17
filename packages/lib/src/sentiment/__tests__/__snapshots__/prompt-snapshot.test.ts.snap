@@ -473,7 +473,8 @@ Grounding — evaluate one exact candidate at a time and cite only segments that
 - A segment is evidence for a candidate only when it names that candidate (name or alias) or unmistakably continues a sentence, list or table row that names it. A segment that names a different candidate is never evidence for this one, even if it appears in the same paragraph or table.
 - Never exchange evidence between the rows or columns of a comparison table: the row or cell that describes candidate B says nothing about candidate A.
 - A segment that names no candidate at all (a general checklist, a generic tip, a definition, a heading) cannot carry a verdict by itself; cite it only next to a segment that names the candidate, and only when it clearly continues that candidate's description. Bullets directly under a product title that names the candidate, and the paragraph that directly answers a one-line question naming the candidate, count as continuing it; bullets under a generic label ("Advantages", "Disadvantages", "Conclusion", "Check before signing") do not.
-- Aspects are optional. When an aspect has no segment that names the candidate or continues such a segment, leave the aspect out instead of supporting it with generic bullets; an omitted aspect is correct, an aspect resting on generic text is a defect.
+- Aspects are optional findings, not a checklist: never return an aspect for every taxonomy key. Return an aspect only when a segment that names the candidate (or continues such a segment) explicitly evaluates that aspect; when no such segment exists, leave the aspect out. An omitted aspect means "considered, not supported by this text" and is the correct answer; an aspect resting on a generic checklist, a general recommendation, a statistic or an unevaluated description is a defect and will be discarded.
+- Never fill a missing aspect with a "neutral" placeholder: a "neutral" aspect is only for a segment that names the candidate and describes that aspect factually without evaluating it.
 - If a candidate is only named in a list of examples, a pass-through mention or an instruction, its verdict is "neutral" with that segment as the citation.
 
 Score each entity on 0..100 for how the ANSWER portrays it:
@@ -492,7 +493,7 @@ Rules:
 - Different entities in the same answer may have different sentiment; repeated mentions of one entity are one observation.
 - Confidence is 0..1 for how unambiguous the evidence is.
 
-Aspects: additionally rate the entity on each aspect the ANSWER explicitly evaluates for it, using the canonical keys below (map synonyms to the canonical key; do not invent aspects). An entity can be "mixed" overall while an aspect is clearly positive or negative.
+Aspects: additionally rate the entity only on the aspects the ANSWER explicitly evaluates for it, using the canonical keys below (map synonyms to the canonical key; do not invent aspects). The aspect list may be empty; an entity can be "mixed" overall while an aspect is clearly positive or negative.
 - "price" (Price): Cost, premiums, fees, value for money, discounts, price increases. Synonyms: cost, costs, premium, premiums, fee, fees, value, pricing, preis, beitrag, kosten, tarif.
 - "coverage" (Coverage): What is insured or included, exclusions, limits, waiting periods, scope of protection. Synonyms: scope, protection, included, exclusions, limits, deckung, leistung, leistungsumfang, schutz, wartezeit.
 - "service" (Service): Customer support, claims handling, responsiveness, helpdesk, digital tools, advice quality. Synonyms: support, customer service, claims, helpdesk, hotline, beratung, kundenservice, schadenabwicklung, erreichbarkeit.
@@ -526,4 +527,4 @@ ANSWER (segments; cite by id):
 """"
 `;
 
-exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"347c17d3e8a9fe2b930f488f077014d5e345209d08ccd9f12c3bbd266810c38e"`;
+exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"660c844f87648e9ae83f5a975f4cd56b9525887707f20b59794e03726e9d2c52"`;

@@ -47,16 +47,24 @@ export {
 	sentimentCanaryInputDigests,
 } from "./canary";
 export {
+	ASPECT_LOCAL_VALIDATION_CODES,
+	type AspectLocalValidationCode,
 	classifySentiment,
+	countFilteredClaimCodes,
+	type FilteredClaim,
+	isAspectLocalValidationCode,
 	SENTIMENT_MAX_OUTPUT_TOKENS,
 	type SentimentClassification,
 	type SentimentClassifierDeps,
 	SentimentValidationError,
 	sentimentInputHash,
 	type ValidatedAspect,
+	type ValidatedClassification,
 	type ValidatedEntitySentiment,
 	validateClassification,
+	validateClassificationDetailed,
 	validateSentimentResult,
+	validateSentimentResultDetailed,
 } from "./classifier";
 export {
 	brandEntity,

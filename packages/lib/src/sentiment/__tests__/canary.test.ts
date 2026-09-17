@@ -639,6 +639,8 @@ describe("canary verdict after the one call", () => {
 			usage: goodUsage,
 			request: goodRequest,
 			generationId: "gen-good-001",
+			filteredClaimCount: 0,
+			filteredClaimCodes: {},
 		}));
 		const { deps } = storeFakes(goodProvider());
 		const report = await runSentimentCanary({ contract, deps, job, ...fast });
@@ -895,6 +897,7 @@ describe("E1: the post-call gate runs before persistence", () => {
 					{ key: "brand", score: 80, category: "positive" as const, confidence: 0.9, evidence: [], aspects: [] },
 					{ key: "c-huk", score: 50, category: "neutral" as const, confidence: 0.5, evidence: [], aspects: [] },
 				],
+				filteredClaims: [],
 				provider: "openrouter",
 				model: "openai/gpt-5-mini",
 				webSearch: true,

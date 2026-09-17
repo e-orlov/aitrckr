@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SentimentValidationError, validateSentimentResult } from "../classifier";
+import { SentimentValidationError, validateSentimentResult, validateSentimentResultDetailed } from "../classifier";
 import { GOLDEN_V4_CASES } from "../golden/v4-cases";
 import { buildSentimentPrompt, SENTIMENT_ASPECT_ROUTING_RULES } from "../prompt";
 
@@ -43,11 +43,17 @@ describe("quality exceptions of the v3 production audit", () => {
 		expect(JSON.stringify(diagnostic)).not.toContain(standIn("v4-swap-de").answer.slice(0, 20));
 	});
 
-	it("9c472bf5 (aspect from generic checklist bullets) is refused as aspect-ungrounded", () => {
-		const error = rejection("v4-checklist-de");
-		expect(error).toBeInstanceOf(SentimentValidationError);
-		expect((error as SentimentValidationError).code).toBe("aspect-ungrounded");
-		expect((error as SentimentValidationError).diagnostic).toMatchObject({ aspectKey: "price" });
+	it("9c472bf5 (aspect from generic checklist bullets) completes without the price aspect (classifier v5)", () => {
+		const c = standIn("v4-checklist-de");
+		const { entities, filteredClaims } = validateSentimentResultDetailed(c.result, {
+			answerBody: c.answer,
+			candidates: c.candidates,
+		});
+		expect(entities).toHaveLength(1);
+		expect(entities[0]).toMatchObject({ category: "positive", aspects: [] });
+		expect(filteredClaims).toEqual([
+			expect.objectContaining({ aspectKey: "price", code: "aspect-ungrounded", anchorIds: ["s0003", "s0004"] }),
+		]);
 	});
 
 	it("a7dd9e90 (statistic as positive `other`) is addressed by the prompt contract, and its human label validates as neutral without aspects", () => {

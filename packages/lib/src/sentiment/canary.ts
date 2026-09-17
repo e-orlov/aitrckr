@@ -7,7 +7,12 @@ import type {
 	StructuredResearchUsage,
 } from "../providers/types";
 import { SENTIMENT_EVIDENCE_VERSION } from "./anchors";
-import { classifySentiment, SENTIMENT_MAX_OUTPUT_TOKENS, sentimentInputHash } from "./classifier";
+import {
+	classifySentiment,
+	countFilteredClaimCodes,
+	SENTIMENT_MAX_OUTPUT_TOKENS,
+	sentimentInputHash,
+} from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import type { SentimentDiagnostic } from "./diagnostics";
 import { SentimentJobError } from "./errors";
@@ -183,6 +188,9 @@ export type SentimentCanaryOutcome =
 			request?: StructuredResearchRequestSummary;
 			/** Safe generation id of the paid call; present on a classified outcome, null when the provider reported none or an unsafe one. */
 			generationId?: string | null;
+			/** Aspect claims the answer did not support, dropped before persistence (classifier v5); the analysis is complete without them. */
+			filteredClaimCount?: number;
+			filteredClaimCodes?: Record<string, number>;
 	  }
 	| Extract<SentimentJobOutcome, { status: "terminal-validation-failure" }>
 	| {
@@ -686,6 +694,8 @@ export async function runSentimentCanary(args: {
 					usage: classification.usage,
 					request: classification.request,
 					generationId: classification.generationId ?? null,
+					filteredClaimCount: classification.filteredClaims.length,
+					filteredClaimCodes: countFilteredClaimCodes(classification.filteredClaims),
 				},
 				{ attempts: 1, providerCalls },
 				args.limits,
@@ -729,6 +739,8 @@ export async function runSentimentCanary(args: {
 				usage: result.usage,
 				request: result.request,
 				generationId: result.generationId,
+				filteredClaimCount: result.filteredClaimCount,
+				filteredClaimCodes: result.filteredClaimCodes,
 			};
 		} else if (result.status === "terminal-validation-failure") {
 			outcome = result;

@@ -27,7 +27,8 @@ export const SENTIMENT_GROUNDING_RULES = `Grounding — evaluate one exact candi
 - A segment is evidence for a candidate only when it names that candidate (name or alias) or unmistakably continues a sentence, list or table row that names it. A segment that names a different candidate is never evidence for this one, even if it appears in the same paragraph or table.
 - Never exchange evidence between the rows or columns of a comparison table: the row or cell that describes candidate B says nothing about candidate A.
 - A segment that names no candidate at all (a general checklist, a generic tip, a definition, a heading) cannot carry a verdict by itself; cite it only next to a segment that names the candidate, and only when it clearly continues that candidate's description. Bullets directly under a product title that names the candidate, and the paragraph that directly answers a one-line question naming the candidate, count as continuing it; bullets under a generic label ("Advantages", "Disadvantages", "Conclusion", "Check before signing") do not.
-- Aspects are optional. When an aspect has no segment that names the candidate or continues such a segment, leave the aspect out instead of supporting it with generic bullets; an omitted aspect is correct, an aspect resting on generic text is a defect.
+- Aspects are optional findings, not a checklist: never return an aspect for every taxonomy key. Return an aspect only when a segment that names the candidate (or continues such a segment) explicitly evaluates that aspect; when no such segment exists, leave the aspect out. An omitted aspect means "considered, not supported by this text" and is the correct answer; an aspect resting on a generic checklist, a general recommendation, a statistic or an unevaluated description is a defect and will be discarded.
+- Never fill a missing aspect with a "neutral" placeholder: a "neutral" aspect is only for a segment that names the candidate and describes that aspect factually without evaluating it.
 - If a candidate is only named in a list of examples, a pass-through mention or an instruction, its verdict is "neutral" with that segment as the citation.`;
 
 export const SENTIMENT_EVIDENCE_RULES = `Evidence is cited by segment id, never by text. The ANSWER below is split into numbered segments like [s0001]; links, URLs and source lists have been removed from it, so every segment is natural language and a source reference is never evidence. Decide the polarity of every relevant segment for the target FIRST — "positive", "negative" or "neutral" for what that segment says about that target — and choose the category from those polarities afterwards:
@@ -91,7 +92,7 @@ ${SENTIMENT_GROUNDING_RULES}
 
 ${SENTIMENT_SCORE_RULES}
 
-Aspects: additionally rate the entity on each aspect the ANSWER explicitly evaluates for it, using the canonical keys below (map synonyms to the canonical key; do not invent aspects). An entity can be "mixed" overall while an aspect is clearly positive or negative.
+Aspects: additionally rate the entity only on the aspects the ANSWER explicitly evaluates for it, using the canonical keys below (map synonyms to the canonical key; do not invent aspects). The aspect list may be empty; an entity can be "mixed" overall while an aspect is clearly positive or negative.
 ${aspectTaxonomyText()}
 
 ${SENTIMENT_ASPECT_ROUTING_RULES}

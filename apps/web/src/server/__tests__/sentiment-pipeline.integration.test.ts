@@ -555,6 +555,7 @@ describe("IT-SNT-013 claim generation fence (stale lease takeover)", () => {
 				mentions: [],
 				classification: {
 					entities: [],
+					filteredClaims: [],
 					provider: "fake",
 					model: SENTIMENT_MODEL,
 					webSearch: true,

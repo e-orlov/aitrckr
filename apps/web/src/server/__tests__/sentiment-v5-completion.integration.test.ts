@@ -197,7 +197,9 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 	let calls = 0;
 
 	it("classified: overall + coverage persisted, price dropped, one filtered claim, one paid success", async () => {
-		const outcome = await runSentimentJob(payload(RUN_CAVEAT), { resolveProvider: () => caveatProvider(() => calls++) });
+		const outcome = await runSentimentJob(payload(RUN_CAVEAT), {
+			resolveProvider: () => caveatProvider(() => calls++),
+		});
 		expect(outcome).toMatchObject({
 			status: "classified",
 			entities: 1,
@@ -207,12 +209,24 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 		});
 		expect(calls).toBe(1);
 
-		const analysis = await client.query<{ status: string; attempts: number; classifier_version: string; error_code: string | null; error_message: string | null }>(
+		const analysis = await client.query<{
+			status: string;
+			attempts: number;
+			classifier_version: string;
+			error_code: string | null;
+			error_message: string | null;
+		}>(
 			"SELECT status, attempts, classifier_version, error_code, error_message FROM sentiment_analyses WHERE prompt_run_id = $1",
 			[RUN_CAVEAT],
 		);
 		expect(analysis.rows).toEqual([
-			{ status: "completed", attempts: 1, classifier_version: "sent-classifier-v5", error_code: null, error_message: null },
+			{
+				status: "completed",
+				attempts: 1,
+				classifier_version: "sent-classifier-v5",
+				error_code: null,
+				error_message: null,
+			},
 		]);
 		const aspects = await client.query<{ aspect_key: string; category: string; score: number }>(
 			`SELECT a.aspect_key, a.category, a.score FROM sentiment_aspect_observations a JOIN sentiment_observations o ON o.id = a.observation_id WHERE o.prompt_run_id = $1 ORDER BY a.aspect_key`,
@@ -260,15 +274,25 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 				"created_at",
 			].sort(),
 		);
-		const textual = columns.rows.filter((c) => c.data_type === "text").map((c) => c.column_name).sort();
+		const textual = columns.rows
+			.filter((c) => c.data_type === "text")
+			.map((c) => c.column_name)
+			.sort();
 		expect(textual).toEqual(["aspect_key", "classifier_version", "entity_key", "entity_type", "validation_code"]);
 	});
 
 	it("a repeat job makes no provider call and changes nothing", async () => {
-		const outcome = await runSentimentJob(payload(RUN_CAVEAT), { resolveProvider: () => caveatProvider(() => calls++) });
+		const outcome = await runSentimentJob(payload(RUN_CAVEAT), {
+			resolveProvider: () => caveatProvider(() => calls++),
+		});
 		expect(outcome).toEqual({ status: "already-completed" });
 		expect(calls).toBe(1);
-		expect(await count("sentiment_filtered_claims c JOIN sentiment_analyses s ON s.id = c.analysis_id WHERE s.prompt_run_id = $1", [RUN_CAVEAT])).toBe(1);
+		expect(
+			await count(
+				"sentiment_filtered_claims c JOIN sentiment_analyses s ON s.id = c.analysis_id WHERE s.prompt_run_id = $1",
+				[RUN_CAVEAT],
+			),
+		).toBe(1);
 		expect(await count("usage_events WHERE brand_id = $1 AND event_type LIKE 'sentiment%'", [BRAND])).toBe(1);
 	});
 
@@ -281,9 +305,14 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 			[RUN_CAVEAT],
 		);
 		const mentions = await loadMentions(RUN_CAVEAT);
-		const candidates = [{ key: "brand", entityType: "brand" as const, competitorId: null, name: "Sent V5", aliases: [] }];
+		const candidates = [
+			{ key: "brand", entityType: "brand" as const, competitorId: null, name: "Sent V5", aliases: [] },
+		];
 		const provider = caveatProvider(() => undefined);
-		const { object } = await provider.runStructuredResearch!({ prompt: "", schema: sentimentProviderResultSchema } as never);
+		const { object } = await provider.runStructuredResearch!({
+			prompt: "",
+			schema: sentimentProviderResultSchema,
+		} as never);
 		const detailed = validateClassificationDetailed(object, { answerBody: CAVEAT_ANSWER, candidates });
 		const classification = {
 			...detailed,
@@ -327,9 +356,14 @@ describe("V5-RED-012 persistence failure rolls observations, aspects and audit b
 		expect(analysis.rows).toEqual([{ status: "failed", error_code: "persistence" }]);
 		expect(await count("sentiment_observations WHERE prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(0);
 		expect(
-			await count("sentiment_filtered_claims c JOIN sentiment_analyses s ON s.id = c.analysis_id WHERE s.prompt_run_id = $1", [RUN_PERSIST_FAIL]),
+			await count(
+				"sentiment_filtered_claims c JOIN sentiment_analyses s ON s.id = c.analysis_id WHERE s.prompt_run_id = $1",
+				[RUN_PERSIST_FAIL],
+			),
 		).toBe(0);
-		expect(await count("usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification'", [BRAND])).toBe(2);
+		expect(await count("usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification'", [BRAND])).toBe(
+			2,
+		);
 	});
 });
 
@@ -362,7 +396,9 @@ describe("V5-RED-014 / V5-RED-015 read selection v5 → v4 → v3", () => {
 	it("selects exactly one analysis per run with the newest completed version", async () => {
 		const selected = await selectedSentimentAnalyses();
 		const byRun = new Map(
-			selected.filter((s) => s.promptRunId.startsWith("5e970005-0000-4000-8000-0000000003")).map((s) => [s.promptRunId, s.classifierVersion]),
+			selected
+				.filter((s) => s.promptRunId.startsWith("5e970005-0000-4000-8000-0000000003"))
+				.map((s) => [s.promptRunId, s.classifierVersion]),
 		);
 		expect(byRun.get(runId(1))).toBe("sent-classifier-v3");
 		expect(byRun.get(runId(2))).toBe("sent-classifier-v4");
@@ -373,7 +409,12 @@ describe("V5-RED-014 / V5-RED-015 read selection v5 → v4 → v3", () => {
 	});
 
 	it("the overview counts each seeded run once and never marks a v4/v3-backed run as failed", async () => {
-		const overview = await loadSentimentOverview({ brandId: BRAND, lookback: "1m", aspect: "overall", timezone: "UTC" });
+		const overview = await loadSentimentOverview({
+			brandId: BRAND,
+			lookback: "1m",
+			aspect: "overall",
+			timezone: "UTC",
+		});
 		// 5 seeded runs + the completed caveat run each select exactly one analysis; only the
 		// persist-failure run (no completed analysis of any version) counts as failed.
 		expect(overview.coverage.analyses).toMatchObject({ completed: 6, failed: 1, pending: 0 });

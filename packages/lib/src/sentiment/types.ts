@@ -12,23 +12,27 @@ export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v2";
  * change). Rows with another version stay auditable and are ignored at read
  * time.
  */
-export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v4";
+export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v5";
 
 /**
  * Transitional read policy: every Sentiment read prefers a completed analysis
  * of the current classifier and falls back, per prompt run, to a completed
- * analysis of a listed older version, so history classified under the
+ * analysis of the next listed older version, so history classified under a
  * previous contract stays visible until it is reclassified. Preference order;
- * versions not listed here (v2 and older) are never read. Removing the
- * fallback is a later explicit decision, not a side effect of a deployment.
+ * versions not listed here (v2 and older) are never read. Removing a fallback
+ * is a later explicit decision, not a side effect of a deployment.
  */
-export const SENTIMENT_READABLE_CLASSIFIER_VERSIONS = [SENTIMENT_CLASSIFIER_VERSION, "sent-classifier-v3"] as const;
+export const SENTIMENT_READABLE_CLASSIFIER_VERSIONS = [
+	SENTIMENT_CLASSIFIER_VERSION,
+	"sent-classifier-v4",
+	"sent-classifier-v3",
+] as const;
 
 /**
  * Versioned separately from the classifier: a later taxonomy must never
  * silently rewrite what an older aspect row meant. The aspect *keys* and
- * their meaning are unchanged in v4; the routing rules that send a statement
- * to one key belong to the classifier contract, not to the taxonomy.
+ * their meaning are unchanged in v4 and v5; the routing rules that send a
+ * statement to one key belong to the classifier contract, not to the taxonomy.
  */
 export const SENTIMENT_TAXONOMY_VERSION = "sent-aspects-v1";
 
@@ -211,7 +215,8 @@ function citationListFor(polarity: EvidencePolarity, parts: SchemaParts) {
 
 /**
  * One judged target (an entity overall or one of its aspects) as the provider
- * returns it — classifier contract `sent-classifier-v4`. The category is a
+ * returns it — classifier contract `sent-classifier-v5` (wire shape unchanged
+ * since v4). The category is a
  * discriminator: each branch admits only the score range and the citation
  * polarities that belong to it, so a Positive target carrying a negative
  * citation, a Negative target carrying a positive one, or a Mixed target
@@ -259,6 +264,8 @@ function aspectTargetSchemaFor(parts: SchemaParts) {
 }
 
 function entityTargetSchemaFor(parts: SchemaParts) {
+	// Aspects are optional evidence-backed findings, never a checklist: the
+	// array may be empty and an aspect the answer does not evaluate is absent.
 	const aspects = z.array(aspectTargetSchemaFor(parts)).max(SENTIMENT_ASPECT_KEYS.length);
 	return z.union(targetBranchesFor({ key: parts.entityKey, aspects }, parts));
 }

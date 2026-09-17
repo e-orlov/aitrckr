@@ -1,5 +1,10 @@
 import type { StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
-import { classifySentiment, type SentimentClassifierDeps, sentimentInputHash } from "./classifier";
+import {
+	classifySentiment,
+	countFilteredClaimCodes,
+	type SentimentClassifierDeps,
+	sentimentInputHash,
+} from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import type { SentimentDiagnostic } from "./diagnostics";
 import {
@@ -48,6 +53,10 @@ export type SentimentJobOutcome =
 			request?: StructuredResearchRequestSummary;
 			/** The provider's opaque generation id as validated by the classifier; null when none was reported or it was unsafe. */
 			generationId: string | null;
+			/** Aspect claims dropped as unsupported by the answer (classifier v5); the analysis is complete without them. */
+			filteredClaimCount: number;
+			/** The dropped claims by allow-listed validation code. */
+			filteredClaimCodes: Record<string, number>;
 	  }
 	| { status: "already-completed" }
 	| { status: "claimed-elsewhere"; analysisStatus: string }
@@ -225,6 +234,8 @@ async function classifyAndPersist(
 		usage: classification.usage,
 		request: classification.request,
 		generationId: classification.generationId ?? null,
+		filteredClaimCount: classification.filteredClaims.length,
+		filteredClaimCodes: countFilteredClaimCodes(classification.filteredClaims),
 	};
 }
 
@@ -258,9 +269,11 @@ function acceptPayload(data: unknown): { payload: SentimentJobData } | { skipped
  * skipped without a call and without failing the job. Provider, network and
  * persistence errors mark the analysis `failed` with a safe summary and
  * propagate as `SentimentJobError` so pg-boss applies its bounded retry
- * policy; an answer the classifier rejects is terminal for this exact input
- * and completes the job instead — nothing partial is ever written either
- * way.
+ * policy; an answer whose mandatory overall verdicts the classifier rejects is
+ * terminal for this exact input and completes the job instead — nothing is
+ * written either way. An answer with valid overall verdicts completes with
+ * every aspect claim the answer supports; unsupported aspect claims are
+ * dropped and recorded, never persisted as placeholders.
  */
 export async function runSentimentJob(
 	data: unknown,

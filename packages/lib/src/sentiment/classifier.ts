@@ -51,8 +51,52 @@ export interface ValidatedEntitySentiment {
 	aspects: ValidatedAspect[];
 }
 
+/**
+ * One aspect claim the provider proposed that the answer does not support for
+ * that entity (classifier v5). Dropped from the result and recorded for the
+ * operator: identifiers and the allow-listed code only — never text.
+ */
+export interface FilteredClaim {
+	entityKey: string;
+	aspectKey: SentimentAspectKey;
+	code: AspectLocalValidationCode;
+	/** The anchor ids the claim cited, in citation order, de-duplicated. */
+	anchorIds: string[];
+}
+
+/**
+ * The closed set of validation codes that are local to one aspect claim: each
+ * says "this aspect's citations do not support this aspect for this entity"
+ * and nothing about the entity's overall verdict or the answer as a whole.
+ * Raised against an aspect target they drop that claim alone (classifier v5);
+ * raised against an overall target — or any code outside this list on any
+ * target — they stay terminal for the whole analysis. Fail closed: a new code
+ * is terminal until it is deliberately added here.
+ */
+export const ASPECT_LOCAL_VALIDATION_CODES = Object.freeze([
+	"aspect-ungrounded",
+	"evidence-entity-unbound",
+	"polarity-category-mismatch",
+	"mixed-needs-dual-evidence",
+	"evidence-anchor-polarity-conflict",
+] as const);
+export type AspectLocalValidationCode = (typeof ASPECT_LOCAL_VALIDATION_CODES)[number];
+
+export function isAspectLocalValidationCode(code: unknown): code is AspectLocalValidationCode {
+	return typeof code === "string" && (ASPECT_LOCAL_VALIDATION_CODES as readonly string[]).includes(code);
+}
+
+/** Dropped claims by allow-listed code, for operator reports; codes only. */
+export function countFilteredClaimCodes(claims: readonly FilteredClaim[]): Record<string, number> {
+	const counts: Record<string, number> = {};
+	for (const claim of claims) counts[claim.code] = (counts[claim.code] ?? 0) + 1;
+	return counts;
+}
+
 export interface SentimentClassification {
 	entities: ValidatedEntitySentiment[];
+	/** Aspect claims dropped as unsupported (classifier v5); empty when every claim was grounded. */
+	filteredClaims: FilteredClaim[];
 	provider: string;
 	model: string | null;
 	webSearch: boolean;
@@ -264,11 +308,38 @@ function resolveEvidence(
 	return resolved;
 }
 
-/** Aspect rows of one entity: unique keys, consistent score/category, resolved citations. */
+/**
+ * Whether a validation error raised while resolving one aspect's citations is
+ * that aspect's own defect: an allow-listed code whose diagnostic names exactly
+ * this entity and this aspect. Anything else — another code, a diagnostic for
+ * another target, a foreign error — is not filtered.
+ */
+function isLocalAspectDefect(
+	error: unknown,
+	entityKey: string,
+	aspectKey: SentimentAspectKey,
+): error is SentimentValidationError & { code: AspectLocalValidationCode } {
+	return (
+		error instanceof SentimentValidationError &&
+		isAspectLocalValidationCode(error.code) &&
+		error.diagnostic?.entityKey === entityKey &&
+		error.diagnostic?.aspectKey === aspectKey
+	);
+}
+
+/**
+ * Aspect rows of one entity: unique keys and consistent score/category are
+ * contract defects and terminal; the citations of each aspect are resolved on
+ * their own, and an aspect whose citations do not support it for this entity
+ * (an allow-listed aspect-local code) is dropped into `filtered` instead of
+ * failing the analysis (classifier v5). An omitted aspect is never replaced by
+ * a neutral placeholder.
+ */
 function validateAspects(
 	anchors: Map<string, EvidenceAnchor>,
 	entity: SentimentClassificationResult["entities"][number],
 	groundingMap: GroundingMap | null,
+	filtered: FilteredClaim[],
 ): ValidatedAspect[] {
 	const aspectKeys = new Set<string>();
 	const aspects: ValidatedAspect[] = [];
@@ -287,12 +358,25 @@ function validateAspects(
 				stage: "cross-field",
 			});
 		}
+		let evidence: SentimentEvidence[];
+		try {
+			evidence = resolveEvidence(anchors, aspect.evidence, { ...at, stage: "evidence" }, aspect.category, groundingMap);
+		} catch (error) {
+			if (!isLocalAspectDefect(error, entity.key, aspect.key)) throw error;
+			filtered.push({
+				entityKey: entity.key,
+				aspectKey: aspect.key,
+				code: error.code,
+				anchorIds: [...new Set(aspect.evidence.map((ref) => ref.anchorId))],
+			});
+			continue;
+		}
 		aspects.push({
 			key: aspect.key,
 			score: aspect.score,
 			category: aspect.category,
 			confidence: aspect.confidence,
-			evidence: resolveEvidence(anchors, aspect.evidence, { ...at, stage: "evidence" }, aspect.category, groundingMap),
+			evidence,
 		});
 	}
 	return aspects;
@@ -313,11 +397,29 @@ export function validateSentimentResult(
 		analysis?: AnalyzableText;
 	},
 ): ValidatedEntitySentiment[] {
+	return validateSentimentResultDetailed(raw, args).entities;
+}
+
+/** `validateSentimentResult` together with the aspect claims it dropped. */
+export function validateSentimentResultDetailed(
+	raw: unknown,
+	args: {
+		answerBody: string;
+		candidates: SentimentCandidate[];
+		anchors?: readonly EvidenceAnchor[];
+		analysis?: AnalyzableText;
+	},
+): ValidatedClassification {
 	const parsed = sentimentProviderResultSchema.safeParse(raw);
 	if (!parsed.success) {
 		fail("schema", parsed.error.issues[0]?.message ?? "invalid classifier output", { stage: "provider-schema" });
 	}
-	return validateClassification(toClassificationResult(parsed.data), args);
+	return validateClassificationDetailed(toClassificationResult(parsed.data), args);
+}
+
+export interface ValidatedClassification {
+	entities: ValidatedEntitySentiment[];
+	filteredClaims: FilteredClaim[];
 }
 
 /**
@@ -340,6 +442,27 @@ export function validateClassification(
 		grounding?: boolean;
 	},
 ): ValidatedEntitySentiment[] {
+	return validateClassificationDetailed(raw, args).entities;
+}
+
+/**
+ * `validateClassification` with the audit of what was dropped: the mandatory
+ * overall verdict of every candidate is validated first and any defect there
+ * is terminal; each aspect claim is then validated on its own and an
+ * unsupported one is returned in `filteredClaims` instead of failing the
+ * analysis (classifier v5). A result with a valid overall for every candidate
+ * and no surviving aspect is complete.
+ */
+export function validateClassificationDetailed(
+	raw: unknown,
+	args: {
+		answerBody: string;
+		candidates: SentimentCandidate[];
+		anchors?: readonly EvidenceAnchor[];
+		analysis?: AnalyzableText;
+		grounding?: boolean;
+	},
+): ValidatedClassification {
 	const anchorList = [
 		...(args.anchors ?? segmentAnswer(args.answerBody, args.analysis ?? analyzeAnswerRanges(args.answerBody))),
 	];
@@ -353,6 +476,7 @@ export function validateClassification(
 	const expected = new Set(args.candidates.map((c) => c.key));
 	const seen = new Set<string>();
 	const entities: ValidatedEntitySentiment[] = [];
+	const filteredClaims: FilteredClaim[] = [];
 
 	for (const entity of result.entities) {
 		const at: EvidenceWhere = {
@@ -377,7 +501,7 @@ export function validateClassification(
 			entity.category,
 			groundingMap,
 		);
-		const aspects = validateAspects(anchors, entity, groundingMap);
+		const aspects = validateAspects(anchors, entity, groundingMap, filteredClaims);
 		entities.push({
 			key: entity.key,
 			score: entity.score,
@@ -392,7 +516,7 @@ export function validateClassification(
 		if (!seen.has(key))
 			fail("missing-entity", `candidate "${key}" was not classified`, { stage: "entity", entityKey: key });
 	}
-	return entities;
+	return { entities, filteredClaims };
 }
 
 export interface SentimentClassifierDeps {
@@ -535,8 +659,10 @@ export async function classifySentiment(
 				diagnostic("provider-schema", "model-mismatch"),
 			);
 		}
+		const validated = validateSentimentResultDetailed(result.object, { ...args, anchors, analysis });
 		return {
-			entities: validateSentimentResult(result.object, { ...args, anchors, analysis }),
+			entities: validated.entities,
+			filteredClaims: validated.filteredClaims,
 			provider: provider.id,
 			model: result.modelVersion ?? null,
 			webSearch: true,

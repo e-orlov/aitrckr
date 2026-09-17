@@ -75,6 +75,7 @@ const classification: SentimentClassification = {
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	inputHash: currentHash,
 	generationId: "gen-job-001",
+	filteredClaims: [],
 };
 
 type AnalysisStub = {
@@ -132,6 +133,8 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
 			generationId: "gen-job-001",
+			filteredClaimCount: 0,
+			filteredClaimCodes: {},
 		});
 		expect(d.claimAnalysis).toHaveBeenCalledTimes(1);
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
@@ -335,6 +338,8 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
 			generationId: "gen-job-001",
+			filteredClaimCount: 0,
+			filteredClaimCodes: {},
 		});
 		expect(persistDetection).toHaveBeenCalledTimes(1);
 		expect(persistDetection).toHaveBeenCalledWith(
@@ -382,6 +387,8 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
 			generationId: "gen-job-001",
+			filteredClaimCount: 0,
+			filteredClaimCodes: {},
 		});
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
@@ -396,6 +403,8 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
 			generationId: "gen-job-001",
+			filteredClaimCount: 0,
+			filteredClaimCodes: {},
 		});
 		const hashless = deps({ analysis: { status: "completed", inputHash: null } });
 		expect(await runSentimentJob(payload, hashless.d)).toEqual({
@@ -403,6 +412,8 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			entities: 2,
 			entityKeys: ["brand", "c-huk"],
 			generationId: "gen-job-001",
+			filteredClaimCount: 0,
+			filteredClaimCodes: {},
 		});
 	});
 

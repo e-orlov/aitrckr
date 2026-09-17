@@ -168,7 +168,7 @@ function leakyProvider(): Provider & { logs: string[] } {
 			async ({ schema, prompt }: { schema: { parse: (v: unknown) => unknown }; prompt: string }) => {
 				expect(prompt).toContain(PROMPT_MARKER);
 				return {
-					// Wire shape of classifier v4; the price aspect cites the Bolt sentence for Zentaur — grounded rejection.
+					// Wire shape of classifier v5; the brand's overall cites the Bolt sentence for Zentaur — grounded, terminal rejection.
 					object: schema.parse({
 						entities: [
 							{
@@ -176,19 +176,11 @@ function leakyProvider(): Provider & { logs: string[] } {
 								category: "positive",
 								score: 80,
 								confidence: 0.9,
-								evidence: [{ anchorId: "s0001", polarity: "positive" }],
-								aspects: [
-									{
-										key: "price",
-										category: "positive",
-										score: 80,
-										confidence: 0.9,
-										evidence: [
-											{ anchorId: "s0001", polarity: "positive" },
-											{ anchorId: "s0002", polarity: "positive" },
-										],
-									},
+								evidence: [
+									{ anchorId: "s0001", polarity: "positive" },
+									{ anchorId: "s0002", polarity: "positive" },
 								],
+								aspects: [],
 							},
 							{
 								key: "c-bolt",
@@ -309,7 +301,7 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 				stage: "evidence",
 				reason: "evidence-entity-unbound",
 				entityKey: "brand",
-				aspectKey: "price",
+				aspectKey: null,
 				evidenceIndex: 1,
 				anchorId: "s0002",
 			},
