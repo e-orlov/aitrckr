@@ -142,7 +142,8 @@ export const GOLDEN_V4_CASES: GoldenV4Case[] = [
 		},
 		expected: { [ARVO]: { category: "positive", forbiddenAspects: ["price", "other"] } },
 		grounding: { [ARVO]: { allowedAnchors: ["s0001"], forbiddenAnchors: ["s0002", "s0003", "s0004"] } },
-		expectedValidator: { kind: "reject", code: "aspect-ungrounded" },
+		// Classifier v5: the ungrounded price claim is dropped on its own; the valid overall completes.
+		expectedValidator: { kind: "accept" },
 	},
 	{
 		id: "v4-stat-cases-de",
