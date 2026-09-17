@@ -15,10 +15,14 @@ import type { SentimentCandidate } from "./types";
  * - `inherited`: candidates attributed from the anchor's structural context —
  *   the header row of its table (a row of a comparison table describes every
  *   entity the header names, even when a cell mentions the other one), the
- *   colon-terminated line introducing its list, the first line of its own
- *   list item, the nearest preceding anchor of its own paragraph that names a
- *   candidate, or the nearest heading above it when nothing in between names
- *   any candidate. Inheritance never crosses a table boundary, another heading
+ *   colon-terminated line introducing its list, the emphasised product-title
+ *   line standing alone right above its list when that title names exactly one
+ *   candidate, the first line of its own list item, the nearest preceding
+ *   anchor of its own paragraph that names a candidate, the one-line
+ *   clarifying question right above its paragraph when the paragraph opens
+ *   with a continuation form and names no other candidate, or the nearest
+ *   heading above it when nothing in between names any candidate. Every
+ *   inheritance is one hop and never crosses a table boundary, another heading
  *   or a line that names a candidate.
  * An anchor is attributable to the union of both sets; an anchor that names
  * candidates itself and is not attributable to the claimed one names only
@@ -57,6 +61,21 @@ const LIST_ITEM = /^(?:[ \t]*)(?:[-*+•▪◦]|\d{1,3}[.)]|[a-z][.)]|>)[ \t]+/i
 const INDENTED = /^(?: {2,}|\t)/u;
 /** A line that introduces what follows: it ends with a colon, optionally inside closing emphasis. */
 const COLON_INTRO = /:[\s*_]*$/u;
+/**
+ * A product-title line: the whole line is one emphasised label (`**…**` or
+ * `__…__`, an optional trailing colon), short, without sentence punctuation.
+ */
+const TITLE_LINE = /^(?:\*\*|__)([^*_][^.!?;]{0,78}?)(?:\*\*|__):?\s*$/u;
+/** A one-sentence clarifying question: ends with a question mark, optionally inside closing emphasis or quotes. */
+const QUESTION_END = /\?[\s*_"“”„)\]]*$/u;
+/**
+ * Continuation openers a paragraph may start with to refer back to the entity
+ * of the clarifying question right above it (bounded DE/EN set, matched on the
+ * anchor's natural text after leading emphasis and quotes are stripped).
+ */
+const CONTINUATION_OPENER =
+	/^(?:sie|es|er|diese|dieser|dieses|ja|nein|kurz gesagt|kurz zusammengefasst|kurz|grundsätzlich|it|they|this|these|yes|no|in short|short answer|generally|overall)(?![\p{L}\p{N}])/iu;
+const LEADING_MARKUP = /^[\s*_>"“„'([]+/u;
 
 type LineKind = "blank" | "heading" | "table-row" | "table-separator" | "list-item" | "list-continuation" | "text";
 
@@ -153,6 +172,63 @@ function listIntro(lines: Line[], line: Line, answerBody: string): Line | null {
 	const candidate = lines[at];
 	if (candidate.kind !== "text" && candidate.kind !== "heading") return null;
 	return COLON_INTRO.test(answerBody.slice(candidate.start, candidate.end).trimEnd()) ? candidate : null;
+}
+
+/**
+ * G1 — the product-title line that introduces the list containing `line`: an
+ * emphasised label naming exactly one candidate, standing alone (blank lines
+ * around it), followed only by blank lines and the list itself. Inheritance
+ * stops when a list item between the title and `line` names any candidate;
+ * it is one hop — the title's own explicit set, never something it inherited.
+ */
+function titleIntro(lines: Line[], line: Line, answerBody: string): Line | null {
+	let at = line.index - 1;
+	while (
+		at >= 0 &&
+		(lines[at].kind === "list-item" || lines[at].kind === "list-continuation" || lines[at].kind === "blank")
+	) {
+		if (lines[at].explicit.size > 0) return null;
+		at -= 1;
+	}
+	if (at < 0) return null;
+	const title = lines[at];
+	if (title.kind !== "text" || title.explicit.size !== 1) return null;
+	if (at > 0 && lines[at - 1].kind !== "blank") return null;
+	return TITLE_LINE.test(answerBody.slice(title.start, title.end).trim()) ? title : null;
+}
+
+/** The first line of the paragraph (contiguous `text` lines) containing `line`. */
+function paragraphStart(lines: Line[], line: Line): Line {
+	let at = line.index;
+	while (at > 0 && lines[at - 1].kind === "text") at -= 1;
+	return lines[at];
+}
+
+/**
+ * G2 — the one-line clarifying question directly above the paragraph
+ * containing `line`: a single sentence (one anchor) ending in a question mark,
+ * naming exactly one candidate, standing alone; only blank lines between it
+ * and the paragraph; the paragraph names no other candidate and opens with a
+ * bounded continuation form. One hop: the question's own explicit set, and
+ * only for this paragraph.
+ */
+function questionIntro(lines: Line[], line: Line, answerBody: string): Line | null {
+	if (line.kind !== "text") return null;
+	const first = paragraphStart(lines, line);
+	let at = first.index - 1;
+	if (at < 0 || lines[at].kind !== "blank") return null;
+	while (at >= 0 && lines[at].kind === "blank") at -= 1;
+	if (at < 0) return null;
+	const question = lines[at];
+	if (question.kind !== "text" || question.anchors.length !== 1 || question.explicit.size !== 1) return null;
+	if (at > 0 && lines[at - 1].kind !== "blank") return null;
+	if (!QUESTION_END.test(answerBody.slice(question.start, question.end).trimEnd())) return null;
+	const [subject] = question.explicit;
+	for (let i = first.index; i < lines.length && lines[i].kind === "text"; i += 1) {
+		for (const key of lines[i].explicit) if (key !== subject) return null;
+	}
+	const opener = first.anchors[0]?.naturalText.replace(LEADING_MARKUP, "") ?? "";
+	return CONTINUATION_OPENER.test(opener) ? question : null;
 }
 
 /**
@@ -264,8 +340,12 @@ function contextInheritance(
 		if (item && item.explicit.size > 0) return { keys: item.explicit, context: "list-item" };
 	}
 	if (line.kind === "list-item" || line.kind === "list-continuation") {
-		const intro = listIntro(lines, line, answerBody);
+		const intro = listIntro(lines, line, answerBody) ?? titleIntro(lines, line, answerBody);
 		if (intro && intro.explicit.size > 0) return { keys: intro.explicit, context: "list-intro" };
+	}
+	if (line.kind === "text") {
+		const question = questionIntro(lines, line, answerBody);
+		if (question) return { keys: question.explicit, context: "paragraph" };
 	}
 	if (line.kind !== "heading") {
 		const heading = headingOwner(lines, line);

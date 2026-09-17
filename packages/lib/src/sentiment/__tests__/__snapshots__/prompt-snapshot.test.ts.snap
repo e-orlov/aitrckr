@@ -472,7 +472,8 @@ Entity keys are opaque identifiers. Return each "key" exactly as listed in ENTIT
 Grounding — evaluate one exact candidate at a time and cite only segments that are about that candidate:
 - A segment is evidence for a candidate only when it names that candidate (name or alias) or unmistakably continues a sentence, list or table row that names it. A segment that names a different candidate is never evidence for this one, even if it appears in the same paragraph or table.
 - Never exchange evidence between the rows or columns of a comparison table: the row or cell that describes candidate B says nothing about candidate A.
-- A segment that names no candidate at all (a general checklist, a generic tip, a definition, a heading) cannot carry a verdict by itself; cite it only next to a segment that names the candidate, and only when it clearly continues that candidate's description.
+- A segment that names no candidate at all (a general checklist, a generic tip, a definition, a heading) cannot carry a verdict by itself; cite it only next to a segment that names the candidate, and only when it clearly continues that candidate's description. Bullets directly under a product title that names the candidate, and the paragraph that directly answers a one-line question naming the candidate, count as continuing it; bullets under a generic label ("Advantages", "Disadvantages", "Conclusion", "Check before signing") do not.
+- Aspects are optional. When an aspect has no segment that names the candidate or continues such a segment, leave the aspect out instead of supporting it with generic bullets; an omitted aspect is correct, an aspect resting on generic text is a defect.
 - If a candidate is only named in a list of examples, a pass-through mention or an instruction, its verdict is "neutral" with that segment as the citation.
 
 Score each entity on 0..100 for how the ANSWER portrays it:
@@ -525,4 +526,4 @@ ANSWER (segments; cite by id):
 """"
 `;
 
-exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"a2756cf47e1796303489d1ec453176fc21e80b339806c79934f674fbbdfe0bdd"`;
+exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"347c17d3e8a9fe2b930f488f077014d5e345209d08ccd9f12c3bbd266810c38e"`;
