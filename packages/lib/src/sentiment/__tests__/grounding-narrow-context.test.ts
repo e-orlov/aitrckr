@@ -4,7 +4,7 @@
  * production targets they concern:
  *
  * - G1 product/list-heading inheritance: bullets directly under a bold
- *   product-title line naming exactly one candidate (`051ab35e` WGV coverage
+ *   product-title line naming exactly one candidate (`051ab35e` competitor coverage
  *   and service — two targets).
  * - G2 clarifying-question inheritance: the pronoun-led paragraph directly
  *   after a one-line clarifying question naming exactly one candidate
