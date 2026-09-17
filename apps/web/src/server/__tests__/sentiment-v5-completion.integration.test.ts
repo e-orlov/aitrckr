@@ -14,6 +14,7 @@
  */
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { withResolutionPhases } from "./sentiment-test-provider";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test stack");
@@ -104,7 +105,7 @@ function caveatProvider(onCall: () => void, costUsd = 0.019128): Provider {
 			return {
 				object: object as T,
 				modelVersion: SENTIMENT_MODEL,
-				generationId: "gen-v5-it-001",
+				generationId: `gen-v5-it-001-${Math.random().toString(36).slice(2, 10)}`,
 				usage: {
 					inputTokens: 10360,
 					outputTokens: 3269,
@@ -137,9 +138,11 @@ async function seedAnalysis(i: number, version: string, status: string, score?: 
 		[runId(i), BRAND, SENTIMENT_DETECTOR_VERSION],
 	);
 	const analysis = await client.query<{ id: string }>(
-		`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at)
-		 VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 IN ('completed','failed') THEN now() ELSE NULL END) RETURNING id`,
-		[runId(i), BRAND, version, SENTIMENT_TAXONOMY_VERSION, status],
+		`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at, verifier_version, verified_at)
+		 VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 IN ('completed','failed') THEN now() ELSE NULL END,
+		         CASE WHEN $5 = 'completed' AND $3 = 'sent-classifier-v5' AND $6 THEN 'sent-verifier-v1' END,
+		         CASE WHEN $5 = 'completed' AND $3 = 'sent-classifier-v5' AND $6 THEN now() END) RETURNING id`,
+		[runId(i), BRAND, version, SENTIMENT_TAXONOMY_VERSION, status, true],
 	);
 	if (score !== undefined) {
 		await client.query(
@@ -198,12 +201,13 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 
 	it("classified: overall + coverage persisted, price dropped, one filtered claim, one paid success", async () => {
 		const outcome = await runSentimentJob(payload(RUN_CAVEAT), {
-			resolveProvider: () => caveatProvider(() => calls++),
+			resolveProvider: () => withResolutionPhases(caveatProvider(() => calls++)),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
 		expect(outcome).toMatchObject({
 			status: "classified",
 			entities: 1,
-			generationId: "gen-v5-it-001",
+			generationId: expect.stringMatching(/^gen-v5-it-001-/),
 			filteredClaimCount: 1,
 			filteredClaimCodes: { "aspect-ungrounded": 1 },
 		});
@@ -283,7 +287,8 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 
 	it("a repeat job makes no provider call and changes nothing", async () => {
 		const outcome = await runSentimentJob(payload(RUN_CAVEAT), {
-			resolveProvider: () => caveatProvider(() => calls++),
+			resolveProvider: () => withResolutionPhases(caveatProvider(() => calls++)),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
 		expect(outcome).toEqual({ status: "already-completed" });
 		expect(calls).toBe(1);
@@ -316,6 +321,9 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 		const detailed = validateClassificationDetailed(object, { answerBody: CAVEAT_ANSWER, candidates });
 		const classification = {
 			...detailed,
+			unresolvedTargets: [],
+			contractDefect: null,
+			candidate: null,
 			provider: "openrouter",
 			model: SENTIMENT_MODEL,
 			webSearch: true,
@@ -330,6 +338,7 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 				brandId: BRAND,
 				mentions,
 				classification,
+				verifierVersion: "sent-verifier-v1",
 			});
 		}
 		expect(await count("sentiment_filtered_claims WHERE analysis_id = $1", [rows[0].id])).toBe(1);
@@ -347,7 +356,7 @@ describe("V5-RED-012 persistence failure rolls observations, aspects and audit b
 			});
 		};
 		await expect(
-			runSentimentJob(payload(RUN_PERSIST_FAIL), { resolveProvider: () => caveatProvider(() => undefined), persist }),
+			runSentimentJob(payload(RUN_PERSIST_FAIL), { resolveProvider: () => withResolutionPhases(caveatProvider(() => undefined)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 }, persist }),
 		).rejects.toMatchObject({ kind: "store" });
 		const analysis = await client.query<{ status: string; error_code: string }>(
 			"SELECT status, error_code FROM sentiment_analyses WHERE prompt_run_id = $1",

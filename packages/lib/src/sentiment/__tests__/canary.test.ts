@@ -29,9 +29,10 @@ import {
 	sentimentCanaryInputDigests,
 } from "../canary";
 import type { DetectableEntity } from "../detector";
-import type { SentimentJobDeps } from "../job";
+import type { runSentimentJob, SentimentJobDeps } from "../job";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
 import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_DETECTOR_VERSION, SENTIMENT_TAXONOMY_VERSION } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const FROZEN = "bf1347c3-7161-457c-91d6-0173d601659e";
 const PROMPT = "e32b0973-3b13-46c2-84dc-f29a6e5c41a2";
@@ -125,6 +126,7 @@ const goodRequest: StructuredResearchRequestSummary = {
 function storeFakes(provider: Provider, overrides: Partial<SentimentJobDeps> = {}) {
 	const marks: unknown[] = [];
 	const usage: unknown[] = [];
+	const fakes = resolutionFakes();
 	const deps: SentimentJobDeps = {
 		loadRun: vi.fn(async () => run),
 		loadEntities: vi.fn(async () => entities),
@@ -154,10 +156,12 @@ function storeFakes(provider: Provider, overrides: Partial<SentimentJobDeps> = {
 		recordUsage: vi.fn(async (event: unknown) => {
 			usage.push(event);
 		}),
-		resolveProvider: () => provider,
+		resolveProvider: () => fakes.phasesProvider(provider),
+		resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		...fakes.deps,
 		...overrides,
 	};
-	return { deps, marks, usage };
+	return { deps, marks, usage, fakes };
 }
 
 /** A provider answering the frozen run correctly, with configurable usage/request metadata. */
@@ -493,9 +497,12 @@ describe("canary verdict after the one call", () => {
 		expect(report).toMatchObject({
 			preflight: { status: "passed" },
 			attempts: 1,
-			providerCalls: 1,
+			// Initial classification + independent verification.
+			providerCalls: 2,
 			outcome: {
 				status: "classified",
+				verified: true,
+				paidCalls: 2,
 				entities: 2,
 				entityKeys: ["brand", WGV],
 				usage: goodUsage,
@@ -507,7 +514,10 @@ describe("canary verdict after the one call", () => {
 			classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 			taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 		});
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 })]);
+		expect(usage).toEqual([
+			expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 }),
+			expect.objectContaining({ succeeded: true }),
+		]);
 		expect(JSON.stringify(report)).not.toContain("ARAG Aktiv");
 	});
 
@@ -578,8 +588,22 @@ describe("canary verdict after the one call", () => {
 				usage: goodUsage,
 				request: { model: "openai/gpt-5.6-luna", webSearch: false, maxToolCalls: null, maxOutputTokens: 4000 },
 			}),
+			// A summary naming another model is dropped by the envelope allowlist: unverifiable, not partially trusted.
+			["request-unverified"],
+		);
+		await rejected(
+			goodProvider({
+				usage: goodUsage,
+				request: {
+					...goodRequest,
+					webSearch: false,
+					maxToolCalls: null,
+					maxOutputTokens: 4000,
+					strictJsonSchema: false,
+					requireParameters: false,
+				},
+			}),
 			[
-				"request-model",
 				"request-web-search",
 				"request-max-tool-calls",
 				"request-max-tokens",
@@ -603,32 +627,34 @@ describe("canary verdict after the one call", () => {
 				},
 			],
 		};
-		const { report, marks, deps, usage } = await rejected(goodProvider(undefined, extra), ["validation"]);
-		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "validation", detail: "schema" }] });
+		const { report, marks, deps, usage } = await rejected(goodProvider(undefined, extra), ["job-outcome"]);
+		// The request schema itself refuses the foreign key: a paid, unusable answer — a contract defect the model
+		// cannot repair — so the run leaves the automatic workflow as an open review item, nothing is persisted.
+		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "job-outcome", detail: "awaiting-review" }] });
 		expect(deps.persist).not.toHaveBeenCalled();
-		// The rejected answer is terminal for this input and the paid response is accounted for in the report.
 		expect(marks).toEqual([
-			expect.objectContaining({
-				status: "failed",
-				errorCode: "schema",
-				inputHash: frozenDigests.classifierInputHash,
-			}),
+			expect.objectContaining({ status: "failed", errorCode: "awaiting-review", inputHash: null }),
 		]);
 		expect(usage).toEqual([expect.objectContaining({ succeeded: false, actualCostUsd: goodUsage.costUsd })]);
-		expect(report.outcome).toEqual({
-			status: "terminal-validation-failure",
-			code: "schema",
-			requestSent: true,
-			diagnostic: expect.objectContaining({ stage: "provider-schema", reason: "schema" }),
-			envelope: { generationId: "gen-good-001", request: goodRequest, usage: goodUsage },
-		});
+		expect(report.outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect", paidCalls: 1 });
 		expect(JSON.stringify(report)).not.toContain("Preis-Leistungs");
 	});
 
-	it("rejects a missing entity in the answer", async () => {
+	it("a missing entity in the answer is repaired, not rejected: the targeted repair completes the run", async () => {
 		const missing = { entities: goodAnswer.entities.slice(0, 1) };
-		const { report } = await rejected(goodProvider(undefined, missing), ["validation"]);
-		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "validation", detail: "missing-entity" }] });
+		const fakes = resolutionFakes({ repairAnswer: { entities: [goodAnswer.entities[1]] } });
+		const provider = goodProvider(undefined, missing);
+		const { deps, usage } = storeFakes(provider, {
+			...fakes.deps,
+			resolveProvider: () => fakes.phasesProvider(provider),
+		});
+		const report = await runSentimentCanary({ contract, deps, ...fast });
+		expect(report.verdict).toEqual({ status: "accept" });
+		expect(report).toMatchObject({ providerCalls: 3, outcome: { status: "classified", repairs: 1, paidCalls: 3 } });
+		expect(fakes.calls.map((c) => c.phase)).toEqual(["classify", "repair", "verify"]);
+		expect(fakes.calls[1].prompt).toContain(`key "${WGV}"`);
+		expect(fakes.calls[1].prompt).toContain("missing-entity");
+		expect(usage).toHaveLength(3);
 	});
 
 	it("rejects a classification whose entity keys drift from the contract even when the job reports success", async () => {
@@ -641,10 +667,10 @@ describe("canary verdict after the one call", () => {
 			generationId: "gen-good-001",
 			filteredClaimCount: 0,
 			filteredClaimCodes: {},
-		}));
+		})) as unknown as typeof runSentimentJob;
 		const { deps } = storeFakes(goodProvider());
 		const report = await runSentimentCanary({ contract, deps, job, ...fast });
-		expect(codes(report)).toEqual(["provider-calls", "entities-mismatch"]);
+		expect(codes(report)).toEqual(["provider-calls", "entities-mismatch", "not-verified"]);
 	});
 
 	it("a provider failure is one attempt: the real job core marks it failed once, nothing is retried or re-sent", async () => {
@@ -659,7 +685,7 @@ describe("canary verdict after the one call", () => {
 		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
 		expect(deps.claimAnalysis).toHaveBeenCalledTimes(1);
 		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "provider" })]);
-		expect(usage).toEqual([expect.objectContaining({ succeeded: false })]);
+		expect(usage).toEqual([]);
 		expect(report.outcome).toEqual({ status: "error", name: "SentimentJobError", code: "provider", httpStatus: 503 });
 		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error", detail: "503" }] });
 		expect(JSON.stringify(report)).not.toMatch(/sk-or-|Authorization|upstream unavailable/);
@@ -725,14 +751,21 @@ describe("canary verdict after the one call", () => {
 					request: goodRequest,
 					generationId: "gen-good-001",
 				},
-				{ attempts: 1, providerCalls: 2 },
+				{ attempts: 1, providerCalls: 6 },
 			),
-		).toEqual({ status: "reject", reasons: [{ code: "provider-calls", detail: "2" }] });
+		).toEqual({ status: "reject", reasons: [{ code: "provider-calls", detail: "6" }, { code: "not-verified" }] });
 		expect(
 			evaluateSentimentCanary(
 				contract,
-				{ status: "classified", entities: 2, entityKeys: ["brand", WGV], usage: goodUsage, request: goodRequest },
-				{ attempts: 1, providerCalls: 1 },
+				{
+					status: "classified",
+					entities: 2,
+					entityKeys: ["brand", WGV],
+					usage: goodUsage,
+					request: goodRequest,
+					verified: true,
+				},
+				{ attempts: 1, providerCalls: 2 },
 			),
 		).toEqual({ status: "reject", reasons: [{ code: "generation-id-missing" }] });
 	});
@@ -795,10 +828,10 @@ describe("E1: the post-call gate runs before persistence", () => {
 		const { deps, usage, marks } = storeFakes(provider);
 		const report = await runSentimentCanary({ contract, deps, ...fast });
 		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
-		expect(report.providerCalls).toBe(1);
+		// Initial classification + independent verification: two paid answers, each attributed once, no failed event.
+		expect(report.providerCalls).toBe(2);
 		expect(codes(report)).toEqual(expected);
-		// The provider answered and was paid: exactly one success attribution with the reported cost, no failed event.
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
+		expect(usage).toEqual([expect.objectContaining({ succeeded: true }), expect.objectContaining({ succeeded: true })]);
 		// Nothing was written: the analysis fails with the contract code, observations are never touched.
 		expect(deps.persist).not.toHaveBeenCalled();
 		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "canary-contract" })]);
@@ -810,12 +843,12 @@ describe("E1: the post-call gate runs before persistence", () => {
 		const { usage } = await gated(goodProvider({ usage: { ...goodUsage, costUsd: 0.1001 }, request: goodRequest }), [
 			"cost-exceeded",
 		]);
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.1001 })]);
+		expect(usage[0]).toEqual(expect.objectContaining({ succeeded: true, actualCostUsd: 0.1001 }));
 	});
 
 	it("usage missing", async () => {
 		const { usage } = await gated(goodProvider({ usage: undefined, request: goodRequest }), ["usage-missing"]);
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: null })]);
+		expect(usage[0]).toEqual(expect.objectContaining({ succeeded: true, actualCostUsd: null }));
 	});
 
 	it("web-search count unknown, conflicting, zero and more than one", async () => {
@@ -861,8 +894,21 @@ describe("E1: the post-call gate runs before persistence", () => {
 				usage: goodUsage,
 				request: { model: "openai/gpt-5.6-luna", webSearch: false, maxToolCalls: 2, maxOutputTokens: 4000 },
 			}),
+			["request-unverified"],
+		);
+		await gated(
+			goodProvider({
+				usage: goodUsage,
+				request: {
+					...goodRequest,
+					webSearch: false,
+					maxToolCalls: 2,
+					maxOutputTokens: 4000,
+					strictJsonSchema: false,
+					requireParameters: false,
+				},
+			}),
 			[
-				"request-model",
 				"request-web-search",
 				"request-max-tool-calls",
 				"request-max-tokens",
@@ -898,6 +944,28 @@ describe("E1: the post-call gate runs before persistence", () => {
 					{ key: "c-huk", score: 50, category: "neutral" as const, confidence: 0.5, evidence: [], aspects: [] },
 				],
 				filteredClaims: [],
+				unresolvedTargets: [],
+				contractDefect: null,
+				candidate: {
+					entities: [
+						{
+							key: "brand",
+							score: 80,
+							category: "positive" as const,
+							confidence: 0.9,
+							evidence: [{ anchorId: "s0001", polarity: "positive" as const }],
+							aspects: [],
+						},
+						{
+							key: "c-huk",
+							score: 50,
+							category: "neutral" as const,
+							confidence: 0.5,
+							evidence: [{ anchorId: "s0002", polarity: "neutral" as const }],
+							aspects: [],
+						},
+					],
+				},
 				provider: "openrouter",
 				model: "openai/gpt-5-mini",
 				webSearch: true,
@@ -910,10 +978,12 @@ describe("E1: the post-call gate runs before persistence", () => {
 			})),
 		});
 		const report = await runSentimentCanary({ contract, deps, ...fast });
+		// A candidate naming a key outside the contract is a contract defect: it never reaches the verifier or persistence.
 		expect(deps.persist).not.toHaveBeenCalled();
-		expect(codes(report)).toEqual(["provider-calls", "entities-mismatch"]);
+		expect(codes(report)).toEqual(["provider-calls", "job-outcome"]);
+		expect(report.outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect" });
 		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 })]);
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "canary-contract" })]);
+		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "awaiting-review" })]);
 	});
 
 	it("accept path persists exactly once", async () => {
@@ -959,7 +1029,10 @@ describe("E1: the post-call gate runs before persistence", () => {
 		expect(persisted.classification.filteredClaims).toEqual([
 			{ entityKey: WGV, aspectKey: "price", code: "evidence-entity-unbound", anchorIds: ["s0001"] },
 		]);
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 })]);
+		expect(usage).toEqual([
+			expect.objectContaining({ succeeded: true, actualCostUsd: 0.0234 }),
+			expect.objectContaining({ succeeded: true }),
+		]);
 		expect(marks).toEqual([]);
 		expect(JSON.stringify(report)).not.toMatch(/partial|excluded/i);
 	});
@@ -990,7 +1063,8 @@ describe("canary deadline and watchdog share one abort signal", () => {
 		expect(report.outcome).toMatchObject({ status: "error", name: "SentimentJobError", code: "aborted" });
 		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "request-deadline" }] });
 		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "aborted" })]);
-		expect(usage).toEqual([expect.objectContaining({ succeeded: false })]);
+		// An aborted request never received an answer: nothing was paid, nothing is attributed.
+		expect(usage).toEqual([]);
 	});
 
 	it("a provider that ignores the abort is ended by the watchdog, which aborts the same signal; its late answer is attributed once but never written and never re-sent", async () => {

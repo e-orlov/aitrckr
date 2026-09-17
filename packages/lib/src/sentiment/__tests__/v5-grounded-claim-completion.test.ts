@@ -27,6 +27,7 @@ import {
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentCandidate,
 } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const brand: SentimentCandidate = { key: "brand", entityType: "brand", competitorId: null, name: "ARAG", aliases: [] };
 const BELTRA = "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c";
@@ -393,6 +394,39 @@ describe("V5-RED-008 job semantics of a completed analysis with a filtered claim
 			},
 		],
 		filteredClaims: [{ entityKey: "brand", aspectKey: "price", code: "aspect-ungrounded", anchorIds: ["s0007"] }],
+		unresolvedTargets: [],
+		contractDefect: null,
+		// The internal candidate the workflow re-assesses: the same claims by anchor id (price on the generic caveat s0007).
+		candidate: {
+			entities: [
+				{
+					key: "brand",
+					score: 70,
+					category: "positive",
+					confidence: 0.9,
+					evidence: [
+						{ anchorId: "s0001", polarity: "positive" },
+						{ anchorId: "s0009", polarity: "positive" },
+					],
+					aspects: [
+						{
+							key: "coverage",
+							score: 80,
+							category: "positive",
+							confidence: 0.9,
+							evidence: [{ anchorId: "s0003", polarity: "positive" }],
+						},
+						{
+							key: "price",
+							score: 30,
+							category: "negative",
+							confidence: 0.9,
+							evidence: [{ anchorId: "s0007", polarity: "negative" }],
+						},
+					],
+				},
+			],
+		},
 		provider: "openrouter",
 		model: "openai/gpt-5-mini",
 		webSearch: true,
@@ -407,7 +441,10 @@ describe("V5-RED-008 job semantics of a completed analysis with a filtered claim
 		const marks: unknown[] = [];
 		const usage: unknown[] = [];
 		const persisted: unknown[] = [];
+		const resolution = resolutionFakes();
 		const deps: SentimentJobDeps = {
+			...resolution.deps,
+			resolveProvider: () => resolution.phasesProvider(),
 			loadRun: vi.fn(async () => run),
 			loadEntities: vi.fn(
 				async () =>
@@ -450,18 +487,25 @@ describe("V5-RED-008 job semantics of a completed analysis with a filtered claim
 			},
 			deps,
 		);
-		expect(outcome).toEqual({
+		expect(outcome).toMatchObject({
 			status: "classified",
 			entities: 1,
 			entityKeys: ["brand"],
 			usage: classification.usage,
-			request: undefined,
 			generationId: "gen-v5-red-008",
 			filteredClaimCount: 1,
 			filteredClaimCodes: { "aspect-ungrounded": 1 },
+			verified: true,
+			paidCalls: 2,
+			repairs: 0,
 		});
 		expect(marks).toEqual([]);
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.019128 })]);
+		// The initial classification and the verification: one paid success each; the dropped aspect never costs a repair.
+		expect(usage).toEqual([
+			expect.objectContaining({ succeeded: true, actualCostUsd: 0.019128 }),
+			expect.objectContaining({ succeeded: true }),
+		]);
+		expect(resolution.calls.map((c) => c.phase)).toEqual(["verify"]);
 		expect(persisted).toHaveLength(1);
 		expect((persisted[0] as { classification: SentimentClassification }).classification.filteredClaims).toEqual(
 			classification.filteredClaims,

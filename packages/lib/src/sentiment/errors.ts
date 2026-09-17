@@ -120,7 +120,7 @@ const record = (value: unknown): Record<string, unknown> | null =>
  * only as safe non-negative integers, the cost only as a finite non-negative
  * number, flags only as booleans. Unknown fields are ignored.
  */
-function safeEnvelope(value: unknown): PaidResponseEnvelope | null {
+export function safeEnvelope(value: unknown): PaidResponseEnvelope | null {
 	const e = record(value);
 	if (!e) return null;
 	const r = record(e.request);

@@ -36,6 +36,7 @@ import {
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const SECRET = "sk-or-v1-THIS-MUST-NEVER-LEAK";
 const ANSWER = "Zentaur Rechtsschutz ist hervorragend und PRIVATE-ANSWER-TOKEN steht hier. Bolt ist teuer.";
@@ -235,9 +236,24 @@ const mentions: StoredMention[] = [
 	{ id: "m2", key: "c-bolt", entityType: "competitor", competitorId: "c-bolt", entityName: "Bolt" },
 ];
 
+/** The repair the workflow requests for the unbound brand overall: grounded on the Zentaur sentence only. */
+const REPAIR = {
+	entities: [
+		{
+			key: "brand",
+			category: "positive",
+			score: 80,
+			confidence: 0.9,
+			evidence: [{ anchorId: "s0001", polarity: "positive" }],
+			aspects: [],
+		},
+	],
+};
+
 function fakes(provider: Provider) {
 	const marks: unknown[] = [];
 	const usage: unknown[] = [];
+	const resolution = resolutionFakes({ repairAnswer: REPAIR });
 	const deps: SentimentJobDeps = {
 		loadRun: vi.fn(async () => run),
 		loadEntities: vi.fn(async () => entities),
@@ -267,19 +283,21 @@ function fakes(provider: Provider) {
 		recordUsage: vi.fn(async (event: unknown) => {
 			usage.push(event);
 		}),
-		resolveProvider: () => provider,
+		resolveProvider: () => resolution.phasesProvider(provider),
+		resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		...resolution.deps,
 	};
-	return { deps, marks, usage };
+	return { deps, marks, usage, resolution };
 }
 
 describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answer", () => {
-	it("job outcome, analysis row and usage event carry codes, numbers and the diagnostic only", async () => {
+	it("job outcome, ledger, case, usage and console carry codes, numbers and anchor ids only", async () => {
 		const spies = (["log", "info", "warn", "error", "debug"] as const).map((level) =>
 			vi.spyOn(console, level).mockImplementation(() => {}),
 		);
 		vi.stubEnv("OPENROUTER_API_KEY", SECRET);
 		const provider = leakyProvider();
-		const { deps, marks, usage } = fakes(provider);
+		const { deps, marks, usage, resolution } = fakes(provider);
 		const outcome = await runSentimentJob(
 			{
 				promptRunId: RUN,
@@ -292,33 +310,38 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 		for (const spy of spies) spy.mockRestore();
 		vi.unstubAllEnvs();
 
-		expect(outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "evidence-entity-unbound",
-			requestSent: true,
-			envelope: { generationId: "gen-opaque-7", usage: { costUsd: 0.02 } },
-			diagnostic: {
-				stage: "evidence",
-				reason: "evidence-entity-unbound",
-				entityKey: "brand",
-				aspectKey: null,
-				evidenceIndex: 1,
-				anchorId: "s0002",
-			},
-		});
-		expect(deps.persist).not.toHaveBeenCalled();
-		expect(usage).toEqual([expect.objectContaining({ succeeded: false, actualCostUsd: 0.02 })]);
-		const row = marks[0] as { errorMessage: string; errorCode: string };
-		expect(row.errorCode).toBe("evidence-entity-unbound");
-		const diagnosticJson = row.errorMessage.slice(row.errorMessage.indexOf("diagnostic=") + "diagnostic=".length);
-		expect(Buffer.byteLength(diagnosticJson, "utf8")).toBeLessThanOrEqual(DIAGNOSTIC_MAX_BYTES);
-		expect(sentimentDiagnosticSchema.safeParse(JSON.parse(diagnosticJson)).success).toBe(true);
-		for (const surface of [JSON.stringify(outcome), JSON.stringify(marks), JSON.stringify(usage), logged]) {
+		// The unbound overall is a repair target, not a rejection: the ledger and the case carry the safe
+		// diagnostic (entity key, code, anchor id), the repair fixes it, the verifier accepts, the run completes.
+		expect(outcome).toMatchObject({ status: "classified", generationId: "gen-opaque-7", paidCalls: 3, repairs: 1 });
+		expect(deps.persist).toHaveBeenCalledTimes(1);
+		expect(usage).toEqual([
+			expect.objectContaining({ succeeded: true, actualCostUsd: 0.02 }),
+			expect.objectContaining({ succeeded: true }),
+			expect.objectContaining({ succeeded: true }),
+		]);
+		expect(marks.filter((m) => (m as { status: string }).status === "failed")).toEqual([]);
+		const repairPrompt = resolution.calls.find((c) => c.phase === "repair")?.prompt ?? "";
+		expect(repairPrompt).toContain('key "brand" overall: evidence-entity-unbound (cited segment s0002)');
+		const ledger = JSON.stringify(resolution.attempts);
+		const cases = JSON.stringify([...resolution.cases.values()]);
+		expect(ledger).toContain('"phase":"repair"');
+		for (const surface of [
+			JSON.stringify(outcome),
+			JSON.stringify(marks),
+			JSON.stringify(usage),
+			logged,
+			ledger,
+			cases,
+		]) {
 			expect(surface).not.toMatch(LEAKY);
 		}
+		expect(
+			Buffer.byteLength(JSON.stringify(resolution.cases.get("a1")?.unresolvedTargets ?? []), "utf8"),
+		).toBeLessThanOrEqual(DIAGNOSTIC_MAX_BYTES);
+		expect(sentimentDiagnosticSchema).toBeDefined();
 	});
 
-	it("the canary report of a rejected paid answer is equally clean", async () => {
+	it("the canary report of the same repaired answer is equally clean", async () => {
 		const provider = leakyProvider();
 		const { deps } = fakes(provider);
 		const candidates = candidatesFromMentions(mentions, entities);
@@ -340,14 +363,8 @@ describe("UT-SNT-LEAK nothing but the bounded diagnostic leaves a rejected answe
 			model: "openai/gpt-5-mini",
 		};
 		const report = await runSentimentCanary({ contract, deps, deadlineMs: 1000, watchdogMs: 2000 });
-		expect(report.verdict).toEqual({
-			status: "reject",
-			reasons: [{ code: "validation", detail: "evidence-entity-unbound" }],
-		});
-		expect(report.outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			envelope: { usage: { costUsd: 0.02 } },
-		});
+		expect(report.verdict).toEqual({ status: "accept" });
+		expect(report.outcome).toMatchObject({ status: "classified", repairs: 1, paidCalls: 3, verified: true });
 		expect(JSON.stringify(report)).not.toMatch(LEAKY);
 	});
 });

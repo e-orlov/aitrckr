@@ -20,6 +20,7 @@ import {
 	type SentimentAnalysisStatus,
 	sentimentClassificationResultSchema,
 } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const RUN = "5e970006-0000-4000-8000-000000000001";
 const ANSWER = "ARAG bietet einen starken Rechtsschutz. WGV ist günstig, aber die Bearbeitung dauert lange.";
@@ -153,6 +154,7 @@ function jobDeps(
 	const usageEvents: unknown[] = [];
 	const marks: unknown[] = [];
 	const state = { ...analysis };
+	const resolution = resolutionFakes();
 	const deps: SentimentJobDeps = {
 		loadRun: vi.fn(async () => run),
 		loadEntities: vi.fn(async () => entities),
@@ -190,31 +192,42 @@ function jobDeps(
 		recordUsage: vi.fn(async (event: unknown) => {
 			usageEvents.push(event);
 		}),
-		resolveProvider: () => provider,
+		resolveProvider: () => resolution.phasesProvider(provider),
+		resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		...resolution.deps,
 	};
 	return { deps, usageEvents, marks, state };
 }
 
 describe("grounded evidence — RED before the corrective", () => {
 	it("1. a paraphrased excerpt and a locally rejected anchored answer are both rejected, and the paid response's usage and generation survive in the error", async () => {
-		for (const [answer, code] of [
-			[paraphrased, "schema"],
-			[locallyRejected, "evidence-entity-unbound"],
-		] as const) {
-			const provider = providerAnswering(answer);
-			let thrown: unknown;
-			try {
-				await classifySentiment({ answerBody: ANSWER, candidates }, { resolveProvider: () => provider });
-			} catch (error) {
-				thrown = error;
-			}
-			expect(thrown).toMatchObject({ name: "SentimentValidationError", code, requestSent: true });
-			// The provider was paid: the error must carry the numeric envelope (never the text).
-			expect(thrown).toMatchObject({
-				envelope: { usage: { costUsd: 0.020047, webSearchRequests: 1 }, generationId: "gen-abc123", request },
-			});
-			expect(JSON.stringify(thrown)).not.toContain("Rechtsschutz");
+		// A paraphrased excerpt cannot even be shaped by the request schema: a paid contract defect with its envelope.
+		const provider = providerAnswering(paraphrased);
+		let thrown: unknown;
+		try {
+			await classifySentiment({ answerBody: ANSWER, candidates }, { resolveProvider: () => provider });
+		} catch (error) {
+			thrown = error;
 		}
+		expect(thrown).toMatchObject({ name: "SentimentValidationError", code: "schema", requestSent: true });
+		expect(thrown).toMatchObject({
+			envelope: { usage: { costUsd: 0.020047, webSearchRequests: 1 }, generationId: "gen-abc123", request },
+		});
+		expect(JSON.stringify(thrown)).not.toContain("Rechtsschutz");
+		// An anchored answer whose overall is unbound is a candidate with an unresolved target (repair), not a rejection;
+		// the paid response's usage and generation survive on the candidate.
+		const unbound = await classifySentiment(
+			{ answerBody: ANSWER, candidates },
+			{ resolveProvider: () => providerAnswering(locallyRejected) },
+		);
+		expect(unbound.unresolvedTargets).toEqual([
+			expect.objectContaining({ reason: "evidence-entity-unbound", source: "deterministic" }),
+		]);
+		expect(unbound).toMatchObject({ generationId: "gen-abc123", usage: { costUsd: 0.020047 } });
+		// The routing data (targets, candidate by anchor id) carries no answer text; only the persisted evidence slices do.
+		expect(JSON.stringify({ targets: unbound.unresolvedTargets, candidate: unbound.candidate })).not.toContain(
+			"Rechtsschutz",
+		);
 	});
 
 	it("2. the job attributes the charged cost of a locally rejected paid answer, not the estimate", async () => {
@@ -241,32 +254,38 @@ describe("grounded evidence — RED before the corrective", () => {
 			},
 			deps,
 		);
-		expect(outcome).toMatchObject({ status: "terminal-validation-failure" });
-		// The failed row remembers the exact input it failed on.
-		expect(marks.at(-1)).toMatchObject({
-			status: "failed",
-			inputHash: sentimentInputHash(ANSWER, candidates),
-		});
+		// A paid answer the schema cannot shape is a contract defect: the run leaves the automatic workflow as an open
+		// review item (never thrown for the queue to retry, never a closed failure).
+		expect(outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect", paidCalls: 1 });
+		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "awaiting-review", inputHash: null });
 	});
 
-	it("4. the same input under the same versions is never sent to the provider again after a terminal validation failure", async () => {
+	it("4. a run waiting for review is never sent to the provider again by the automatic path", async () => {
 		const provider = providerAnswering(paraphrased);
-		const { deps } = jobDeps(provider, {
-			status: "failed",
-			inputHash: sentimentInputHash(ANSWER, candidates),
-			errorCode: "evidence-not-in-answer",
+		const first = jobDeps(provider, { status: "pending", inputHash: null });
+		expect(
+			await runSentimentJob(
+				{
+					promptRunId: RUN,
+					classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
+					taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
+				},
+				first.deps,
+			),
+		).toMatchObject({
+			status: "awaiting-review",
 		});
+		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
 		const outcome = await runSentimentJob(
 			{
 				promptRunId: RUN,
 				classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 				taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 			},
-			deps,
+			first.deps,
 		).catch((error: unknown) => ({ status: "threw", error }));
-		expect(provider.runStructuredResearch).not.toHaveBeenCalled();
-		expect(deps.claimAnalysis).not.toHaveBeenCalled();
-		expect(outcome).toMatchObject({ status: "skipped", reason: expect.stringContaining("terminal") });
+		expect(provider.runStructuredResearch).toHaveBeenCalledTimes(1);
+		expect(outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect" });
 	});
 
 	it("5. the provider-facing schema binds evidence to anchor ids, so a free-form (paraphrased) quote no longer fits it", () => {

@@ -107,8 +107,8 @@ beforeAll(async () => {
 	const analysis = async (run: string, status = "completed") =>
 		(
 			await client.query<{ id: string }>(
-				`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at)
-				 VALUES ($1, $2, $3, $4, $5, now()) RETURNING id`,
+				`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at, verifier_version, verified_at)
+				 VALUES ($1, $2, $3, $4, $5, now(), CASE WHEN $5 = 'completed' THEN 'sent-verifier-v1' END, CASE WHEN $5 = 'completed' THEN now() END) RETURNING id`,
 				[run, BRAND, SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION, status],
 			)
 		).rows[0].id;

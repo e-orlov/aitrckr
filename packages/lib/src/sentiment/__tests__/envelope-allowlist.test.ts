@@ -28,6 +28,7 @@ import {
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const SECRET = "sk-or-v1-THIS-MUST-NEVER-LEAK";
 const BEARER = "Bearer sk-or-v1-THIS-MUST-NEVER-LEAK";
@@ -265,6 +266,20 @@ function hostileProvider(): Provider {
 function fakes(provider: Provider) {
 	const marks: unknown[] = [];
 	const usage: unknown[] = [];
+	const resolution = resolutionFakes({
+		repairAnswer: {
+			entities: [
+				{
+					key: "brand",
+					category: "positive",
+					score: 80,
+					confidence: 0.9,
+					evidence: [{ anchorId: "s0001", polarity: "positive" }],
+					aspects: [],
+				},
+			],
+		},
+	});
 	const deps: SentimentJobDeps = {
 		loadRun: vi.fn(async () => run),
 		loadEntities: vi.fn(async () => entities),
@@ -294,7 +309,9 @@ function fakes(provider: Provider) {
 		recordUsage: vi.fn(async (event: unknown) => {
 			usage.push(event);
 		}),
-		resolveProvider: () => provider,
+		resolveProvider: () => resolution.phasesProvider(provider),
+		resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		...resolution.deps,
 	};
 	return { deps, marks, usage };
 }
@@ -316,14 +333,14 @@ describe("H2 no arbitrary string of a hostile envelope reaches any surface", () 
 		const logged = spies.flatMap((spy) => spy.mock.calls.map((call) => call.map(String).join(" "))).join("\n");
 		for (const spy of spies) spy.mockRestore();
 		vi.unstubAllEnvs();
+		// The hostile generation id and request summary are dropped (null); the unbound overall is repaired; nothing
+		// hostile reaches the outcome, the routing rows, the usage events or the console.
 		expect(outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "evidence-entity-unbound",
-			envelope: {
-				generationId: null,
-				request: null,
-				usage: { inputTokens: null, costUsd: null, webSearchRequestsConflict: false },
-			},
+			status: "classified",
+			generationId: null,
+			request: undefined,
+			paidCalls: 3,
+			repairs: 1,
 		});
 		for (const surface of [JSON.stringify(outcome), JSON.stringify(marks), JSON.stringify(usage), logged]) {
 			expect(surface).not.toMatch(LEAKY);
@@ -350,14 +367,17 @@ describe("H2 no arbitrary string of a hostile envelope reaches any surface", () 
 			model: SENTIMENT_MODEL,
 		};
 		const report = await runSentimentCanary({ contract, deps, deadlineMs: 1000, watchdogMs: 2000 });
-		expect(report.verdict).toEqual({
-			status: "reject",
-			reasons: [{ code: "validation", detail: "evidence-entity-unbound" }],
-		});
-		expect(report.outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			envelope: { generationId: null, request: null },
-		});
+		// A hostile envelope leaves no reconcilable generation id and no verifiable request summary: the canary refuses.
+		expect(report.verdict.status).toBe("reject");
+		const reasonCodes = report.verdict.status === "reject" ? report.verdict.reasons.map((r) => r.code) : [];
+		expect(reasonCodes).toContain("generation-id-missing");
+		expect(
+			reasonCodes.every((code) =>
+				/^(request-|usage-|web-search-|cost-|output-tokens-|generation-id-missing)/.test(code),
+			),
+		).toBe(true);
+		// The gate fires before persistence: the contract error is the outcome, nothing is written.
+		expect(report.outcome).toMatchObject({ status: "error", code: "canary-contract" });
 		expect(JSON.stringify(report)).not.toMatch(LEAKY);
 	});
 });

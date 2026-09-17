@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, notExists, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, notExists, or, type SQL, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import {
 	brands,
@@ -8,11 +8,14 @@ import {
 	prompts,
 	type SentimentAnalysis,
 	type SentimentDetection,
+	type SentimentResolutionCase,
 	sentimentAnalyses,
 	sentimentAspectObservations,
 	sentimentDetections,
 	sentimentFilteredClaims,
 	sentimentObservations,
+	sentimentProviderAttempts,
+	sentimentResolutionCases,
 	usageEvents,
 } from "../db/schema";
 import { estimateRunCostUsd } from "../usage/cost";
@@ -20,6 +23,7 @@ import type { SentimentClassification } from "./classifier";
 import { brandEntity, competitorEntity, type DetectableEntity, type DetectedMention } from "./detector";
 import { isValidationCode } from "./diagnostics";
 import { ClaimLostError } from "./errors";
+import type { ResolutionCaseStatus, ReviewReason, UnresolvedTarget } from "./resolution";
 import { extractAnswerBody } from "./text";
 import {
 	compareSentimentEntities,
@@ -475,9 +479,12 @@ export async function persistClassification(args: {
 	brandId: string;
 	mentions: StoredMention[];
 	classification: SentimentClassification;
+	/** Which independent verification accepted this result (verifier version or human adjudication); required since classifier v5. */
+	verifierVersion: string;
 }): Promise<void> {
 	const mentionByKey = new Map(args.mentions.map((m) => [m.key, m]));
 	await db.transaction(async (tx) => {
+		const now = new Date();
 		const owned = await tx
 			.update(sentimentAnalyses)
 			.set({
@@ -489,8 +496,10 @@ export async function persistClassification(args: {
 				inputHash: args.classification.inputHash,
 				errorCode: null,
 				errorMessage: null,
-				completedAt: new Date(),
-				updatedAt: new Date(),
+				verifierVersion: args.verifierVersion,
+				verifiedAt: now,
+				completedAt: now,
+				updatedAt: now,
 			})
 			.where(
 				and(
@@ -565,7 +574,231 @@ export async function persistClassification(args: {
 					SENTIMENT_ASPECT_KEYS.indexOf(b.aspectKey as SentimentAspectKey),
 		);
 		for (const row of rows) await tx.insert(sentimentFilteredClaims).values(row);
+		// The resolution case closes in the same transaction as the verified result.
+		await tx
+			.update(sentimentResolutionCases)
+			.set({ status: "resolved", unresolvedTargets: [], nextAttemptAt: null, reviewReason: null, updatedAt: now })
+			.where(eq(sentimentResolutionCases.analysisId, args.claim.analysisId));
 	});
+}
+
+// ---------------------------------------------------------------------------
+// Resolution workflow state (ADR-SENT-01-GROUNDED-COMPLETION, Amendment B)
+// ---------------------------------------------------------------------------
+
+export type StoredResolutionCase = SentimentResolutionCase;
+
+/** The resolution case of an analysis, created `open` for the current input when none exists. */
+export async function ensureResolutionCase(
+	analysisId: string,
+	inputHash: string,
+	executor: Executor = db,
+): Promise<StoredResolutionCase> {
+	await executor
+		.insert(sentimentResolutionCases)
+		.values({ analysisId, inputHash, status: "open" })
+		.onConflictDoNothing({ target: [sentimentResolutionCases.analysisId] });
+	const row = await executor.query.sentimentResolutionCases.findFirst({
+		where: eq(sentimentResolutionCases.analysisId, analysisId),
+	});
+	if (!row) throw new Error(`resolution case missing for analysis ${analysisId}`);
+	if (row.inputHash !== inputHash) {
+		// The input changed (roster, alias, answer): the old workflow is void; start over for the new input.
+		const [fresh] = await executor
+			.update(sentimentResolutionCases)
+			.set({
+				inputHash,
+				status: "open",
+				provisionalResult: null,
+				unresolvedTargets: [],
+				nextAttemptAt: null,
+				reviewReason: null,
+				updatedAt: new Date(),
+			})
+			.where(eq(sentimentResolutionCases.analysisId, analysisId))
+			.returning();
+		return fresh;
+	}
+	return row;
+}
+
+export async function loadResolutionCase(
+	analysisId: string,
+	executor: Executor = db,
+): Promise<StoredResolutionCase | null> {
+	const row = await executor.query.sentimentResolutionCases.findFirst({
+		where: eq(sentimentResolutionCases.analysisId, analysisId),
+	});
+	return row ?? null;
+}
+
+export interface ResolutionCasePatch {
+	status?: ResolutionCaseStatus;
+	/** Reprocessing starts a new workflow instance: its start time and a fresh automatic budget. */
+	createdAt?: Date;
+	automatedProviderCalls?: number;
+	totalActualCostUsd?: string;
+	/** Safe structural candidate (keys, scores, categories, anchor ids, polarities). */
+	provisionalResult?: unknown | null;
+	unresolvedTargets?: UnresolvedTarget[];
+	nextAttemptAt?: Date | null;
+	reviewReason?: ReviewReason | null;
+}
+
+/**
+ * Case writes are fenced on the analysis claim like every other write of an
+ * attempt: a claimant whose lease was taken over cannot move, charge or park
+ * the case a newer attempt owns.
+ */
+function ownedCase(analysisId: string, claim: AnalysisClaim | undefined): SQL {
+	const own = eq(sentimentResolutionCases.analysisId, analysisId);
+	if (!claim) return own;
+	return and(
+		own,
+		sql`exists (select 1 from ${sentimentAnalyses} where ${sentimentAnalyses.id} = ${analysisId} and ${sentimentAnalyses.claimGeneration} = ${claim.generation})`,
+	) as SQL;
+}
+
+export async function updateResolutionCase(
+	analysisId: string,
+	patch: ResolutionCasePatch,
+	claim?: AnalysisClaim,
+	executor: Executor = db,
+): Promise<void> {
+	const rows = await executor
+		.update(sentimentResolutionCases)
+		.set({ ...patch, updatedAt: new Date() })
+		.where(ownedCase(analysisId, claim))
+		.returning({ analysisId: sentimentResolutionCases.analysisId });
+	if (claim && rows.length !== 1) throw new ClaimLostError(claim);
+}
+
+/** Add one paid answer to the case's automatic budget. */
+export async function chargeResolutionCase(
+	analysisId: string,
+	costUsd: number | null,
+	claim?: AnalysisClaim,
+	executor: Executor = db,
+): Promise<{ automatedProviderCalls: number; totalActualCostUsd: number }> {
+	const [row] = await executor
+		.update(sentimentResolutionCases)
+		.set({
+			automatedProviderCalls: sql`${sentimentResolutionCases.automatedProviderCalls} + 1`,
+			totalActualCostUsd: sql`${sentimentResolutionCases.totalActualCostUsd} + ${(costUsd ?? 0).toFixed(6)}::numeric`,
+			updatedAt: new Date(),
+		})
+		.where(ownedCase(analysisId, claim))
+		.returning({
+			automatedProviderCalls: sentimentResolutionCases.automatedProviderCalls,
+			totalActualCostUsd: sentimentResolutionCases.totalActualCostUsd,
+		});
+	if (!row) throw new ClaimLostError(claim ?? { analysisId, generation: -1 });
+	return { automatedProviderCalls: row.automatedProviderCalls, totalActualCostUsd: Number(row.totalActualCostUsd) };
+}
+
+export type AttemptPhase = "classify" | "repair" | "verify";
+export type AttemptOutcome = "sending" | "accepted" | "rejected" | "provider-error" | "aborted";
+
+/** Attempts of an analysis in ordinal order (ids, phases, outcomes, costs — never text). */
+export async function loadProviderAttempts(analysisId: string, executor: Executor = db) {
+	return executor.query.sentimentProviderAttempts.findMany({
+		where: eq(sentimentProviderAttempts.analysisId, analysisId),
+		orderBy: [sentimentProviderAttempts.ordinal],
+	});
+}
+
+/**
+ * Record the intent to call the provider before the request leaves: the
+ * ledger row exists as `sending` until the outcome is known, so a crash
+ * between request and response is visible and blocks further automatic calls.
+ */
+export async function openProviderAttempt(
+	args: { analysisId: string; phase: AttemptPhase; inputHash: string; claim?: AnalysisClaim },
+	executor: Executor = db,
+): Promise<{ id: string; ordinal: number }> {
+	if (args.claim) {
+		const owned = await executor
+			.select({ id: sentimentAnalyses.id })
+			.from(sentimentAnalyses)
+			.where(and(eq(sentimentAnalyses.id, args.analysisId), eq(sentimentAnalyses.claimGeneration, args.claim.generation)));
+		if (owned.length !== 1) throw new ClaimLostError(args.claim);
+	}
+	const [{ next }] = await executor
+		.select({ next: sql<number>`coalesce(max(${sentimentProviderAttempts.ordinal}), 0)::int + 1` })
+		.from(sentimentProviderAttempts)
+		.where(eq(sentimentProviderAttempts.analysisId, args.analysisId));
+	const [row] = await executor
+		.insert(sentimentProviderAttempts)
+		.values({
+			analysisId: args.analysisId,
+			ordinal: next,
+			phase: args.phase,
+			provider: SENTIMENT_PROVIDER_ID,
+			model: SENTIMENT_MODEL,
+			inputHash: args.inputHash,
+			outcome: "sending",
+		})
+		.returning({ id: sentimentProviderAttempts.id, ordinal: sentimentProviderAttempts.ordinal });
+	return row;
+}
+
+/** Close an attempt with its safe outcome; a paid answer carries its generation id and charged cost. */
+export async function finishProviderAttempt(
+	id: string,
+	args: { outcome: Exclude<AttemptOutcome, "sending">; generationId?: string | null; actualCostUsd?: number | null },
+	executor: Executor = db,
+): Promise<void> {
+	await executor
+		.update(sentimentProviderAttempts)
+		.set({
+			outcome: args.outcome,
+			generationId: args.generationId ?? null,
+			actualCostUsd:
+				typeof args.actualCostUsd === "number" && Number.isFinite(args.actualCostUsd) && args.actualCostUsd >= 0
+					? args.actualCostUsd.toFixed(6)
+					: null,
+			finishedAt: new Date(),
+		})
+		.where(eq(sentimentProviderAttempts.id, id));
+}
+
+export interface UnresolvedCaseRow {
+	analysisId: string;
+	promptRunId: string;
+	brandId: string;
+	status: ResolutionCaseStatus;
+	reviewReason: ReviewReason | null;
+	unresolvedTargets: UnresolvedTarget[];
+	automatedProviderCalls: number;
+	totalActualCostUsd: number;
+	updatedAt: Date;
+}
+
+/** Every case that is not resolved — the mandatory operator work list. Identifiers and counts only. */
+export async function listUnresolvedCases(executor: Executor = db): Promise<UnresolvedCaseRow[]> {
+	const rows = await executor
+		.select({
+			analysisId: sentimentResolutionCases.analysisId,
+			promptRunId: sentimentAnalyses.promptRunId,
+			brandId: sentimentAnalyses.brandId,
+			status: sentimentResolutionCases.status,
+			reviewReason: sentimentResolutionCases.reviewReason,
+			unresolvedTargets: sentimentResolutionCases.unresolvedTargets,
+			automatedProviderCalls: sentimentResolutionCases.automatedProviderCalls,
+			totalActualCostUsd: sentimentResolutionCases.totalActualCostUsd,
+			updatedAt: sentimentResolutionCases.updatedAt,
+		})
+		.from(sentimentResolutionCases)
+		.innerJoin(sentimentAnalyses, eq(sentimentAnalyses.id, sentimentResolutionCases.analysisId))
+		.where(sql`${sentimentResolutionCases.status} <> 'resolved'`)
+		.orderBy(sentimentResolutionCases.updatedAt);
+	return rows.map((row) => ({
+		...row,
+		status: row.status as ResolutionCaseStatus,
+		reviewReason: (row.reviewReason as ReviewReason | null) ?? null,
+		unresolvedTargets: (row.unresolvedTargets as UnresolvedTarget[]) ?? [],
+		totalActualCostUsd: Number(row.totalActualCostUsd),
+	}));
 }
 
 /**

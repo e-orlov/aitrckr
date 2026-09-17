@@ -1,7 +1,11 @@
-import { and, eq, inArray, type SQL, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, or, type SQL, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import { sentimentAnalyses } from "../db/schema";
-import { SENTIMENT_READABLE_CLASSIFIER_VERSIONS, SENTIMENT_TAXONOMY_VERSION } from "./types";
+import {
+	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
+	SENTIMENT_TAXONOMY_VERSION,
+} from "./types";
 
 type Executor = typeof db;
 
@@ -39,11 +43,21 @@ export function selectedSentimentAnalysisIds(executor: Executor = db): SQL {
 	) as SQL;
 }
 
+/**
+ * A completed analysis is readable under the current taxonomy when its
+ * version is listed and — since classifier v5, whose results are persisted
+ * only after independent verification — it carries the verified marker.
+ * Older versions never had one and are read as before.
+ */
 function readableCompletedWhere(): SQL {
 	return and(
 		eq(sentimentAnalyses.status, "completed"),
 		eq(sentimentAnalyses.taxonomyVersion, SENTIMENT_TAXONOMY_VERSION),
 		inArray(sentimentAnalyses.classifierVersion, [...SENTIMENT_READABLE_CLASSIFIER_VERSIONS]),
+		or(
+			sql`${sentimentAnalyses.classifierVersion} <> ${SENTIMENT_CLASSIFIER_VERSION}`,
+			isNotNull(sentimentAnalyses.verifiedAt),
+		),
 	) as SQL;
 }
 

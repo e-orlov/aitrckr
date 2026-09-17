@@ -15,6 +15,7 @@
 import { createHash } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { withResolutionPhases } from "./sentiment-test-provider";
 import type { z } from "zod";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -120,7 +121,7 @@ function fakeProvider(
 					throw new StructuredResearchResponseError("schema", {
 						provider: "openrouter",
 						model: SENTIMENT_MODEL,
-						generationId: "gen-it-cit-schema",
+						generationId: `gen-it-cit-schema-${Math.random().toString(36).slice(2, 10)}`,
 						request: lockedRequest,
 						usage,
 					});
@@ -130,7 +131,7 @@ function fakeProvider(
 			return {
 				object: object as T,
 				modelVersion: SENTIMENT_MODEL,
-				generationId: "gen-it-cit-001",
+				generationId: `gen-it-cit-001-${Math.random().toString(36).slice(2, 10)}`,
 				request: lockedRequest,
 				usage,
 			};
@@ -528,14 +529,14 @@ describe("IT-SNT-CIT-001 the three live failure shapes through the job core", ()
 			),
 		});
 		const outcome = await runSentimentJob(payload(RUN_LIVE_POLARITY), {
-			resolveProvider: () => fakeProvider(twoLabels, { costUsd: 0.01758 }),
+			resolveProvider: () => withResolutionPhases(fakeProvider(twoLabels, { costUsd: 0.01758 })), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
 		expect(outcome).toMatchObject({ status: "terminal-validation-failure", code: "schema", requestSent: true });
 		expect(await failedRow(RUN_LIVE_POLARITY)).toMatchObject({ status: "failed", error_code: "schema" });
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_LIVE_POLARITY])).toBe(0);
 
 		const bypassed = await runSentimentJob(payload(RUN_LIVE_BYPASS_POLARITY), {
-			resolveProvider: () => fakeProvider(twoLabels, { bypass: true, costUsd: 0.01758 }),
+			resolveProvider: () => withResolutionPhases(fakeProvider(twoLabels, { bypass: true, costUsd: 0.01758 })), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
 		expect(bypassed).toMatchObject({
 			status: "terminal-validation-failure",

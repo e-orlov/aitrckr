@@ -86,8 +86,8 @@ beforeAll(async () => {
 	).rows[0].id;
 	const analysis = (
 		await client.query<{ id: string }>(
-			`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at)
-			 VALUES ($1, $2, $3, $4, 'completed', now()) RETURNING id`,
+			`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at, verifier_version, verified_at)
+			 VALUES ($1, $2, $3, $4, 'completed', now(), 'sent-verifier-v1', now()) RETURNING id`,
 			[RUN, BRAND, SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION],
 		)
 	).rows[0].id;

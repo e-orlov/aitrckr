@@ -13,6 +13,7 @@
  */
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { withResolutionPhases } from "./sentiment-test-provider";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test stack");
@@ -106,7 +107,7 @@ function provider(answer: unknown, calls: { n: number }, costUsd = 0.02): Provid
 			return {
 				object: sentimentProviderResultSchema.parse(answer) as T,
 				modelVersion: SENTIMENT_MODEL,
-				generationId: `gen-adr-${calls.n}`,
+				generationId: `gen-adr-${calls.n}-${Math.random().toString(36).slice(2, 10)}`,
 				usage: {
 					inputTokens: 9000,
 					outputTokens: 1200,
@@ -129,7 +130,7 @@ async function insertRun(id: string, answer: string, minutesAgo: number) {
 }
 
 /** A completed older-version analysis with an overall and several aspect rows, via the detector's own mention row. */
-async function seedOld(runId: string, version: string, status: "completed" | "failed" | "pending", aspects: string[]) {
+async function seedOld(runId: string, version: string, status: "completed" | "failed" | "pending", aspects: string[], verified = true) {
 	await client.query(
 		`INSERT INTO sentiment_detections (prompt_run_id, brand_id, detector_version, status, mention_count) VALUES ($1, $2, $3, 'mentions', 1) ON CONFLICT DO NOTHING`,
 		[runId, BRAND, SENTIMENT_DETECTOR_VERSION],
@@ -140,9 +141,11 @@ async function seedOld(runId: string, version: string, status: "completed" | "fa
 		[runId, BRAND, SENTIMENT_DETECTOR_VERSION],
 	);
 	const analysis = await client.query<{ id: string }>(
-		`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at)
-		 VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 IN ('completed','failed') THEN now() ELSE NULL END) RETURNING id`,
-		[runId, BRAND, version, SENTIMENT_TAXONOMY_VERSION, status],
+		`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at, verifier_version, verified_at)
+		 VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 IN ('completed','failed') THEN now() ELSE NULL END,
+		         CASE WHEN $5 = 'completed' AND $3 = 'sent-classifier-v5' AND $6 THEN 'sent-verifier-v1' END,
+		         CASE WHEN $5 = 'completed' AND $3 = 'sent-classifier-v5' AND $6 THEN now() END) RETURNING id`,
+		[runId, BRAND, version, SENTIMENT_TAXONOMY_VERSION, status, verified],
 	);
 	if (status !== "completed") return analysis.rows[0].id;
 	const observation = await client.query<{ id: string }>(
@@ -234,7 +237,7 @@ describe("IT-V5-ADR-001 one locally invalid aspect", () => {
 				]),
 			],
 		};
-		const outcome = await runSentimentJob(payload(RUN_ONE_INVALID), { resolveProvider: () => provider(answer, calls) });
+		const outcome = await runSentimentJob(payload(RUN_ONE_INVALID), { resolveProvider: () => withResolutionPhases(provider(answer, calls)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } });
 		expect(outcome).toMatchObject({
 			status: "classified",
 			entities: 1,
@@ -270,7 +273,7 @@ describe("IT-V5-ADR-001 one locally invalid aspect", () => {
 		expect((await usageOf("sentiment_classification_failed")).rows).toEqual([]);
 
 		// A second job for the same input: no provider call, no new rows.
-		expect(await runSentimentJob(payload(RUN_ONE_INVALID), { resolveProvider: () => provider(answer, calls) })).toEqual(
+		expect(await runSentimentJob(payload(RUN_ONE_INVALID), { resolveProvider: () => withResolutionPhases(provider(answer, calls)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } })).toEqual(
 			{
 				status: "already-completed",
 			},
@@ -293,7 +296,7 @@ describe("IT-V5-ADR-002 every optional aspect dropped", () => {
 				]),
 			],
 		};
-		const outcome = await runSentimentJob(payload(RUN_ALL_INVALID), { resolveProvider: () => provider(answer, calls) });
+		const outcome = await runSentimentJob(payload(RUN_ALL_INVALID), { resolveProvider: () => withResolutionPhases(provider(answer, calls)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 } });
 		expect(outcome).toMatchObject({
 			status: "classified",
 			filteredClaimCount: 4,
@@ -351,7 +354,7 @@ describe("IT-V5-ADR-003 the same code on the overall is terminal", () => {
 			],
 		};
 		const outcome = await runSentimentJob(payload(RUN_OVERALL_UNBOUND), {
-			resolveProvider: () => provider(answer, calls),
+			resolveProvider: () => withResolutionPhases(provider(answer, calls)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
 		expect(outcome).toMatchObject({
 			status: "terminal-validation-failure",
@@ -393,7 +396,8 @@ describe("IT-V5-ADR-004 unknown or ambiguous aspect defects are terminal", () =>
 	])("%s → failed with no observation, aspect or audit row", async (_label, runId, aspects, code) => {
 		const calls = { n: 0 };
 		const outcome = await runSentimentJob(payload(runId), {
-			resolveProvider: () => provider({ entities: [brandEntity(aspects)] }, calls),
+			resolveProvider: () => withResolutionPhases(provider({ entities: [brandEntity(aspects)] }, calls)),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
 		expect(outcome).toMatchObject({ status: "terminal-validation-failure", code });
 		expect(
@@ -422,7 +426,7 @@ describe("IT-V5-ADR-005 persistence failure after the audit rows were prepared",
 		const failedBefore = (await usageOf("sentiment_classification_failed")).rows.length;
 		const successBefore = (await usageOf("sentiment_classification")).rows.length;
 		await expect(
-			runSentimentJob(payload(RUN_ROLLBACK), { resolveProvider: () => provider(answer, calls), persist }),
+			runSentimentJob(payload(RUN_ROLLBACK), { resolveProvider: () => withResolutionPhases(provider(answer, calls)), resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 }, persist }),
 		).rejects.toMatchObject({
 			kind: "store",
 			code: "persistence",
@@ -465,7 +469,8 @@ describe("no version mixing inside a selected analysis", () => {
 
 		const calls = { n: 0 };
 		const outcome = await runSentimentJob(payload(RUN_MIX), {
-			resolveProvider: () => provider({ entities: [brandEntity([{ key: "price", ...negative(30, "s0007") }])] }, calls),
+			resolveProvider: () => withResolutionPhases(provider({ entities: [brandEntity([{ key: "price", ...negative(30, "s0007") }])] }, calls)),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
 		expect(outcome).toMatchObject({ status: "classified", filteredClaimCount: 1 });
 
