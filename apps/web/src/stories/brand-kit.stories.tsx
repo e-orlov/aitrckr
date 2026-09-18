@@ -2,7 +2,7 @@
  * Brand Kit story — previews all Elmo brand assets in one place.
  *
  * Sections:
- *  1. Logo — text logo ("elmo" in Titan One) and whitelabel variant
+ *  1. Logo — text logo ("aitrckr" in Titan One) and whitelabel variant
  *  2. Icon — the "e" icon at various sizes (16, 32, 64, 128, 256)
  *  3. Maskable Icon — for adaptive/PWA contexts
  *  4. Color Palette — brand color, theme colors, and chart palette

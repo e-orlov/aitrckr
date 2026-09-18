@@ -220,6 +220,11 @@ export const Local: StoryObj = {
 	},
 	play: async ({ canvasElement }) => {
 		const canvas = within(canvasElement);
+		// The header mark is the wordmark, and it is the sidebar's home control.
+		const mark = await canvas.findByRole("button", { name: "aitrckr" });
+		await expect(mark).toHaveAttribute("data-sidebar", "menu-button");
+		await expect(within(mark).queryByText(/elmo/i)).toBeNull();
+
 		await expect(canvas.queryByText("Workflows")).toBeNull();
 
 		await userEvent.click(await canvas.findByRole("button", { name: "Account and organizations" }));
