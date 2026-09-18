@@ -1004,8 +1004,10 @@ describe("IT-SNT-016 coverage follows the current taxonomy contract", () => {
 
 describe("IT-SNT-007 bounded evidence at high cardinality (B5)", () => {
 	const RUNS = 3000;
-	it("answers 10/10 non-overlapping extremes with LIMIT queries and records the plan", async () => {
-		// Bulk graph for Alpha: 3,000 runs, receipts, mentions, completed analyses and observations (scores 0..100 cycling).
+	// Bulk graph for Alpha: 3,000 runs, receipts, mentions, completed analyses and observations (scores 0..100 cycling).
+	// Built in the hook, not the test: the one statement spends most of its wall time on 13 foreign-key triggers over
+	// 12,000 rows, which is fixture cost, not the bounded read path the test times against its own budget.
+	beforeAll(async () => {
 		await client.query(
 			`WITH r AS (
 			   INSERT INTO prompt_runs (id, prompt_id, brand_id, model, provider, version, web_search_enabled, raw_output, brand_mentioned, competitors_mentioned, created_at)
@@ -1038,6 +1040,9 @@ describe("IT-SNT-007 bounded evidence at high cardinality (B5)", () => {
 				SENTIMENT_TAXONOMY_VERSION,
 			],
 		);
+	});
+
+	it("answers 10/10 non-overlapping extremes with LIMIT queries and records the plan", async () => {
 		const total = (
 			await client.query<{ n: number }>(
 				`SELECT count(*)::int AS n FROM sentiment_observations o JOIN prompt_run_entity_mentions m ON m.id = o.mention_id AND m.superseded_at IS NULL
