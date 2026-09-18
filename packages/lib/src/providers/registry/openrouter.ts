@@ -8,7 +8,9 @@ import {
 	type Provider,
 	type ProviderOptions,
 	type ScrapeResult,
+	STRUCTURED_RESEARCH_ERROR_TYPE_PATTERN,
 	type StructuredResearchOptions,
+	StructuredResearchRequestError,
 	type StructuredResearchRequestSummary,
 	StructuredResearchResponseError,
 	type StructuredResearchResult,
@@ -68,6 +70,65 @@ function webSearchRequestFields(): Record<string, unknown> {
  */
 function bareModelSlug(modelSlug: string): string {
 	return modelSlug.replace(/:online$/, "");
+}
+
+/**
+ * OpenRouter's canonical typed code, `error.metadata.error_type`, which its
+ * documentation designates as the field to switch on programmatically instead
+ * of the HTTP status. It is the only source of a refusal's type: the status,
+ * the message, `metadata.raw` and `metadata.provider_code` never stand in for
+ * it. Absent or malformed → null.
+ */
+function canonicalErrorType(error: { metadata?: unknown }): string | null {
+	const metadata = error.metadata;
+	if (metadata === null || typeof metadata !== "object") return null;
+	const type = (metadata as { error_type?: unknown }).error_type;
+	return typeof type === "string" && STRUCTURED_RESEARCH_ERROR_TYPE_PATTERN.test(type) ? type : null;
+}
+
+function retryAfterMs(res: { headers?: { get?(name: string): string | null } }): number | null {
+	const header = res.headers?.get?.("retry-after");
+	if (!header) return null;
+	const seconds = Number(header);
+	if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+	const at = Date.parse(header);
+	return Number.isNaN(at) ? null : Math.max(0, at - Date.now());
+}
+
+/**
+ * The typed refusal for a non-2xx structured-research response. The body is
+ * read once: a structured OpenRouter error envelope may carry the canonical
+ * `error.metadata.error_type`; a body that also carries a generation id,
+ * usage, choices or content is flagged, because such a response was not a
+ * free refusal. The message keeps the status and the body text (never the
+ * credential) for logs.
+ */
+async function structuredRequestError(res: Response): Promise<StructuredResearchRequestError> {
+	const status = res.status;
+	const text = await res.text();
+	let body: any = null;
+	try {
+		body = JSON.parse(text);
+	} catch {
+		body = null;
+	}
+	const error = body?.error;
+	const structured =
+		error !== null && typeof error === "object" && typeof error.message === "string" && typeof error.code === "number";
+	const carriesOutput =
+		typeof body?.id === "string" ||
+		(body?.usage !== undefined && body?.usage !== null) ||
+		(Array.isArray(body?.choices) && body.choices.length > 0) ||
+		typeof body?.output === "string";
+	return new StructuredResearchRequestError({
+		provider: "openrouter",
+		httpStatus: status,
+		errorType: structured ? canonicalErrorType(error) : null,
+		structured,
+		carriesOutput,
+		retryAfterMs: retryAfterMs(res),
+		message: `OpenRouter API error (${status}): ${text}`,
+	});
 }
 
 function openrouterHeaders(): Record<string, string> {
@@ -242,9 +303,7 @@ export const openrouter: Provider = {
 			body: JSON.stringify(body),
 			signal,
 		});
-		if (!res.ok) {
-			throw new Error(`OpenRouter API error (${res.status}): ${await res.text()}`);
-		}
+		if (!res.ok) throw await structuredRequestError(res);
 		const data: any = await res.json();
 		// The response is charged whatever its content: the audit envelope is
 		// read first so a content defect never loses the generation or the cost.

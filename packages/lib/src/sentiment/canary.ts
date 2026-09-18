@@ -7,7 +7,12 @@ import type {
 	StructuredResearchUsage,
 } from "../providers/types";
 import { SENTIMENT_EVIDENCE_VERSION } from "./anchors";
-import { classifySentiment, SENTIMENT_MAX_OUTPUT_TOKENS, sentimentInputHash } from "./classifier";
+import {
+	classifySentiment,
+	countFilteredClaimCodes,
+	SENTIMENT_MAX_OUTPUT_TOKENS,
+	sentimentInputHash,
+} from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import type { SentimentDiagnostic } from "./diagnostics";
 import { SentimentJobError } from "./errors";
@@ -15,6 +20,7 @@ import type { PaidResponseEnvelope } from "./errors-validation";
 import { runSentimentJob, type SentimentJobDeps, type SentimentJobOutcome } from "./job";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
+import { RESOLUTION_POLICY } from "./resolution";
 import {
 	candidatesFromMentions,
 	claimAnalysis,
@@ -140,6 +146,8 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"output-tokens-exceeded",
 	"entities-mismatch",
 	"generation-id-missing",
+	"not-verified",
+	"total-cost-exceeded",
 ] as const;
 
 export type SentimentCanaryRejectCode = (typeof SENTIMENT_CANARY_REJECT_CODES)[number];
@@ -183,6 +191,19 @@ export type SentimentCanaryOutcome =
 			request?: StructuredResearchRequestSummary;
 			/** Safe generation id of the paid call; present on a classified outcome, null when the provider reported none or an unsafe one. */
 			generationId?: string | null;
+			/** Aspect claims the answer did not support, dropped before persistence (classifier v5); the analysis is complete without them. */
+			filteredClaimCount?: number;
+			filteredClaimCodes?: Record<string, number>;
+			/** Independent verification that accepted the persisted result (ADR Amendment B). */
+			verified?: true;
+			verifierVersion?: string;
+			paidCalls?: number;
+			costUsd?: number;
+			repairs?: number;
+			verifierRejections?: number;
+			/** Why an `awaiting-review` run left the automatic workflow, and how many entities stay unresolved. */
+			reason?: string;
+			unresolved?: number;
 	  }
 	| Extract<SentimentJobOutcome, { status: "terminal-validation-failure" }>
 	| {
@@ -512,11 +533,13 @@ function entityKeysMatch(contract: SentimentCanaryContract, entityKeys: string[]
 }
 
 /**
- * The post-call contract: exactly one attempt and one provider request, the
- * request carried the locked model, web search, the tool budget, the output
- * cap, strict JSON-schema output and strict parameter routing, the provider
- * reported usage that fits every threshold, and the classification covers
- * exactly the frozen entities.
+ * The post-call contract: exactly one attempt, between one and the policy's
+ * maximum of paid provider requests (initial classification, targeted
+ * repairs, independent verification), the initial request carried the locked
+ * model, web search, the tool budget, the output cap, strict JSON-schema
+ * output and strict parameter routing, the provider reported usage that fits
+ * every threshold, the whole resolution stayed under the automatic cost
+ * ceiling, the result is verified and covers exactly the frozen entities.
  */
 export function evaluateSentimentCanary(
 	contract: SentimentCanaryContract,
@@ -526,7 +549,9 @@ export function evaluateSentimentCanary(
 ): SentimentCanaryVerdict {
 	const reasons: SentimentCanaryReason[] = [];
 	if (counts.attempts !== 1) reasons.push({ code: "attempts", detail: String(counts.attempts) });
-	if (counts.providerCalls !== 1) reasons.push({ code: "provider-calls", detail: String(counts.providerCalls) });
+	if (counts.providerCalls < 1 || counts.providerCalls > RESOLUTION_POLICY.maxPaidCalls) {
+		reasons.push({ code: "provider-calls", detail: String(counts.providerCalls) });
+	}
 	if (!outcome) reasons.push({ code: "job-outcome", detail: "none" });
 	else if (outcome.status === "error") reasons.push(rejectReasonForError(outcome));
 	else if (outcome.status === "terminal-validation-failure") reasons.push({ code: "validation", detail: outcome.code });
@@ -536,6 +561,10 @@ export function evaluateSentimentCanary(
 		if (!entityKeysMatch(contract, outcome.entityKeys)) reasons.push({ code: "entities-mismatch" });
 		// A paid answer the operator cannot reconcile against the provider's ledger is never accepted.
 		if (!outcome.generationId) reasons.push({ code: "generation-id-missing" });
+		if (outcome.verified !== true) reasons.push({ code: "not-verified" });
+		if (typeof outcome.costUsd === "number" && outcome.costUsd > RESOLUTION_POLICY.maxCostUsd) {
+			reasons.push({ code: "total-cost-exceeded", detail: outcome.costUsd.toFixed(6) });
+		}
 	}
 	return reasons.length === 0 ? { status: "accept" } : { status: "reject", reasons };
 }
@@ -558,6 +587,22 @@ function rejectReasonForError(outcome: Extract<SentimentCanaryOutcome, { status:
 				? { code: "error", detail: outcome.code }
 				: { code: "validation", detail: outcome.code };
 	}
+}
+
+/**
+ * A non-classified job outcome as the canary reports it. When the canary's
+ * own deadline cut the request, the job parked the run for reconciliation;
+ * the canary reports the abort it caused rather than an anonymous outcome.
+ */
+function parkedOutcome(status: SentimentJobOutcome["status"], signal: AbortSignal): SentimentCanaryOutcome {
+	if (status !== "awaiting-reconciliation" || !signal.aborted) return { status } as SentimentCanaryOutcome;
+	const reason = signal.reason as { name?: unknown } | undefined;
+	return {
+		status: "error",
+		name: typeof reason?.name === "string" ? reason.name : "AbortError",
+		code: "aborted",
+		httpStatus: null,
+	};
 }
 
 function safeOutcomeForError(error: unknown): SentimentCanaryOutcome {
@@ -686,6 +731,10 @@ export async function runSentimentCanary(args: {
 					usage: classification.usage,
 					request: classification.request,
 					generationId: classification.generationId ?? null,
+					filteredClaimCount: classification.filteredClaims.length,
+					filteredClaimCodes: countFilteredClaimCodes(classification.filteredClaims),
+					verified: true,
+					verifierVersion: persistArgs.verifierVersion,
 				},
 				{ attempts: 1, providerCalls },
 				args.limits,
@@ -729,11 +778,27 @@ export async function runSentimentCanary(args: {
 				usage: result.usage,
 				request: result.request,
 				generationId: result.generationId,
+				filteredClaimCount: result.filteredClaimCount,
+				filteredClaimCodes: result.filteredClaimCodes,
+				verified: result.verified,
+				verifierVersion: result.verifierVersion,
+				paidCalls: result.paidCalls,
+				costUsd: result.costUsd,
+				repairs: result.repairs,
+				verifierRejections: result.verifierRejections,
 			};
 		} else if (result.status === "terminal-validation-failure") {
 			outcome = result;
+		} else if (result.status === "awaiting-review") {
+			outcome = {
+				status: result.status,
+				reason: result.reason,
+				paidCalls: result.paidCalls,
+				costUsd: result.costUsd,
+				unresolved: result.unresolved,
+			};
 		} else {
-			outcome = { status: result.status };
+			outcome = parkedOutcome(result.status, controller.signal);
 		}
 	} catch (error) {
 		outcome = safeOutcomeForError(error);

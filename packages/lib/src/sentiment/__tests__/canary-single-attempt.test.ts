@@ -6,7 +6,7 @@
  * a provider failure never calls the provider again.
  */
 import { describe, expect, it, vi } from "vitest";
-import type { Provider } from "../../providers/types";
+import { type Provider, StructuredResearchRequestError } from "../../providers/types";
 import { SENTIMENT_EVIDENCE_VERSION } from "../anchors";
 import {
 	inspectSentimentCanaryRunState,
@@ -30,6 +30,7 @@ import {
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const RUN = "bf1347c3-7161-457c-91d6-0173d601659e";
 const WGV = "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c";
@@ -85,6 +86,7 @@ function statefulStore(provider: Provider, initial: StoredAnalysisState | null) 
 		}
 	});
 	const recordUsage = vi.fn(async () => undefined);
+	const resolution = resolutionFakes();
 	const deps: SentimentJobDeps = {
 		loadRun: vi.fn(async () => run),
 		loadEntities: vi.fn(async () => roster),
@@ -114,7 +116,9 @@ function statefulStore(provider: Provider, initial: StoredAnalysisState | null) 
 		}),
 		persist,
 		recordUsage,
-		resolveProvider: () => provider,
+		resolveProvider: () => resolution.phasesProvider(provider),
+		resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		...resolution.deps,
 	};
 	return { deps, persist, recordUsage, state: () => (analysis ? { ...analysis } : null) };
 }
@@ -123,7 +127,15 @@ const failingProvider = () =>
 	({
 		id: "openrouter",
 		runStructuredResearch: vi.fn(async () => {
-			throw new Error("OpenRouter API error (503): upstream unavailable");
+			throw new StructuredResearchRequestError({
+				provider: "openrouter",
+				httpStatus: 503,
+				errorType: "provider_overloaded",
+				structured: true,
+				carriesOutput: false,
+				retryAfterMs: null,
+				message: "OpenRouter API error (503): upstream overloaded",
+			});
 		}),
 	}) as unknown as Provider;
 
@@ -179,8 +191,9 @@ describe("G1: only a never-attempted run is pristine", () => {
 		expect(one.providerCalls).toBe(1);
 		expect(first.runStructuredResearch).toHaveBeenCalledTimes(1);
 		expect(codes(one)).toEqual(["provider-error"]);
-		expect(store.state()).toEqual({ status: "failed", attempts: 1, observations: 0 });
-		expect(store.recordUsage).toHaveBeenCalledTimes(1);
+		expect(store.state()).toEqual({ status: "pending_resolution", attempts: 1, observations: 0 });
+		// The provider failure was unpaid: nothing attributed.
+		expect(store.recordUsage).toHaveBeenCalledTimes(0);
 
 		const second = failingProvider();
 		const again = await runSentimentCanary({
@@ -194,10 +207,10 @@ describe("G1: only a never-attempted run is pristine", () => {
 		expect(again.providerCalls).toBe(0);
 		expect(second.runStructuredResearch).not.toHaveBeenCalled();
 		expect(store.persist).not.toHaveBeenCalled();
-		expect(store.recordUsage).toHaveBeenCalledTimes(1);
-		expect(store.state()).toEqual({ status: "failed", attempts: 1, observations: 0 });
+		expect(store.recordUsage).toHaveBeenCalledTimes(0);
+		expect(store.state()).toEqual({ status: "pending_resolution", attempts: 1, observations: 0 });
 		expect(await inspectSentimentCanaryRunState(RUN, store.deps)).toEqual({
-			analysis: { status: "failed", attempts: 1, observations: 0 },
+			analysis: { status: "pending_resolution", attempts: 1, observations: 0 },
 			pristine: false,
 		});
 	});

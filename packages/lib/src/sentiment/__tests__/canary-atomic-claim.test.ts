@@ -7,7 +7,7 @@
  * provider before B is allowed to claim.
  */
 import { describe, expect, it, vi } from "vitest";
-import type { Provider } from "../../providers/types";
+import { type Provider, StructuredResearchRequestError } from "../../providers/types";
 import { SENTIMENT_EVIDENCE_VERSION } from "../anchors";
 import {
 	parseSentimentCanaryContract,
@@ -31,6 +31,7 @@ import {
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const RUN = "bf1347c3-7161-457c-91d6-0173d601659e";
 const WGV = "b64b96f5-3bbd-4e42-a5ea-f30821cb9f8c";
@@ -103,6 +104,7 @@ function sharedRow(initial: StoredAnalysisState) {
 		return { claimed: true, attempts: row.attempts, claim: { analysisId: "a1", generation } };
 	}
 	function deps(provider: Provider, gates: { beforeClaim?: Promise<void>; afterPreflight?: () => void } = {}) {
+		const resolution = resolutionFakes();
 		const d: SentimentJobDeps = {
 			loadRun: vi.fn(async () => run),
 			loadEntities: vi.fn(async () => roster),
@@ -138,7 +140,9 @@ function sharedRow(initial: StoredAnalysisState) {
 			recordUsage: vi.fn(async (event: unknown) => {
 				usage.push(event);
 			}),
-			resolveProvider: () => provider,
+			resolveProvider: () => resolution.phasesProvider(provider),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			...resolution.deps,
 		};
 		return d;
 	}
@@ -149,7 +153,15 @@ const failingProvider = () =>
 	({
 		id: "openrouter",
 		runStructuredResearch: vi.fn(async () => {
-			throw new Error("OpenRouter API error (503): upstream unavailable");
+			throw new StructuredResearchRequestError({
+				provider: "openrouter",
+				httpStatus: 503,
+				errorType: "provider_overloaded",
+				structured: true,
+				carriesOutput: false,
+				retryAfterMs: null,
+				message: "OpenRouter API error (503): upstream overloaded",
+			});
 		}),
 	}) as unknown as Provider;
 
@@ -193,8 +205,9 @@ describe("G3: the canary call is granted by an atomic pristine claim, not by pre
 		expect(depsB.recordUsage).not.toHaveBeenCalled();
 
 		// The row belongs to A's attempt only.
-		expect(shared.row).toEqual({ status: "failed", attempts: 1, observations: 0 });
-		expect(shared.usage).toHaveLength(1);
+		expect(shared.row).toEqual({ status: "pending_resolution", attempts: 1, observations: 0 });
+		// A's provider failure never received an answer: unpaid, nothing attributed.
+		expect(shared.usage).toHaveLength(0);
 		expect(JSON.stringify(reportB)).not.toMatch(/ARAG|WGV|upstream|Bearer|sk-or-/);
 	});
 

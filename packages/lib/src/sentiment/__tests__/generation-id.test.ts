@@ -27,6 +27,7 @@ import {
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
 } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const RUN = "5e970008-0000-4000-8000-000000000001";
 const ANSWER = "Arvo ist ein solider Rechtsschutzversicherer. Beltra wird nur genannt.";
@@ -100,6 +101,7 @@ function providerWith(generationId: unknown): Provider {
 }
 
 function fakes(provider: Provider) {
+	const resolution = resolutionFakes();
 	const deps: SentimentJobDeps = {
 		loadRun: vi.fn(async () => run),
 		loadEntities: vi.fn(async () => entities),
@@ -124,7 +126,9 @@ function fakes(provider: Provider) {
 		markAnalysis: vi.fn(async () => true),
 		persist: vi.fn(async () => undefined),
 		recordUsage: vi.fn(async () => undefined),
-		resolveProvider: () => provider,
+		resolveProvider: () => resolution.phasesProvider(provider),
+		resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		...resolution.deps,
 	};
 	return deps;
 }
@@ -184,7 +188,10 @@ describe("H1 the generation id survives the successful path", () => {
 			// Decided at the persistence boundary like every other post-call rejection: nothing is written.
 			expect(report.outcome).toMatchObject({ status: "error", code: "canary-contract" });
 			expect(deps.persist).not.toHaveBeenCalled();
-			expect(deps.markAnalysis).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ status: "failed" }));
+			expect(deps.markAnalysis).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.objectContaining({ status: "pending_resolution" }),
+			);
 			expect(JSON.stringify(report)).not.toMatch(/gen x|yyyyy/);
 		}
 	});

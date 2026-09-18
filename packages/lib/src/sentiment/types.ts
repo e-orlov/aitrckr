@@ -12,25 +12,56 @@ export const SENTIMENT_DETECTOR_VERSION = "sent-detector-v2";
  * change). Rows with another version stay auditable and are ignored at read
  * time.
  */
-export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v4";
+export const SENTIMENT_CLASSIFIER_VERSION = "sent-classifier-v5";
 
 /**
  * Transitional read policy: every Sentiment read prefers a completed analysis
  * of the current classifier and falls back, per prompt run, to a completed
- * analysis of a listed older version, so history classified under the
+ * analysis of the next listed older version, so history classified under a
  * previous contract stays visible until it is reclassified. Preference order;
- * versions not listed here (v2 and older) are never read. Removing the
- * fallback is a later explicit decision, not a side effect of a deployment.
+ * versions not listed here (v2 and older) are never read. Removing a fallback
+ * is a later explicit decision, not a side effect of a deployment.
  */
-export const SENTIMENT_READABLE_CLASSIFIER_VERSIONS = [SENTIMENT_CLASSIFIER_VERSION, "sent-classifier-v3"] as const;
+export const SENTIMENT_READABLE_CLASSIFIER_VERSIONS = [
+	SENTIMENT_CLASSIFIER_VERSION,
+	"sent-classifier-v4",
+	"sent-classifier-v3",
+] as const;
 
 /**
- * Versioned separately from the classifier: a later taxonomy must never
- * silently rewrite what an older aspect row meant. The aspect *keys* and
- * their meaning are unchanged in v4; the routing rules that send a statement
- * to one key belong to the classifier contract, not to the taxonomy.
+ * The aspect taxonomy each classifier version was shipped with. A taxonomy
+ * change is a classifier-semantic change: it ships as a new classifier version
+ * with its own entry here, which is what makes every stored analysis of the
+ * old version historical and the new identity eligible exactly once. There is
+ * deliberately no way to change the current taxonomy without adding a version.
  */
-export const SENTIMENT_TAXONOMY_VERSION = "sent-aspects-v1";
+export const SENTIMENT_CLASSIFIER_TAXONOMIES = Object.freeze({
+	"sent-classifier-v3": "sent-aspects-v1",
+	"sent-classifier-v4": "sent-aspects-v1",
+	"sent-classifier-v5": "sent-aspects-v1",
+} as const satisfies Record<string, string>);
+
+/**
+ * Stored on every analysis row so a later taxonomy can never silently rewrite
+ * what an older aspect row meant. Derived from the current classifier version:
+ * the aspect *keys* and their meaning are unchanged in v4 and v5; the routing
+ * rules that send a statement to one key belong to the classifier contract.
+ */
+export const SENTIMENT_TAXONOMY_VERSION: string = SENTIMENT_CLASSIFIER_TAXONOMIES[SENTIMENT_CLASSIFIER_VERSION];
+
+/**
+ * A current-version analysis row that names a taxonomy the current version
+ * never shipped with. Not stale work — the resolution identity (run, input,
+ * classifier version) is untouched — but a versioning defect: the same
+ * classifier version has been deployed with two taxonomies. Inventory and
+ * worker both refuse to act on it and report it.
+ */
+export function isTaxonomyDrift(analysis: { classifierVersion: string; taxonomyVersion: string }): boolean {
+	return (
+		analysis.classifierVersion === SENTIMENT_CLASSIFIER_VERSION &&
+		analysis.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION
+	);
+}
 
 export const SENTIMENT_CATEGORIES = ["positive", "neutral", "mixed", "negative"] as const;
 export type SentimentCategory = (typeof SENTIMENT_CATEGORIES)[number];
@@ -120,7 +151,19 @@ export const SENTIMENT_MODEL = "openai/gpt-5-mini";
 export const SENTIMENT_DETECTION_STATUSES = ["mentions", "no_mentions", "unextractable"] as const;
 export type SentimentDetectionStatus = (typeof SENTIMENT_DETECTION_STATUSES)[number];
 
-export const SENTIMENT_ANALYSIS_STATUSES = ["pending", "processing", "completed", "no_mentions", "failed"] as const;
+/**
+ * `pending_resolution` is a v5 run parked inside its resolution workflow
+ * (retry wait, awaiting review or reconciliation): unresolved work, never a
+ * failure, and claimable only by that workflow or by adjudication.
+ */
+export const SENTIMENT_ANALYSIS_STATUSES = [
+	"pending",
+	"processing",
+	"completed",
+	"no_mentions",
+	"failed",
+	"pending_resolution",
+] as const;
 export type SentimentAnalysisStatus = (typeof SENTIMENT_ANALYSIS_STATUSES)[number];
 
 /**
@@ -211,7 +254,8 @@ function citationListFor(polarity: EvidencePolarity, parts: SchemaParts) {
 
 /**
  * One judged target (an entity overall or one of its aspects) as the provider
- * returns it — classifier contract `sent-classifier-v4`. The category is a
+ * returns it — classifier contract `sent-classifier-v5` (wire shape unchanged
+ * since v4). The category is a
  * discriminator: each branch admits only the score range and the citation
  * polarities that belong to it, so a Positive target carrying a negative
  * citation, a Negative target carrying a positive one, or a Mixed target
@@ -259,6 +303,8 @@ function aspectTargetSchemaFor(parts: SchemaParts) {
 }
 
 function entityTargetSchemaFor(parts: SchemaParts) {
+	// Aspects are optional evidence-backed findings, never a checklist: the
+	// array may be empty and an aspect the answer does not evaluate is absent.
 	const aspects = z.array(aspectTargetSchemaFor(parts)).max(SENTIMENT_ASPECT_KEYS.length);
 	return z.union(targetBranchesFor({ key: parts.entityKey, aspects }, parts));
 }

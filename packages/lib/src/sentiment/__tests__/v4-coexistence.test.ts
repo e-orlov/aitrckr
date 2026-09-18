@@ -43,9 +43,13 @@ function row(patch: Partial<SentimentAnalysis>): SentimentAnalysis {
 }
 
 describe("classifier v3/v4 coexistence", () => {
-	it("the current version is v4 and v3 is the only fallback", () => {
-		expect(SENTIMENT_CLASSIFIER_VERSION).toBe("sent-classifier-v4");
-		expect(SENTIMENT_READABLE_CLASSIFIER_VERSIONS).toEqual(["sent-classifier-v4", "sent-classifier-v3"]);
+	it("the current version is v5; v4 and then v3 are the only fallbacks", () => {
+		expect(SENTIMENT_CLASSIFIER_VERSION).toBe("sent-classifier-v5");
+		expect(SENTIMENT_READABLE_CLASSIFIER_VERSIONS).toEqual([
+			"sent-classifier-v5",
+			"sent-classifier-v4",
+			"sent-classifier-v3",
+		]);
 	});
 
 	it("a completed v3 analysis does not make the run current; a completed v4 analysis does", () => {
@@ -61,9 +65,10 @@ describe("classifier v3/v4 coexistence", () => {
 		expect(isAnalysisTerminallyFailed(row({ ...failed, errorCode: "evidence-entity-unbound" }), HASH)).toBe(true);
 	});
 
-	it("v3 and v4 jobs for one run have different singleton keys", () => {
+	it("v3, v4 and v5 jobs for one run have different singleton keys", () => {
 		expect(sentimentSingletonKey(RUN, "sent-classifier-v3")).not.toBe(sentimentSingletonKey(RUN, "sent-classifier-v4"));
-		expect(sentimentSingletonKey(RUN, SENTIMENT_CLASSIFIER_VERSION)).toBe(`sentiment:${RUN}:sent-classifier-v4`);
+		expect(sentimentSingletonKey(RUN, "sent-classifier-v4")).not.toBe(sentimentSingletonKey(RUN, "sent-classifier-v5"));
+		expect(sentimentSingletonKey(RUN, SENTIMENT_CLASSIFIER_VERSION)).toBe(`sentiment:${RUN}:sent-classifier-v5`);
 	});
 
 	it("a v3 payload is skipped by the v4 worker without loading, claiming or calling", async () => {

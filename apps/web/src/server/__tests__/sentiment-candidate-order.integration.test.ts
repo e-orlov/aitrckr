@@ -9,6 +9,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SENTIMENT_DETECTOR_VERSION } from "@workspace/lib/sentiment";
@@ -24,6 +25,9 @@ if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test s
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const MIGRATIONS = path.resolve(here, "../../../../../packages/lib/src/db/migrations");
+const JOURNAL_LENGTH = (
+	JSON.parse(readFileSync(path.join(MIGRATIONS, "meta/_journal.json"), "utf8")) as { entries: unknown[] }
+).entries.length;
 // The scripts under test are the committed operator tools; pointing this at a checkout of an
 // older revision reproduces the pre-fix behaviour against the very same databases.
 const WORKER_DIR = process.env.SENTIMENT_ORDER_WORKER_DIR ?? path.resolve(here, "../../../../worker");
@@ -157,7 +161,9 @@ describe("IT-SNT-022 canonical candidate order across independently prepared dat
 	it("both databases carry the full migration chain and the same logical data", async () => {
 		for (const name of [DB_A, DB_B]) {
 			const client = clients[name];
-			expect((await client.query("SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations")).rows[0].n).toBe(22);
+			expect((await client.query("SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations")).rows[0].n).toBe(
+				JOURNAL_LENGTH,
+			);
 			expect(
 				(await client.query("SELECT count(*)::int AS n FROM competitors WHERE brand_id = $1", [BRAND])).rows[0].n,
 			).toBe(2);

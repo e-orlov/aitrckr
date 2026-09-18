@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { segmentAnswer } from "../anchors";
-import { validateClassification, validateSentimentResult } from "../classifier";
+import { validateClassification, validateSentimentResult, validateSentimentResultDetailed } from "../classifier";
 import { SENTIMENT_ASPECT_ROUTING_RULES } from "../prompt";
 import { type SentimentCandidate, sentimentProviderResultSchemaFor } from "../types";
 
@@ -121,12 +121,15 @@ describe("V4-RED-003 entity-unbound aspect", () => {
 				},
 			],
 		};
-		expect(() => validateSentimentResult(result, { answerBody: answer, candidates: [ARVO] })).toThrow(
-			expect.objectContaining({
-				code: "aspect-ungrounded",
-				diagnostic: expect.objectContaining({ aspectKey: "price" }),
-			}),
-		);
+		// Classifier v5: the claim is dropped, not the analysis; nothing takes the aspect's place.
+		const { entities, filteredClaims } = validateSentimentResultDetailed(result, {
+			answerBody: answer,
+			candidates: [ARVO],
+		});
+		expect(entities[0].aspects).toEqual([]);
+		expect(filteredClaims).toEqual([
+			{ entityKey: "brand", aspectKey: "price", code: "aspect-ungrounded", anchorIds: ["s0003", "s0004"] },
+		]);
 	});
 
 	it("still accepts a generic anchor beside one anchor that names the entity", () => {

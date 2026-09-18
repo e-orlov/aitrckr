@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, notExists, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, notExists, or, type SQL, type SQLWrapper, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import {
 	brands,
@@ -8,10 +8,14 @@ import {
 	prompts,
 	type SentimentAnalysis,
 	type SentimentDetection,
+	type SentimentResolutionCase,
 	sentimentAnalyses,
 	sentimentAspectObservations,
 	sentimentDetections,
+	sentimentFilteredClaims,
 	sentimentObservations,
+	sentimentProviderAttempts,
+	sentimentResolutionCases,
 	usageEvents,
 } from "../db/schema";
 import { estimateRunCostUsd } from "../usage/cost";
@@ -19,8 +23,11 @@ import type { SentimentClassification } from "./classifier";
 import { brandEntity, competitorEntity, type DetectableEntity, type DetectedMention } from "./detector";
 import { isValidationCode } from "./diagnostics";
 import { ClaimLostError } from "./errors";
+import type { ResolutionCaseStatus, ReviewReason, UnresolvedTarget } from "./resolution";
 import { extractAnswerBody } from "./text";
 import {
+	compareSentimentEntities,
+	SENTIMENT_ASPECT_KEYS,
 	SENTIMENT_ASPECTS,
 	SENTIMENT_CLAIM_TIMEOUT_SECONDS,
 	SENTIMENT_CLASSIFIER_VERSION,
@@ -29,14 +36,19 @@ import {
 	SENTIMENT_PROVIDER_ID,
 	SENTIMENT_TAXONOMY_VERSION,
 	type SentimentAnalysisStatus,
+	type SentimentAspectKey,
 	type SentimentCandidate,
+	type SentimentClassificationResult,
 	type SentimentDetectionStatus,
 	sortSentimentEntities,
 } from "./types";
 
 type Db = typeof db;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
-type Executor = Db | Tx;
+export type Executor = Db | Tx;
+
+/** Run `fn` in one database transaction; the job's paid-answer settlement goes through this (injectable for offline tests). */
+export const runInTransaction = <T>(fn: (tx: Executor) => Promise<T>): Promise<T> => db.transaction((tx) => fn(tx));
 
 /** The stored run the worker needs, without loading anything the queue payload already implies. */
 export interface StoredRunForSentiment {
@@ -322,16 +334,19 @@ export async function ensureAnalysis(
 
 /**
  * A completed analysis is current only when it was produced under the
- * current taxonomy for exactly the classifier input that would be sent now.
- * Anything else — older taxonomy, missing hash, changed entity set or names —
- * makes the run eligible for reclassification instead of counting as done.
+ * current taxonomy for exactly the classifier input that would be sent now
+ * and carries the verification marker. Anything else — older taxonomy,
+ * missing hash, changed entity set or names, a completed row that was never
+ * verified — makes the run eligible for reclassification instead of counting
+ * as done.
  */
 export function isAnalysisCurrent(analysis: SentimentAnalysis, expectedInputHash: string): boolean {
 	return (
 		analysis.status === "completed" &&
 		analysis.classifierVersion === SENTIMENT_CLASSIFIER_VERSION &&
 		analysis.taxonomyVersion === SENTIMENT_TAXONOMY_VERSION &&
-		analysis.inputHash === expectedInputHash
+		analysis.inputHash === expectedInputHash &&
+		analysis.verifiedAt !== null
 	);
 }
 
@@ -366,6 +381,12 @@ export interface AnalysisClaim {
 export interface ClaimOptions {
 	/** Also claim finished rows (`completed`/`no_mentions`) that are no longer current. */
 	allowFinished: boolean;
+	/**
+	 * Also claim a `pending_resolution` row. Only the resolution workflow itself
+	 * and the adjudication path set this: a plain worker claim, a canary or a
+	 * backfill never moves parked work.
+	 */
+	resumeResolution?: boolean;
 	/**
 	 * Canary-only: claim exclusively a never-attempted row — `pending`, zero
 	 * attempts and no observation — all checked inside the one UPDATE, so of
@@ -407,10 +428,12 @@ export async function claimAnalysis(
 				),
 			)
 		: or(
-				inArray(
-					sentimentAnalyses.status,
-					options.allowFinished ? ["pending", "failed", "completed", "no_mentions"] : ["pending", "failed"],
-				),
+				inArray(sentimentAnalyses.status, [
+					"pending",
+					"failed",
+					...(options.allowFinished ? ["completed", "no_mentions"] : []),
+					...(options.resumeResolution ? ["pending_resolution"] : []),
+				]),
 				and(eq(sentimentAnalyses.status, "processing"), lt(sentimentAnalyses.startedAt, staleBefore)),
 			);
 	const [row] = await executor
@@ -460,8 +483,10 @@ export async function markAnalysis(
 /**
  * Persist a validated classification atomically: the analysis flips to
  * `completed` — fenced on the claim generation, which also locks the row —
- * then its observations are replaced by the new set with their aspect rows.
- * A stale claimant gets `ClaimLostError` before any observation is touched.
+ * then its observations are replaced by the new set with their aspect rows,
+ * and the audit of the aspect claims dropped as unsupported is replaced with
+ * them (identifiers and codes only). A stale claimant gets `ClaimLostError`
+ * before any row is touched; a failure anywhere rolls all of it back.
  */
 export async function persistClassification(args: {
 	claim: AnalysisClaim;
@@ -469,9 +494,12 @@ export async function persistClassification(args: {
 	brandId: string;
 	mentions: StoredMention[];
 	classification: SentimentClassification;
+	/** Which independent verification accepted this result (verifier version or human adjudication); required since classifier v5. */
+	verifierVersion: string;
 }): Promise<void> {
 	const mentionByKey = new Map(args.mentions.map((m) => [m.key, m]));
 	await db.transaction(async (tx) => {
+		const now = new Date();
 		const owned = await tx
 			.update(sentimentAnalyses)
 			.set({
@@ -483,8 +511,10 @@ export async function persistClassification(args: {
 				inputHash: args.classification.inputHash,
 				errorCode: null,
 				errorMessage: null,
-				completedAt: new Date(),
-				updatedAt: new Date(),
+				verifierVersion: args.verifierVersion,
+				verifiedAt: now,
+				completedAt: now,
+				updatedAt: now,
 			})
 			.where(
 				and(
@@ -495,6 +525,7 @@ export async function persistClassification(args: {
 			.returning({ id: sentimentAnalyses.id });
 		if (owned.length !== 1) throw new ClaimLostError(args.claim);
 		await tx.delete(sentimentObservations).where(eq(sentimentObservations.analysisId, args.claim.analysisId));
+		await tx.delete(sentimentFilteredClaims).where(eq(sentimentFilteredClaims.analysisId, args.claim.analysisId));
 		for (const entity of args.classification.entities) {
 			const mention = mentionByKey.get(entity.key);
 			if (!mention) throw new Error(`classified entity "${entity.key}" has no mention row`);
@@ -529,7 +560,335 @@ export async function persistClassification(args: {
 				);
 			}
 		}
+		// One audit row per (entity, aspect) — an aspect is dropped for exactly one
+		// reason — in the canonical entity order and the taxonomy's aspect order, so
+		// two databases persisting the same classification hold identical rows.
+		const audit = new Map<string, typeof sentimentFilteredClaims.$inferInsert>();
+		for (const claim of args.classification.filteredClaims) {
+			const mention = mentionByKey.get(claim.entityKey);
+			if (!mention) throw new Error(`filtered claim for entity "${claim.entityKey}" has no mention row`);
+			const identity = `${claim.entityKey}|${claim.aspectKey}`;
+			if (audit.has(identity)) throw new Error(`filtered claim for "${identity}" reported twice`);
+			audit.set(identity, {
+				analysisId: args.claim.analysisId,
+				entityType: mention.entityType,
+				entityKey: mention.key,
+				aspectKey: claim.aspectKey,
+				validationCode: claim.code,
+				classifierVersion: args.classification.classifierVersion,
+				anchorIds: claim.anchorIds,
+			});
+		}
+		const rows = [...audit.values()].sort(
+			(a, b) =>
+				compareSentimentEntities(
+					{ entityType: a.entityType as "brand" | "competitor", key: a.entityKey },
+					{ entityType: b.entityType as "brand" | "competitor", key: b.entityKey },
+				) ||
+				SENTIMENT_ASPECT_KEYS.indexOf(a.aspectKey as SentimentAspectKey) -
+					SENTIMENT_ASPECT_KEYS.indexOf(b.aspectKey as SentimentAspectKey),
+		);
+		for (const row of rows) await tx.insert(sentimentFilteredClaims).values(row);
+		// The resolution instance of exactly this input closes in the same transaction as the verified result.
+		await tx
+			.update(sentimentResolutionCases)
+			.set({ status: "resolved", unresolvedTargets: [], nextAttemptAt: null, reviewReason: null, updatedAt: now })
+			.where(
+				and(
+					eq(sentimentResolutionCases.analysisId, args.claim.analysisId),
+					eq(sentimentResolutionCases.inputHash, args.classification.inputHash),
+				),
+			);
 	});
+}
+
+// ---------------------------------------------------------------------------
+// Resolution workflow state (ADR-SENT-01-GROUNDED-COMPLETION, Amendment B)
+// ---------------------------------------------------------------------------
+
+export type StoredResolutionCase = SentimentResolutionCase;
+
+/**
+ * Ownership of one resolution instance: the analysis claim plus the instance
+ * the claimant is working on. Every case and ledger write is fenced on both.
+ */
+export interface ResolutionOwner extends AnalysisClaim {
+	instanceId: string;
+}
+
+/**
+ * The resolution case of an analysis, created `open` for the current input
+ * when none exists. A case whose input hash differs is a superseded instance:
+ * the row rotates to a new instance id with a fresh budget and start time;
+ * its attempt rows stay under the old id. A resolved case for the same input
+ * is returned as it is — it is immutable; callers must not reopen it. The
+ * rotation is fenced on the claim when one is given, so a stale claimant
+ * cannot roll the case back to its own, older input.
+ */
+export async function ensureResolutionCase(
+	analysisId: string,
+	inputHash: string,
+	claim?: AnalysisClaim,
+	executor: Executor = db,
+): Promise<StoredResolutionCase> {
+	await executor
+		.insert(sentimentResolutionCases)
+		.values({ analysisId, inputHash, status: "open" })
+		.onConflictDoNothing({ target: [sentimentResolutionCases.analysisId] });
+	const row = await executor.query.sentimentResolutionCases.findFirst({
+		where: eq(sentimentResolutionCases.analysisId, analysisId),
+	});
+	if (!row) throw new Error(`resolution case missing for analysis ${analysisId}`);
+	if (row.inputHash === inputHash) return row;
+	const now = new Date();
+	const [fresh] = await executor
+		.update(sentimentResolutionCases)
+		.set({
+			instanceId: sql`gen_random_uuid()`,
+			inputHash,
+			status: "open",
+			provisionalResult: null,
+			unresolvedTargets: [],
+			automatedProviderCalls: 0,
+			totalActualCostUsd: "0",
+			nextAttemptAt: null,
+			reviewReason: null,
+			createdAt: now,
+			updatedAt: now,
+		})
+		.where(ownedCase(analysisId, claim))
+		.returning();
+	if (!fresh) throw new ClaimLostError(claim ?? { analysisId, generation: -1 });
+	return fresh;
+}
+
+export async function loadResolutionCase(
+	analysisId: string,
+	executor: Executor = db,
+): Promise<StoredResolutionCase | null> {
+	const row = await executor.query.sentimentResolutionCases.findFirst({
+		where: eq(sentimentResolutionCases.analysisId, analysisId),
+	});
+	return row ?? null;
+}
+
+export interface ResolutionCasePatch {
+	status?: ResolutionCaseStatus;
+	/** Safe structural candidate (keys, scores, categories, anchor ids, polarities). */
+	provisionalResult?: unknown | null;
+	unresolvedTargets?: UnresolvedTarget[];
+	nextAttemptAt?: Date | null;
+	reviewReason?: ReviewReason | null;
+}
+
+/**
+ * Case writes are fenced on the analysis claim like every other write of an
+ * attempt, and on the instance when the owner names one: a claimant whose
+ * lease was taken over, or whose instance was superseded by a changed input,
+ * cannot move, charge or park the case a newer attempt owns.
+ */
+function ownedCase(analysisId: string, owner: AnalysisClaim | ResolutionOwner | undefined): SQL {
+	const own = eq(sentimentResolutionCases.analysisId, analysisId);
+	if (!owner) return own;
+	return and(
+		own,
+		"instanceId" in owner ? eq(sentimentResolutionCases.instanceId, owner.instanceId) : undefined,
+		sql`exists (select 1 from ${sentimentAnalyses} where ${sentimentAnalyses.id} = ${analysisId} and ${sentimentAnalyses.claimGeneration} = ${owner.generation})`,
+	) as SQL;
+}
+
+export async function updateResolutionCase(
+	analysisId: string,
+	patch: ResolutionCasePatch,
+	owner?: AnalysisClaim | ResolutionOwner,
+	executor: Executor = db,
+): Promise<void> {
+	const rows = await executor
+		.update(sentimentResolutionCases)
+		.set({ ...patch, updatedAt: new Date() })
+		.where(ownedCase(analysisId, owner))
+		.returning({ analysisId: sentimentResolutionCases.analysisId });
+	if (owner && rows.length !== 1) throw new ClaimLostError(owner);
+}
+
+/** The instance's paid answers as the ledger records them: every attempt that ended with an answer, with its charged cost. */
+const ledgerOf = (analysisId: SQLWrapper | string, instanceId: SQLWrapper | string) =>
+	sql`${sentimentProviderAttempts.analysisId} = ${analysisId} and ${sentimentProviderAttempts.instanceId} = ${instanceId} and ${sentimentProviderAttempts.outcome} in ('accepted', 'rejected')`;
+
+/**
+ * Bring the case's budget counters in line with the attempt ledger, which is
+ * the source of truth for paid calls and cost: the counters are caches
+ * recomputed from the instance's answered attempts, never incremented on
+ * their own. Called inside the transaction that settles a paid answer.
+ */
+export async function chargeResolutionCase(
+	analysisId: string,
+	owner: ResolutionOwner,
+	executor: Executor = db,
+): Promise<{ automatedProviderCalls: number; totalActualCostUsd: number }> {
+	const ledger = ledgerOf(analysisId, owner.instanceId);
+	const [row] = await executor
+		.update(sentimentResolutionCases)
+		.set({
+			automatedProviderCalls: sql`(select count(*)::int from ${sentimentProviderAttempts} where ${ledger})`,
+			totalActualCostUsd: sql`(select coalesce(sum(${sentimentProviderAttempts.actualCostUsd}), 0) from ${sentimentProviderAttempts} where ${ledger})`,
+			updatedAt: new Date(),
+		})
+		.where(ownedCase(analysisId, owner))
+		.returning({
+			automatedProviderCalls: sentimentResolutionCases.automatedProviderCalls,
+			totalActualCostUsd: sentimentResolutionCases.totalActualCostUsd,
+		});
+	if (!row) throw new ClaimLostError(owner);
+	return { automatedProviderCalls: row.automatedProviderCalls, totalActualCostUsd: Number(row.totalActualCostUsd) };
+}
+
+export type AttemptPhase = "classify" | "repair" | "verify";
+export type AttemptOutcome = "sending" | "accepted" | "rejected" | "provider-error" | "aborted";
+
+/** Attempts of an analysis in ordinal order (ids, phases, outcomes, costs — never text). */
+export async function loadProviderAttempts(analysisId: string, executor: Executor = db) {
+	return executor.query.sentimentProviderAttempts.findMany({
+		where: eq(sentimentProviderAttempts.analysisId, analysisId),
+		orderBy: [sentimentProviderAttempts.ordinal],
+	});
+}
+
+/**
+ * Record the intent to call the provider before the request leaves: the
+ * ledger row exists as `sending` until the outcome is known, so a crash
+ * between request and response is visible and blocks further automatic calls.
+ * The ordinal runs over every instance of the analysis, so rows of a
+ * superseded instance and of the current one never collide.
+ */
+export async function openProviderAttempt(
+	args: { analysisId: string; phase: AttemptPhase; inputHash: string; claim: ResolutionOwner },
+	executor: Executor = db,
+): Promise<{ id: string; ordinal: number }> {
+	const owned = await executor
+		.select({ id: sentimentResolutionCases.analysisId })
+		.from(sentimentResolutionCases)
+		.where(ownedCase(args.analysisId, args.claim));
+	if (owned.length !== 1) throw new ClaimLostError(args.claim);
+	const [{ next }] = await executor
+		.select({ next: sql<number>`coalesce(max(${sentimentProviderAttempts.ordinal}), 0)::int + 1` })
+		.from(sentimentProviderAttempts)
+		.where(eq(sentimentProviderAttempts.analysisId, args.analysisId));
+	const [row] = await executor
+		.insert(sentimentProviderAttempts)
+		.values({
+			analysisId: args.analysisId,
+			instanceId: args.claim.instanceId,
+			ordinal: next,
+			phase: args.phase,
+			provider: SENTIMENT_PROVIDER_ID,
+			model: SENTIMENT_MODEL,
+			inputHash: args.inputHash,
+			outcome: "sending",
+		})
+		.returning({ id: sentimentProviderAttempts.id, ordinal: sentimentProviderAttempts.ordinal });
+	return row;
+}
+
+/** A settlement that disagrees with the terminal evidence an attempt already holds; the first evidence stands. */
+export class AttemptSettlementConflictError extends Error {
+	constructor(readonly attemptId: string) {
+		super(`attempt ${attemptId} is already settled with different evidence`);
+		this.name = "AttemptSettlementConflictError";
+	}
+}
+
+export interface AttemptSettlement {
+	outcome: Exclude<AttemptOutcome, "sending">;
+	generationId?: string | null;
+	actualCostUsd?: number | null;
+	/** The normalized candidate an answered attempt produced; omitted for refusals, aborts and verdicts. */
+	candidate?: SentimentClassificationResult | null;
+}
+
+const costColumn = (value: number | null | undefined): string | null =>
+	typeof value === "number" && Number.isFinite(value) && value >= 0 ? value.toFixed(6) : null;
+
+/**
+ * Settle an attempt with its terminal evidence — outcome, generation id,
+ * charged cost and normalized candidate — exactly once. The evidence belongs
+ * to the immutable attempt row, so this write is keyed on the attempt alone
+ * and is never fenced on a case claim: a worker that lost its claim still
+ * leaves its own answer behind. Only a `sending` row is written; an identical
+ * repeat is a no-op (`already-settled`), and a repeat that disagrees with the
+ * stored evidence fails without touching it.
+ */
+export async function finishProviderAttempt(
+	id: string,
+	args: AttemptSettlement,
+	executor: Executor = db,
+): Promise<"settled" | "already-settled"> {
+	const generationId = args.generationId ?? null;
+	const actualCostUsd = costColumn(args.actualCostUsd);
+	const rows = await executor
+		.update(sentimentProviderAttempts)
+		.set({
+			outcome: args.outcome,
+			generationId,
+			actualCostUsd,
+			candidate: args.candidate ?? null,
+			finishedAt: new Date(),
+		})
+		.where(and(eq(sentimentProviderAttempts.id, id), eq(sentimentProviderAttempts.outcome, "sending")))
+		.returning({ id: sentimentProviderAttempts.id });
+	if (rows.length === 1) return "settled";
+	const row = await executor.query.sentimentProviderAttempts.findFirst({ where: eq(sentimentProviderAttempts.id, id) });
+	if (!row) throw new Error(`provider attempt ${id} missing`);
+	const same =
+		row.outcome === args.outcome &&
+		row.generationId === generationId &&
+		(row.actualCostUsd === null ? actualCostUsd === null : Number(row.actualCostUsd) === Number(actualCostUsd));
+	if (!same) throw new AttemptSettlementConflictError(id);
+	return "already-settled";
+}
+
+export interface UnresolvedCaseRow {
+	analysisId: string;
+	promptRunId: string;
+	brandId: string;
+	status: ResolutionCaseStatus;
+	reviewReason: ReviewReason | null;
+	unresolvedTargets: UnresolvedTarget[];
+	automatedProviderCalls: number;
+	totalActualCostUsd: number;
+	updatedAt: Date;
+}
+
+/**
+ * Every case that is not resolved — the mandatory operator work list.
+ * Identifiers and counts only; calls and cost come from the attempt ledger of
+ * the current instance, not from the case's cached counters.
+ */
+export async function listUnresolvedCases(executor: Executor = db): Promise<UnresolvedCaseRow[]> {
+	const ledger = ledgerOf(sentimentResolutionCases.analysisId, sentimentResolutionCases.instanceId);
+	const rows = await executor
+		.select({
+			analysisId: sentimentResolutionCases.analysisId,
+			promptRunId: sentimentAnalyses.promptRunId,
+			brandId: sentimentAnalyses.brandId,
+			status: sentimentResolutionCases.status,
+			reviewReason: sentimentResolutionCases.reviewReason,
+			unresolvedTargets: sentimentResolutionCases.unresolvedTargets,
+			automatedProviderCalls: sql<number>`(select count(*)::int from ${sentimentProviderAttempts} where ${ledger})`,
+			totalActualCostUsd: sql<string>`(select coalesce(sum(${sentimentProviderAttempts.actualCostUsd}), 0)::text from ${sentimentProviderAttempts} where ${ledger})`,
+			updatedAt: sentimentResolutionCases.updatedAt,
+		})
+		.from(sentimentResolutionCases)
+		.innerJoin(sentimentAnalyses, eq(sentimentAnalyses.id, sentimentResolutionCases.analysisId))
+		.where(sql`${sentimentResolutionCases.status} <> 'resolved'`)
+		.orderBy(sentimentResolutionCases.updatedAt);
+	return rows.map((row) => ({
+		...row,
+		status: row.status as ResolutionCaseStatus,
+		reviewReason: (row.reviewReason as ReviewReason | null) ?? null,
+		unresolvedTargets: (row.unresolvedTargets as UnresolvedTarget[]) ?? [],
+		totalActualCostUsd: Number(row.totalActualCostUsd),
+	}));
 }
 
 /**
@@ -540,39 +899,40 @@ export async function persistClassification(args: {
  * the tunable estimate. The column is named `estimated_cost_usd` for
  * historical reasons: for sentiment it holds the charged cost when one was
  * reported and the estimate otherwise. A failed attempt is attributed to the
- * locked provider/model without any credential or response detail. Never
- * throws: attribution must not break the job.
+ * locked provider/model without any credential or response detail. Written
+ * inside the transaction that settles the paid answer, so a failure here
+ * rolls the settlement back and is retried from the recorded answer instead
+ * of being lost.
  */
-export async function recordSentimentUsageEvent(args: {
-	organizationId: string;
-	brandId: string;
-	promptId: string;
-	provider: string;
-	model: string | null;
-	succeeded: boolean;
-	/** Charged cost in USD reported by the provider for the call, whatever became of its answer. */
-	actualCostUsd?: number | null;
-}): Promise<void> {
-	try {
-		const actual =
-			typeof args.actualCostUsd === "number" && Number.isFinite(args.actualCostUsd) && args.actualCostUsd >= 0
-				? args.actualCostUsd
-				: null;
-		const cost = actual ?? estimateRunCostUsd(args.provider, true);
-		await db.insert(usageEvents).values({
-			organizationId: args.organizationId,
-			brandId: args.brandId,
-			promptId: args.promptId,
-			eventType: args.succeeded ? "sentiment_classification" : "sentiment_classification_failed",
-			provider: args.provider,
-			model: args.model,
-			webSearchEnabled: true,
-			units: 1,
-			estimatedCostUsd: cost === null ? null : cost.toFixed(6),
-		});
-	} catch (error) {
-		console.error("Failed to record sentiment usage event:", error);
-	}
+export async function recordSentimentUsageEvent(
+	args: {
+		organizationId: string;
+		brandId: string;
+		promptId: string;
+		provider: string;
+		model: string | null;
+		succeeded: boolean;
+		/** Charged cost in USD reported by the provider for the call, whatever became of its answer. */
+		actualCostUsd?: number | null;
+	},
+	executor: Executor = db,
+): Promise<void> {
+	const actual =
+		typeof args.actualCostUsd === "number" && Number.isFinite(args.actualCostUsd) && args.actualCostUsd >= 0
+			? args.actualCostUsd
+			: null;
+	const cost = actual ?? estimateRunCostUsd(args.provider, true);
+	await executor.insert(usageEvents).values({
+		organizationId: args.organizationId,
+		brandId: args.brandId,
+		promptId: args.promptId,
+		eventType: args.succeeded ? "sentiment_classification" : "sentiment_classification_failed",
+		provider: args.provider,
+		model: args.model,
+		webSearchEnabled: true,
+		units: 1,
+		estimatedCostUsd: cost === null ? null : cost.toFixed(6),
+	});
 }
 
 /** Prompt text lookup used by evidence/backfill reporting. */

@@ -1,7 +1,11 @@
-import { and, eq, inArray, type SQL, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, or, type SQL, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import { sentimentAnalyses } from "../db/schema";
-import { SENTIMENT_READABLE_CLASSIFIER_VERSIONS, SENTIMENT_TAXONOMY_VERSION } from "./types";
+import {
+	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
+	SENTIMENT_TAXONOMY_VERSION,
+} from "./types";
 
 type Executor = typeof db;
 
@@ -39,11 +43,21 @@ export function selectedSentimentAnalysisIds(executor: Executor = db): SQL {
 	) as SQL;
 }
 
+/**
+ * A completed analysis is readable under the current taxonomy when its
+ * version is listed and — since classifier v5, whose results are persisted
+ * only after independent verification — it carries the verified marker.
+ * Older versions never had one and are read as before.
+ */
 function readableCompletedWhere(): SQL {
 	return and(
 		eq(sentimentAnalyses.status, "completed"),
 		eq(sentimentAnalyses.taxonomyVersion, SENTIMENT_TAXONOMY_VERSION),
 		inArray(sentimentAnalyses.classifierVersion, [...SENTIMENT_READABLE_CLASSIFIER_VERSIONS]),
+		or(
+			sql`${sentimentAnalyses.classifierVersion} <> ${SENTIMENT_CLASSIFIER_VERSION}`,
+			isNotNull(sentimentAnalyses.verifiedAt),
+		),
 	) as SQL;
 }
 
@@ -61,15 +75,16 @@ export type SentimentRunCoverageStatus = "completed" | "pending" | "failed" | "n
 /**
  * One coverage status per prompt run over all its analysis rows, consistent
  * with the selection above: `completed` when a readable completed analysis is
- * selected; otherwise `pending` while a readable attempt is in flight;
- * otherwise `failed` when the newest readable attempt failed; otherwise
+ * selected; otherwise `pending` while a readable attempt is in flight or
+ * parked inside its resolution workflow (`pending_resolution`); otherwise
+ * `failed` when the newest readable attempt failed; otherwise
  * `no_mentions`; rows of unreadable versions or a stale taxonomy alone are
  * stale work still to be redone and count as `pending`.
  */
 export function sentimentRunCoverageStatus(): SQL<SentimentRunCoverageStatus> {
 	const readable = inArray(sentimentAnalyses.classifierVersion, [...SENTIMENT_READABLE_CLASSIFIER_VERSIONS]);
 	const completed = and(readableCompletedWhere());
-	const inFlight = and(readable, inArray(sentimentAnalyses.status, ["pending", "processing"]));
+	const inFlight = and(readable, inArray(sentimentAnalyses.status, ["pending", "processing", "pending_resolution"]));
 	const failed = and(readable, eq(sentimentAnalyses.status, "failed"));
 	const noMentions = and(readable, eq(sentimentAnalyses.status, "no_mentions"));
 	return sql<SentimentRunCoverageStatus>`case

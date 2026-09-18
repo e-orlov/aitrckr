@@ -502,6 +502,14 @@ export const sentimentAnalyses = pgTable(
 		claimGeneration: integer("claim_generation").notNull().default(0),
 		startedAt: timestamp("started_at", { withTimezone: true }),
 		completedAt: timestamp("completed_at", { withTimezone: true }),
+		/**
+		 * Set together with `completed` since classifier v5: which independent
+		 * verification (the semantic verifier version or a human adjudication)
+		 * accepted the persisted result. A completed v5 row without it is never
+		 * read.
+		 */
+		verifierVersion: text("verifier_version"),
+		verifiedAt: timestamp("verified_at", { withTimezone: true }),
 		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 		updatedAt: timestamp("updated_at", { withTimezone: true })
 			.defaultNow()
@@ -517,7 +525,7 @@ export const sentimentAnalyses = pgTable(
 		),
 		statusCheck: check(
 			"sentiment_analyses_status_check",
-			sql`${table.status} IN ('pending', 'processing', 'completed', 'no_mentions', 'failed')`,
+			sql`${table.status} IN ('pending', 'processing', 'completed', 'no_mentions', 'failed', 'pending_resolution')`,
 		),
 	}),
 ).enableRLS();
@@ -633,12 +641,179 @@ export const sentimentAspectObservations = pgTable(
 	}),
 ).enableRLS();
 
+/**
+ * Operator audit of aspect claims the classifier proposed and the answer did
+ * not support for that entity (classifier v5): the claim is dropped from the
+ * analysis, which completes on the grounded claims, and this row records that
+ * it was proposed. Identifiers and the allow-listed validation code only —
+ * no text of the answer, the prompt or the provider payload ever lands here.
+ * Internal: the Sentiment page never reads it. At most one row per
+ * (analysis, entity, aspect) — an aspect is dropped for one reason — enforced
+ * by the database; rows are replaced with the observations of their analysis.
+ */
+export const sentimentFilteredClaims = pgTable(
+	"sentiment_filtered_claims",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		analysisId: uuid("analysis_id")
+			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
+			.notNull(),
+		entityType: text("entity_type").notNull(),
+		entityKey: text("entity_key").notNull(),
+		aspectKey: text("aspect_key").notNull(),
+		validationCode: text("validation_code").notNull(),
+		classifierVersion: text("classifier_version").notNull(),
+		/** Anchor ids (`s0001`…) the dropped claim cited; never the anchor text. */
+		anchorIds: jsonb("anchor_ids").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		analysisAspectUnique: uniqueIndex("sentiment_filtered_claims_analysis_aspect_idx").on(
+			table.analysisId,
+			table.entityKey,
+			table.aspectKey,
+		),
+		aspectKeyCheck: check(
+			"sentiment_filtered_claims_aspect_key_check",
+			sql`${table.aspectKey} IN ('price', 'coverage', 'service', 'other')`,
+		),
+		entityTypeCheck: check(
+			"sentiment_filtered_claims_entity_type_check",
+			sql`${table.entityType} IN ('brand', 'competitor')`,
+		),
+		validationCodeCheck: check(
+			"sentiment_filtered_claims_validation_code_check",
+			sql`${table.validationCode} IN ('aspect-ungrounded', 'evidence-entity-unbound', 'polarity-category-mismatch', 'mixed-needs-dual-evidence', 'evidence-anchor-polarity-conflict')`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * Durable resolution state of one v5 analysis while it is not yet verified
+ * (ADR-SENT-01-GROUNDED-COMPLETION, Amendment B): where the run is in the
+ * classify → assess → repair → verify workflow, what the provisional candidate
+ * looks like (entity keys, scores, categories, anchor ids and polarities —
+ * never text), which targets are unresolved, and the bounded automatic
+ * budget already spent. `awaiting_review` and `awaiting_reconciliation` are
+ * mandatory operator work items, never a closed failure; `resolved` is set in
+ * the same transaction that persists the verified result. `instance_id`
+ * identifies one resolution instance (analysis = run + classifier version,
+ * plus the input hash): a resolved instance is immutable, and a changed input
+ * rotates the id with a fresh budget while the old instance's attempt rows
+ * stay under the old id.
+ */
+export const sentimentResolutionCases = pgTable(
+	"sentiment_resolution_cases",
+	{
+		analysisId: uuid("analysis_id")
+			.primaryKey()
+			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
+			.notNull(),
+		instanceId: uuid("instance_id").defaultRandom().notNull(),
+		inputHash: text("input_hash").notNull(),
+		status: text("status").notNull().default("open"),
+		provisionalResult: jsonb("provisional_result"),
+		unresolvedTargets: jsonb("unresolved_targets").notNull().default(sql`'[]'::jsonb`),
+		automatedProviderCalls: integer("automated_provider_calls").notNull().default(0),
+		totalActualCostUsd: numeric("total_actual_cost_usd", { precision: 10, scale: 6 }).notNull().default("0"),
+		nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+		/** Allow-listed reason a case left the automatic workflow (policy limit, contract defect, unknown provider outcome). */
+		reviewReason: text("review_reason"),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.$onUpdate(() => new Date())
+			.notNull(),
+	},
+	(table) => ({
+		statusIdx: index("sentiment_resolution_cases_status_idx").on(table.status, table.nextAttemptAt),
+		statusCheck: check(
+			"sentiment_resolution_cases_status_check",
+			sql`${table.status} IN ('open', 'repairing', 'verifying', 'retry_wait', 'awaiting_review', 'awaiting_reconciliation', 'resolved')`,
+		),
+		callsCheck: check("sentiment_resolution_cases_calls_check", sql`${table.automatedProviderCalls} >= 0`),
+		costCheck: check("sentiment_resolution_cases_cost_check", sql`${table.totalActualCostUsd} >= 0`),
+		reviewReasonCheck: check(
+			"sentiment_resolution_cases_review_reason_check",
+			sql`${table.reviewReason} IS NULL OR ${table.reviewReason} IN ('call-limit', 'cost-limit', 'contract-defect', 'unknown-provider-outcome', 'initial-classification-limit')`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * Ledger of every provider request a v5 analysis makes, written as an intent
+ * before the request leaves and finished with the safe outcome: the phase, the
+ * opaque generation id when an answer arrived (unique — one paid answer is one
+ * row), the input hash the request was built for and the charged cost. A row
+ * left in `sending` means the outcome is unknown and blocks automatic calls
+ * until reconciled. No request or response text ever lands here.
+ */
+export const sentimentProviderAttempts = pgTable(
+	"sentiment_provider_attempts",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		analysisId: uuid("analysis_id")
+			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
+			.notNull(),
+		/** The resolution instance the request was made for; the ordinal runs over the whole analysis and is never reused. */
+		instanceId: uuid("instance_id").notNull(),
+		ordinal: integer("ordinal").notNull(),
+		phase: text("phase").notNull(),
+		provider: text("provider").notNull(),
+		model: text("model").notNull(),
+		generationId: text("generation_id"),
+		inputHash: text("input_hash").notNull(),
+		outcome: text("outcome").notNull().default("sending"),
+		actualCostUsd: numeric("actual_cost_usd", { precision: 10, scale: 6 }),
+		/**
+		 * The normalized, schema-valid candidate this answered attempt produced
+		 * (entity keys, scores, categories, anchor ids, polarities — never text),
+		 * owned by the attempt so a worker that lost its claim still leaves a
+		 * reusable result behind. Null for unanswered attempts and for verdicts.
+		 */
+		candidate: jsonb("candidate"),
+		startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+		finishedAt: timestamp("finished_at", { withTimezone: true }),
+	},
+	(table) => ({
+		candidateCheck: check(
+			"sentiment_provider_attempts_candidate_check",
+			sql`${table.candidate} IS NULL OR jsonb_typeof(${table.candidate}) = 'object'`,
+		),
+		analysisOrdinalUnique: uniqueIndex("sentiment_provider_attempts_analysis_ordinal_idx").on(
+			table.analysisId,
+			table.ordinal,
+		),
+		generationUnique: uniqueIndex("sentiment_provider_attempts_generation_idx").on(table.generationId),
+		phaseCheck: check(
+			"sentiment_provider_attempts_phase_check",
+			sql`${table.phase} IN ('classify', 'repair', 'verify')`,
+		),
+		outcomeCheck: check(
+			"sentiment_provider_attempts_outcome_check",
+			sql`${table.outcome} IN ('sending', 'accepted', 'rejected', 'provider-error', 'aborted')`,
+		),
+		ordinalCheck: check("sentiment_provider_attempts_ordinal_check", sql`${table.ordinal} >= 1`),
+		costCheck: check(
+			"sentiment_provider_attempts_cost_check",
+			sql`${table.actualCostUsd} IS NULL OR ${table.actualCostUsd} >= 0`,
+		),
+		generationCheck: check(
+			"sentiment_provider_attempts_generation_check",
+			sql`${table.generationId} IS NULL OR ${table.generationId} ~ '^[A-Za-z0-9_-]{1,64}$'`,
+		),
+	}),
+).enableRLS();
+
 export type SentimentDetection = typeof sentimentDetections.$inferSelect;
 export type PromptRunEntityMention = typeof promptRunEntityMentions.$inferSelect;
 export type NewPromptRunEntityMention = typeof promptRunEntityMentions.$inferInsert;
 export type SentimentAnalysis = typeof sentimentAnalyses.$inferSelect;
 export type SentimentObservation = typeof sentimentObservations.$inferSelect;
 export type SentimentAspectObservation = typeof sentimentAspectObservations.$inferSelect;
+export type SentimentFilteredClaim = typeof sentimentFilteredClaims.$inferSelect;
+export type SentimentResolutionCase = typeof sentimentResolutionCases.$inferSelect;
+export type SentimentProviderAttempt = typeof sentimentProviderAttempts.$inferSelect;
 
 // Encrypted overrides for credential environment variables, keyed by the env-var
 // name they stand in for. Separate table, strictest access.

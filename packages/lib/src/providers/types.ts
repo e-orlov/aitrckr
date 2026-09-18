@@ -109,6 +109,58 @@ export class StructuredResearchResponseError extends Error {
 }
 
 /**
+ * The typed error code the provider itself put on a refusal — for OpenRouter
+ * the canonical `error.metadata.error_type` (`rate_limit_exceeded`,
+ * `provider_overloaded`, `provider_unavailable`, `authentication`,
+ * `payment_required`, `invalid_request`, `server`, `timeout`, `unmapped`, …).
+ * Carried verbatim; never derived from the HTTP status, the message text or
+ * any raw upstream payload. Null when the response carried no well-formed
+ * typed code, which no consumer may treat as safe to repeat.
+ */
+export type StructuredResearchErrorType = string;
+
+/** The shape a provider-supplied typed code must have to be carried at all. */
+export const STRUCTURED_RESEARCH_ERROR_TYPE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+
+/**
+ * The provider refused the structured-research request with a non-2xx
+ * response. `structured` says the body was the provider's own error envelope
+ * (so the status describes a refusal the provider itself reported);
+ * `errorType` is the provider's own typed code or null; `carriesOutput` says
+ * the body nevertheless carried a generation id, usage, cost, content or
+ * partial output — such a response was not a free refusal. Only the safe
+ * fields land here; the message never includes a credential.
+ */
+export class StructuredResearchRequestError extends Error {
+	readonly provider: string;
+	readonly httpStatus: number;
+	readonly errorType: StructuredResearchErrorType | null;
+	readonly structured: boolean;
+	readonly carriesOutput: boolean;
+	/** Parsed `Retry-After`, when the response carried one. */
+	readonly retryAfterMs: number | null;
+
+	constructor(args: {
+		provider: string;
+		httpStatus: number;
+		errorType: StructuredResearchErrorType | null;
+		structured: boolean;
+		carriesOutput: boolean;
+		retryAfterMs: number | null;
+		message: string;
+	}) {
+		super(args.message);
+		this.name = "StructuredResearchRequestError";
+		this.provider = args.provider;
+		this.httpStatus = args.httpStatus;
+		this.errorType = args.errorType;
+		this.structured = args.structured;
+		this.carriesOutput = args.carriesOutput;
+		this.retryAfterMs = args.retryAfterMs;
+	}
+}
+
+/**
  * How a provider reaches the model, which is what a customer is really choosing
  * between:
  *  - "scraped": the consumer product is driven and its rendered answer read

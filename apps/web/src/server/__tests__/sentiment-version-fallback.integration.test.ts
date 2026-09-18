@@ -178,8 +178,8 @@ afterAll(async () => {
 const scope = { brandId: BRAND, lookback: "1m" as const, aspect: "overall" as const, timezone: "UTC" };
 
 describe("V4-RED-007 / V4-RED-008 transitional version selection", () => {
-	it("declares v4 preferred over v3 and nothing older as readable", () => {
-		expect(SENTIMENT_READABLE_CLASSIFIER_VERSIONS).toEqual([V4, V3]);
+	it("declares v5, then v4, then v3 as readable and nothing older", () => {
+		expect(SENTIMENT_READABLE_CLASSIFIER_VERSIONS).toEqual(["sent-classifier-v5", V4, V3]);
 	});
 
 	it("counts exactly one analysis per run: v4 when completed, otherwise the completed v3, never v2 or a stale taxonomy", async () => {

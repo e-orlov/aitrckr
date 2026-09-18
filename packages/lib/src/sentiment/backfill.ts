@@ -17,6 +17,7 @@ import {
 } from "./store";
 import { extractAnswerBody, normalizeText } from "./text";
 import {
+	isTaxonomyDrift,
 	SENTIMENT_CLASSIFIER_VERSION,
 	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
@@ -273,6 +274,10 @@ export interface SentimentEnqueueInventory {
 	eligibleFailed: number;
 	/** Runs whose current analysis was terminally rejected for exactly the current input; a re-enqueue makes no call. */
 	terminalFailed: number;
+	/** Runs parked inside their resolution workflow (`pending_resolution`): owned by that workflow or adjudication, never re-enqueued. */
+	pendingResolution: number;
+	/** Runs whose current-version row names a taxonomy this version never shipped with: a versioning defect, never enqueued. */
+	taxonomyDrift: number;
 	/** Eligible runs with a completed analysis whose input hash or taxonomy no longer matches (roster/name/alias change). */
 	eligibleStale: number;
 	/** Runs without a current-version detection receipt (mention backfill has not covered them). */
@@ -301,7 +306,14 @@ export interface SentimentEnqueueResult {
 	limitReached: boolean;
 }
 
-type RunEligibility = "eligible" | "completed" | "no-mentions" | "not-scanned" | "terminal-failed";
+type RunEligibility =
+	| "eligible"
+	| "completed"
+	| "no-mentions"
+	| "not-scanned"
+	| "terminal-failed"
+	| "pending-resolution"
+	| "taxonomy-drift";
 
 /**
  * Where one run stands: classified at the current version for the current
@@ -339,6 +351,8 @@ async function classifyRunEligibility(
 		counts.noMentions++;
 		return "no-mentions";
 	}
+	const unactionable = current ? unactionableCurrent(current, counts) : null;
+	if (unactionable) return unactionable;
 	if (current?.status === "completed" || current?.status === "failed") {
 		const entities = await entitiesFor(run.brandId, entitiesByBrand);
 		const candidates = candidatesFromMentions(await loadMentions(run.id), entities);
@@ -358,6 +372,26 @@ async function classifyRunEligibility(
 	if (fallback) counts.fallbackCompleted++;
 	if (analyses.length === 0) counts.neverClassified++;
 	return "eligible";
+}
+
+/**
+ * Current-version rows the inventory reports but never enqueues: a versioning
+ * defect (the worker gives the same disposition), or work parked inside its
+ * own resolution workflow, which only that workflow or adjudication may move.
+ */
+function unactionableCurrent(
+	current: { classifierVersion: string; taxonomyVersion: string; status: string },
+	counts: SentimentEnqueueInventory,
+): RunEligibility | null {
+	if (isTaxonomyDrift(current)) {
+		counts.taxonomyDrift++;
+		return "taxonomy-drift";
+	}
+	if (current.status === "pending_resolution") {
+		counts.pendingResolution++;
+		return "pending-resolution";
+	}
+	return null;
 }
 
 async function enqueueOne(run: ScannedRun, sender: SentimentSender, counts: SentimentEnqueueInventory): Promise<void> {
@@ -397,6 +431,8 @@ export async function runSentimentEnqueue(args: {
 		eligible: 0,
 		eligibleFailed: 0,
 		terminalFailed: 0,
+		pendingResolution: 0,
+		taxonomyDrift: 0,
 		eligibleStale: 0,
 		notScanned: 0,
 		staleDetector: 0,

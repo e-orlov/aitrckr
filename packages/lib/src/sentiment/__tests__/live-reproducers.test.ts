@@ -8,7 +8,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { toStructuredOutputJsonSchema } from "../../providers/json-schema";
 import { segmentAnswer } from "../anchors";
-import { classifySentiment, validateClassification, validateSentimentResult } from "../classifier";
+import {
+	classifySentiment,
+	validateClassification,
+	validateClassificationDetailed,
+	validateSentimentResult,
+} from "../classifier";
 import { dereferenceSchema } from "../schema-budget";
 import { type SentimentCandidate, sentimentProviderResultSchemaFor } from "../types";
 
@@ -235,7 +240,7 @@ describe("UT-SNT-CIT-003 live failure 3 — evidence-anchor-polarity-conflict is
 		expect(validate({ entities })[2].evidence.map((e) => e.polarity)).toEqual(["positive", "negative"]);
 	});
 
-	it("a differing pair on one anchor within one non-Mixed aspect is still rejected, naming the aspect", () => {
+	it("a differing pair on one anchor within one non-Mixed aspect drops that aspect only (classifier v5)", () => {
 		const entities = base();
 		entities[2] = entity(HUK, {
 			evidence: [{ anchorId: "s0003", polarity: "neutral" }],
@@ -252,17 +257,14 @@ describe("UT-SNT-CIT-003 live failure 3 — evidence-anchor-polarity-conflict is
 				},
 			],
 		});
-		expect(() => validate({ entities })).toThrow(
-			expect.objectContaining({
-				code: "evidence-anchor-polarity-conflict",
-				diagnostic: expect.objectContaining({
-					stage: "evidence",
-					entityKey: HUK,
-					aspectKey: "price",
-					anchorId: "s0003",
-				}),
-			}),
+		const { entities: validated, filteredClaims } = validateClassificationDetailed(
+			{ entities },
+			{ answerBody: threeAnswer, candidates: three },
 		);
+		expect(validated.find((e) => e.key === HUK)?.aspects).toEqual([]);
+		expect(filteredClaims).toEqual([
+			{ entityKey: HUK, aspectKey: "price", code: "evidence-anchor-polarity-conflict", anchorIds: ["s0003"] },
+		]);
 	});
 
 	it("identical claims within one target are de-duplicated deterministically instead of rejected", () => {

@@ -16,7 +16,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { segmentAnswer } from "../anchors";
-import { SentimentValidationError, validateSentimentResult } from "../classifier";
+import { SentimentValidationError, validateSentimentResult, validateSentimentResultDetailed } from "../classifier";
 import { groundAnchors, isAttributable } from "../grounding";
 import type { SentimentCandidate } from "../types";
 
@@ -270,14 +270,15 @@ describe("the generic single-candidate family stays rejected", () => {
 				},
 			],
 		};
-		let thrown: unknown;
-		try {
-			validateSentimentResult(result, { answerBody: answer, candidates: [ARVO] });
-		} catch (error) {
-			thrown = error;
-		}
-		expect(thrown).toBeInstanceOf(SentimentValidationError);
-		expect((thrown as SentimentValidationError).code).toBe("aspect-ungrounded");
+		// Classifier v5: the ungrounded price claim is dropped on its own; the grounded overall completes.
+		const { entities, filteredClaims } = validateSentimentResultDetailed(result, {
+			answerBody: answer,
+			candidates: [ARVO],
+		});
+		expect(entities[0].aspects).toEqual([]);
+		expect(filteredClaims).toEqual([
+			{ entityKey: "brand", aspectKey: "price", code: "aspect-ungrounded", anchorIds: ["s0006"] },
+		]);
 	});
 
 	it("a sibling bullet does not continue the previous bullet's entity (b621fdf7 stand-in)", () => {

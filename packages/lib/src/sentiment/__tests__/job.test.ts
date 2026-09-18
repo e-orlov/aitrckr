@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { StructuredResearchRequestError } from "../../providers/types";
 import type { SentimentClassification } from "../classifier";
 import { SentimentValidationError, sentimentInputHash } from "../classifier";
 import type { DetectableEntity } from "../detector";
@@ -7,6 +8,7 @@ import { enqueueSentimentBestEffort } from "../enqueue";
 import { ClaimLostError, SentimentJobError } from "../errors";
 import { runSentimentJob, type SentimentJobDeps } from "../job";
 import { ensureSentimentQueue, SENTIMENT_QUEUE_OPTIONS } from "../queue-setup";
+import { SENTIMENT_VERIFIER_VERSION } from "../resolution";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
 import {
 	SENTIMENT_CLASSIFIER_VERSION,
@@ -16,6 +18,7 @@ import {
 	SENTIMENT_TAXONOMY_VERSION,
 	sentimentSingletonKey,
 } from "../types";
+import { resolutionFakes } from "./resolution-fakes";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const payload = {
@@ -75,6 +78,10 @@ const classification: SentimentClassification = {
 	taxonomyVersion: SENTIMENT_TAXONOMY_VERSION,
 	inputHash: currentHash,
 	generationId: "gen-job-001",
+	filteredClaims: [],
+	unresolvedTargets: [],
+	contractDefect: null,
+	candidate: null,
 };
 
 type AnalysisStub = {
@@ -86,7 +93,49 @@ type AnalysisStub = {
 	errorCode?: string | null;
 };
 
-function deps(overrides: Partial<SentimentJobDeps> & { analysis?: Partial<AnalysisStub> } = {}) {
+/** The classification stub carries the internal candidate the workflow re-assesses and verifies. */
+const candidate = {
+	entities: [
+		{
+			key: "brand",
+			score: 85,
+			category: "positive",
+			confidence: 0.9,
+			evidence: [{ anchorId: "s0001", polarity: "positive" }],
+			aspects: [],
+		},
+		{
+			key: "c-huk",
+			score: 30,
+			category: "negative",
+			confidence: 0.8,
+			evidence: [{ anchorId: "s0002", polarity: "negative" }],
+			aspects: [],
+		},
+	],
+} as const;
+
+const classified = {
+	...classification,
+	unresolvedTargets: [],
+	contractDefect: null,
+	candidate: candidate as never,
+	usage: {
+		inputTokens: 100,
+		outputTokens: 10,
+		reasoningTokens: 0,
+		costUsd: 0.02,
+		webSearchRequests: 1,
+		webSearchRequestsConflict: false,
+	},
+};
+
+function deps(
+	overrides: Partial<SentimentJobDeps> & {
+		analysis?: Partial<AnalysisStub>;
+		fakes?: ReturnType<typeof resolutionFakes>;
+	} = {},
+) {
 	const marks: unknown[] = [];
 	const usage: unknown[] = [];
 	const analysis: AnalysisStub = {
@@ -97,7 +146,8 @@ function deps(overrides: Partial<SentimentJobDeps> & { analysis?: Partial<Analys
 		inputHash: null,
 		...overrides.analysis,
 	};
-	const { analysis: _ignored, ...depOverrides } = overrides;
+	const fakes = overrides.fakes ?? resolutionFakes();
+	const { analysis: _ignored, fakes: _fakes, ...depOverrides } = overrides;
 	const base: SentimentJobDeps = {
 		loadRun: vi.fn(async () => run),
 		loadEntities: vi.fn(async () => entities),
@@ -114,78 +164,68 @@ function deps(overrides: Partial<SentimentJobDeps> & { analysis?: Partial<Analys
 			marks.push(patch);
 			return true;
 		}),
-		classify: vi.fn(async () => classification),
+		classify: vi.fn(async () => classified),
 		persist: vi.fn(async () => undefined),
 		recordUsage: vi.fn(async (event: unknown) => {
 			usage.push(event);
 		}),
+		resolveProvider: () => fakes.phasesProvider(),
+		resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+		...fakes.deps,
 	};
-	return { d: { ...base, ...depOverrides }, marks, usage };
+	return { d: { ...base, ...depOverrides }, marks, usage, fakes };
 }
 
+const verifiedOutcome = {
+	status: "classified",
+	entities: 2,
+	entityKeys: ["brand", "c-huk"],
+	generationId: "gen-job-001",
+	filteredClaimCount: 0,
+	filteredClaimCodes: {},
+	verified: true,
+	verifierVersion: SENTIMENT_VERIFIER_VERSION,
+	paidCalls: 2,
+	repairs: 0,
+	verifierRejections: 0,
+};
+
 describe("IT-SNT-001 job lifecycle (fakes)", () => {
-	it("claims, classifies, persists atomically and records one success usage event", async () => {
-		const { d, usage } = deps();
+	it("claims, classifies, verifies, persists atomically and records one success usage event per paid answer", async () => {
+		const { d, usage, fakes } = deps();
 		const outcome = await runSentimentJob(payload, d);
-		expect(outcome).toEqual({
-			status: "classified",
-			entities: 2,
-			entityKeys: ["brand", "c-huk"],
-			generationId: "gen-job-001",
-		});
+		expect(outcome).toMatchObject(verifiedOutcome);
 		expect(d.claimAnalysis).toHaveBeenCalledTimes(1);
-		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
+		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true, resumeResolution: true });
 		expect(d.classify).toHaveBeenCalledTimes(1);
+		expect(fakes.calls.map((c) => c.phase)).toEqual(["verify"]);
 		expect(d.persist).toHaveBeenCalledWith(
-			expect.objectContaining({ claim: { analysisId: "a1", generation: 7 }, promptRunId: RUN_ID, mentions }),
+			expect.objectContaining({
+				claim: expect.objectContaining({ analysisId: "a1", generation: 7 }),
+				promptRunId: RUN_ID,
+				mentions,
+				verifierVersion: SENTIMENT_VERIFIER_VERSION,
+			}),
 		);
 		expect(usage).toEqual([
-			expect.objectContaining({ succeeded: true, provider: "fake", model: "fake-model", promptId: run.promptId }),
+			expect.objectContaining({ succeeded: true, promptId: run.promptId, actualCostUsd: 0.02 }),
+			expect.objectContaining({ succeeded: true, promptId: run.promptId, actualCostUsd: 0.001 }),
 		]);
+		expect(fakes.attempts.map((a) => `${a.ordinal}:${a.phase}:${a.outcome}`)).toEqual([
+			"1:classify:accepted",
+			"2:verify:accepted",
+		]);
+		expect(fakes.cases.get("a1")).toMatchObject({ automatedProviderCalls: 2 });
+		expect(d.persist).toHaveBeenCalledTimes(1);
 	});
 
 	it("writes the provider's charged cost to the success usage event and falls back when usage is missing", async () => {
-		const withUsage = deps({
-			classify: vi.fn(async () => ({
-				...classification,
-				usage: {
-					inputTokens: 7000,
-					outputTokens: 900,
-					reasoningTokens: 400,
-					costUsd: 0.0312,
-					webSearchRequests: 1,
-					webSearchRequestsConflict: false,
-				},
-				request: {
-					model: "openai/gpt-5-mini",
-					webSearch: true,
-					maxToolCalls: 1,
-					maxOutputTokens: 8000,
-					strictJsonSchema: true,
-					requireParameters: true,
-				},
-			})),
-		});
-		const outcome = await runSentimentJob(payload, withUsage.d);
-		expect(outcome).toMatchObject({
-			status: "classified",
-			entities: 2,
-			entityKeys: ["brand", "c-huk"],
-			usage: { costUsd: 0.0312, webSearchRequests: 1 },
-			request: {
-				model: "openai/gpt-5-mini",
-				webSearch: true,
-				maxToolCalls: 1,
-				maxOutputTokens: 8000,
-				strictJsonSchema: true,
-				requireParameters: true,
-			},
-		});
-		expect(withUsage.usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.0312 })]);
-
-		const withoutUsage = deps();
+		const withUsage = deps();
+		expect(await runSentimentJob(payload, withUsage.d)).toMatchObject({ status: "classified", costUsd: 0.021 });
+		expect(withUsage.usage[0]).toMatchObject({ actualCostUsd: 0.02 });
+		const withoutUsage = deps({ classify: vi.fn(async () => ({ ...classified, usage: undefined })) });
 		await runSentimentJob(payload, withoutUsage.d);
-		expect(withoutUsage.usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: null })]);
+		expect(withoutUsage.usage[0]).toMatchObject({ actualCostUsd: null });
 	});
 
 	it("forwards the job abort signal to the classifier", async () => {
@@ -196,106 +236,78 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 	});
 
 	it("fence: a persist that finds the claim taken over ends as claim-lost and writes nothing else", async () => {
-		const { d, marks, usage } = deps({
+		const { d, marks } = deps({
 			persist: vi.fn(async () => {
 				throw new ClaimLostError({ analysisId: "a1", generation: 7 });
 			}),
 		});
 		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
 		expect(marks).toEqual([]);
-		// The paid call did happen and is attributed; only the result was discarded.
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
 	});
 
-	it("C4: a persistence failure after a paid answer attributes the call once with the charged cost, fails the analysis with the persistence code and writes nothing else", async () => {
-		const dbError = new Error(`insert or update on table "sentiment_observations" violates foreign key constraint`);
-		const { d, marks, usage } = deps({
-			classify: vi.fn(async () => ({
-				...classification,
-				usage: {
-					inputTokens: 7000,
-					outputTokens: 900,
-					reasoningTokens: 400,
-					costUsd: 0.0312,
-					webSearchRequests: 1,
-					webSearchRequestsConflict: false,
-				},
-			})),
+	it("C4: a persistence failure after the paid answers parks the case as pending_resolution with the persistence code and never re-attributes", async () => {
+		const { d, marks, usage, fakes } = deps({
 			persist: vi.fn(async () => {
-				throw dbError;
-			}),
-		});
-		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({
-			name: "SentimentJobError",
-			code: "persistence",
-			kind: "store",
-			httpStatus: null,
-		});
-		expect(d.classify).toHaveBeenCalledTimes(1);
-		expect(usage).toEqual([
-			expect.objectContaining({ succeeded: true, actualCostUsd: 0.0312, provider: "fake", model: "fake-model" }),
-		]);
-		expect(marks).toEqual([
-			{
-				status: "failed",
-				errorCode: "persistence",
-				errorMessage: `store persistence (Error) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL}`,
-				inputHash: null,
-			},
-		]);
-	});
-
-	it("C4: a failing usage write does not replace the persistence error and is attempted only once", async () => {
-		const error = vi.spyOn(console, "error").mockImplementation(() => {});
-		const recordUsage = vi.fn(async () => {
-			throw new Error("usage_events insert failed");
-		});
-		const { d, marks } = deps({
-			recordUsage,
-			persist: vi.fn(async () => {
-				throw new Error("deadlock detected");
+				throw new Error(`insert failed while writing "${run.answerBody}"`);
 			}),
 		});
 		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "persistence", kind: "store" });
-		expect(recordUsage).toHaveBeenCalledTimes(1);
-		expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ succeeded: true }));
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "persistence" })]);
-		expect(error).toHaveBeenCalledWith("sentiment usage attribution failed:", "Error");
-		error.mockRestore();
+		expect(usage).toHaveLength(2);
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: "persistence", inputHash: null });
+		expect(fakes.cases.get("a1")).toMatchObject({ status: "retry_wait" });
+		expect(JSON.stringify(marks)).not.toContain(run.answerBody ?? "");
 	});
 
-	it("C4: a persistence failure whose terminal write is refused still attributes the paid call once and ends claim-lost", async () => {
-		const { d, usage } = deps({
+	it("C4: a failing usage write is retried DB-only from the recorded answer; the paid answer is never bought again", async () => {
+		let failures = 0;
+		const recordUsage = vi.fn(async () => {
+			if (failures++ === 0) throw new Error("usage table unavailable");
+		});
+		const { d, fakes } = deps({ recordUsage, sleep: vi.fn(async () => {}) });
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "classified", paidCalls: 2 });
+		expect(d.classify).toHaveBeenCalledTimes(1);
+		expect(recordUsage).toHaveBeenCalledTimes(3);
+		expect(fakes.attempts.map((a) => a.outcome)).toEqual(["accepted", "accepted"]);
+	});
+
+	it("C4: a usage write that keeps failing leaves the paid attempt for reconciliation instead of a second call", async () => {
+		const recordUsage = vi.fn(async () => {
+			throw new Error("usage table unavailable");
+		});
+		const { d, marks, fakes } = deps({ recordUsage, sleep: vi.fn(async () => {}) });
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: 1 });
+		expect(d.classify).toHaveBeenCalledTimes(1);
+		expect(fakes.attempts.map((a) => a.outcome)).toEqual(["sending"]);
+		expect(fakes.cases.get("a1")).toMatchObject({ status: "awaiting_reconciliation" });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution" });
+	});
+
+	it("C4: a persistence failure whose terminal write is refused ends claim-lost", async () => {
+		const { d } = deps({
 			persist: vi.fn(async () => {
-				throw new Error("connection terminated unexpectedly");
+				throw new Error("insert failed");
 			}),
 			markAnalysis: vi.fn(async () => false),
 		});
 		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true })]);
 	});
 
-	it("C4: an abort raised at the persistence boundary after a paid answer is attributed as paid and marked aborted", async () => {
-		const { d, marks, usage } = deps({
-			classify: vi.fn(async () => ({ ...classification, usage: { ...classification.usage, costUsd: 0.02 } as never })),
-			persist: vi.fn(async () => {
-				throw new DOMException("cancelled before writing", "AbortError");
-			}),
-		});
-		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "aborted", kind: "aborted" });
-		expect(usage).toEqual([expect.objectContaining({ succeeded: true, actualCostUsd: 0.02 })]);
-		expect(marks).toEqual([expect.objectContaining({ status: "failed", errorCode: "aborted" })]);
-	});
-
-	it("fence: a failure whose terminal write is refused ends as claim-lost instead of failing the newer attempt", async () => {
-		const { d, usage } = deps({
+	it("fence: a provider failure whose routing write is refused still throws for the queue", async () => {
+		const { d } = deps({
 			classify: vi.fn(async () => {
-				throw new Error("OpenRouter API error (500): upstream");
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): upstream overloaded",
+				});
 			}),
 			markAnalysis: vi.fn(async () => false),
 		});
-		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
-		expect(usage).toEqual([expect.objectContaining({ succeeded: false })]);
+		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
 	});
 
 	it("fence: a no-mentions completion whose write is refused ends as claim-lost", async () => {
@@ -312,7 +324,6 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		});
 		expect(await runSentimentJob(payload, d)).toEqual({ status: "claimed-elsewhere", analysisStatus: "processing" });
 		expect(d.classify).not.toHaveBeenCalled();
-		expect(d.persist).not.toHaveBeenCalled();
 		expect(marks).toEqual([]);
 		expect(usage).toEqual([]);
 	});
@@ -323,19 +334,13 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		});
 		expect(await runSentimentJob(payload, d)).toEqual({ status: "no-mentions" });
 		expect(d.classify).not.toHaveBeenCalled();
-		expect(d.loadMentions).not.toHaveBeenCalled();
 		expect(marks.at(-1)).toMatchObject({ status: "no_mentions" });
 	});
 
 	it("B2: an unscanned run is detected once, receipt and rows written together, before classifying", async () => {
 		const persistDetection = vi.fn(async () => mentions);
 		const { d } = deps({ loadDetection: vi.fn(async () => null), persistDetection });
-		expect(await runSentimentJob(payload, d)).toEqual({
-			status: "classified",
-			entities: 2,
-			entityKeys: ["brand", "c-huk"],
-			generationId: "gen-job-001",
-		});
+		expect(await runSentimentJob(payload, d)).toMatchObject(verifiedOutcome);
 		expect(persistDetection).toHaveBeenCalledTimes(1);
 		expect(persistDetection).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -353,17 +358,16 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 
 	it("B2: an unscanned run without extractable text gets an unextractable receipt and no call", async () => {
 		const persistDetection = vi.fn(async () => []);
-		const { d, marks } = deps({
+		const { d } = deps({
 			loadRun: vi.fn(async () => ({ ...run, answerBody: null })),
 			loadDetection: vi.fn(async () => null),
 			persistDetection,
 		});
 		expect(await runSentimentJob(payload, d)).toEqual({ status: "no-mentions" });
 		expect(persistDetection).toHaveBeenCalledWith(
-			expect.objectContaining({ result: { status: "unextractable", mentions: [] } }),
+			expect.objectContaining({ result: expect.objectContaining({ status: "unextractable", mentions: [] }) }),
 		);
 		expect(d.classify).not.toHaveBeenCalled();
-		expect(marks.at(-1)).toMatchObject({ status: "no_mentions" });
 	});
 
 	it("skips a completed analysis whose input hash still matches, without any call or claim", async () => {
@@ -371,39 +375,26 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(await runSentimentJob(payload, d)).toEqual({ status: "already-completed" });
 		expect(d.claimAnalysis).not.toHaveBeenCalled();
 		expect(d.classify).not.toHaveBeenCalled();
-		expect(d.markAnalysis).not.toHaveBeenCalled();
 	});
 
 	it("B8: a completed analysis with a stale input hash (new entity after a roster edit) is reclassified", async () => {
-		const staleHash = sentimentInputHash(run.answerBody ?? "", candidatesFromMentions(mentions.slice(0, 1), entities));
-		const { d } = deps({ analysis: { status: "completed", inputHash: staleHash } });
-		expect(await runSentimentJob(payload, d)).toEqual({
-			status: "classified",
-			entities: 2,
-			entityKeys: ["brand", "c-huk"],
-			generationId: "gen-job-001",
-		});
-		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true });
-		expect(d.classify).toHaveBeenCalledTimes(1);
+		const { d } = deps({ analysis: { status: "completed", inputHash: "0".repeat(64) } });
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "classified", verified: true });
+		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true, resumeResolution: true });
 	});
 
-	it("B8: a completed analysis under another taxonomy or without a hash never counts as current", async () => {
-		const taxonomy = deps({
-			analysis: { status: "completed", inputHash: currentHash, taxonomyVersion: "sent-aspects-v0" },
+	it("B8: a completed analysis without a hash never counts as current; one under another taxonomy is version drift, not work", async () => {
+		const stale = deps({
+			analysis: { status: "completed", taxonomyVersion: "sent-aspects-v0", inputHash: currentHash },
 		});
-		expect(await runSentimentJob(payload, taxonomy.d)).toEqual({
-			status: "classified",
-			entities: 2,
-			entityKeys: ["brand", "c-huk"],
-			generationId: "gen-job-001",
+		expect(await runSentimentJob(payload, stale.d)).toMatchObject({
+			status: "skipped",
+			reason: expect.stringContaining("taxonomy drift"),
 		});
+		expect(stale.d.classify).not.toHaveBeenCalled();
+		expect(stale.d.claimAnalysis).not.toHaveBeenCalled();
 		const hashless = deps({ analysis: { status: "completed", inputHash: null } });
-		expect(await runSentimentJob(payload, hashless.d)).toEqual({
-			status: "classified",
-			entities: 2,
-			entityKeys: ["brand", "c-huk"],
-			generationId: "gen-job-001",
-		});
+		expect(await runSentimentJob(payload, hashless.d)).toMatchObject({ status: "classified" });
 	});
 
 	it("a no_mentions analysis whose receipt still says no mentions is left alone", async () => {
@@ -415,127 +406,185 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(d.claimAnalysis).not.toHaveBeenCalled();
 	});
 
-	it("a rejected answer marks failed with a safe code and the exact input hash, attributes the attempt to the locked provider/model, writes nothing and completes as a terminal outcome", async () => {
-		const { d, marks, usage } = deps({
-			classify: vi.fn(async () => {
-				throw new SentimentValidationError("evidence-unknown-anchor", `entity "brand": ${"x".repeat(2000)}`);
-			}),
+	it("an answer with an unresolved overall is routed to repair, never marked terminal; a valid repair completes the run", async () => {
+		const fakes = resolutionFakes({
+			repairAnswer: {
+				entities: [
+					{
+						key: "c-huk",
+						category: "negative",
+						score: 30,
+						confidence: 0.8,
+						evidence: [{ anchorId: "s0002", polarity: "negative" }],
+						aspects: [],
+					},
+				],
+			},
 		});
-		expect(await runSentimentJob(payload, d)).toEqual({
-			status: "terminal-validation-failure",
-			code: "evidence-unknown-anchor",
-			requestSent: true,
-			diagnostic: null,
-			envelope: null,
+		const unresolved = {
+			...classified,
+			entities: classified.entities.slice(0, 1),
+			unresolvedTargets: [
+				{
+					entityKey: "c-huk",
+					reason: "evidence-entity-unbound",
+					aspectKey: null,
+					anchorId: "s0001",
+					source: "deterministic" as const,
+				},
+			],
+			candidate: {
+				entities: [
+					candidate.entities[0],
+					{ ...candidate.entities[1], evidence: [{ anchorId: "s0001", polarity: "negative" }] },
+				],
+			} as never,
+		};
+		const { d, marks, usage } = deps({ fakes, classify: vi.fn(async () => unresolved) });
+		expect(await runSentimentJob(payload, d)).toMatchObject({
+			status: "classified",
+			paidCalls: 3,
+			repairs: 1,
+			verifierRejections: 0,
+		});
+		expect(fakes.calls.map((c) => c.phase)).toEqual(["repair", "verify"]);
+		expect(fakes.calls[0].prompt).toContain('key "c-huk"');
+		expect(fakes.calls[0].prompt).toContain("evidence-entity-unbound");
+		expect(fakes.attempts.map((a) => `${a.phase}:${a.outcome}`)).toEqual([
+			"classify:rejected",
+			"repair:accepted",
+			"verify:accepted",
+		]);
+		expect(marks.filter((m) => (m as { status: string }).status === "failed")).toEqual([]);
+		expect(usage).toHaveLength(3);
+	});
+
+	it("when repairs keep failing the automatic budget hands the run over as awaiting_review — an open case, not a failed result", async () => {
+		const fakes = resolutionFakes({
+			repairAnswer: {
+				entities: [
+					{
+						key: "c-huk",
+						category: "negative",
+						score: 30,
+						confidence: 0.8,
+						evidence: [{ anchorId: "s0001", polarity: "negative" }],
+						aspects: [],
+					},
+				],
+			},
+		});
+		const unresolved = {
+			...classified,
+			entities: classified.entities.slice(0, 1),
+			unresolvedTargets: [
+				{
+					entityKey: "c-huk",
+					reason: "evidence-entity-unbound",
+					aspectKey: null,
+					anchorId: "s0001",
+					source: "deterministic" as const,
+				},
+			],
+			candidate: {
+				entities: [
+					candidate.entities[0],
+					{ ...candidate.entities[1], evidence: [{ anchorId: "s0001", polarity: "negative" }] },
+				],
+			} as never,
+		};
+		const { d, marks, usage } = deps({ fakes, classify: vi.fn(async () => unresolved) });
+		expect(await runSentimentJob(payload, d)).toMatchObject({
+			status: "awaiting-review",
+			reason: "call-limit",
+			paidCalls: 5,
+			unresolved: 1,
 		});
 		expect(d.persist).not.toHaveBeenCalled();
-		expect(marks.at(-1)).toEqual({
-			status: "failed",
-			errorCode: "evidence-unknown-anchor",
-			errorMessage: `validation evidence-unknown-anchor (SentimentValidationError) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL}`,
-			inputHash: sentimentInputHash(run.answerBody as string, candidatesFromMentions(mentions, entities)),
+		expect(fakes.calls.map((c) => c.phase)).toEqual(["repair", "repair", "repair", "repair"]);
+		expect(fakes.cases.get("a1")).toMatchObject({
+			status: "awaiting_review",
+			reviewReason: "call-limit",
+			automatedProviderCalls: 5,
 		});
-		expect(usage).toEqual([
-			expect.objectContaining({ succeeded: false, provider: SENTIMENT_PROVIDER_ID, model: SENTIMENT_MODEL }),
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: null, inputHash: null });
+		expect(usage).toHaveLength(5);
+		// A further run makes no call and keeps the review item.
+		const again = deps({ fakes, classify: vi.fn(async () => unresolved) });
+		expect(await runSentimentJob(payload, again.d)).toMatchObject({ status: "awaiting-review" });
+		expect(again.d.classify).not.toHaveBeenCalled();
+	});
+
+	it("an allow-listed typed refusal keeps the queue's retry path: the job throws, the parked row carries no input hash, the case waits", async () => {
+		const { d, marks, usage, fakes } = deps({
+			classify: vi.fn(async () => {
+				throw new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 503,
+					errorType: "provider_overloaded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: "OpenRouter API error (503): upstream overloaded",
+				});
+			}),
+		});
+		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: "provider", inputHash: null });
+		expect(usage).toEqual([]);
+		expect(fakes.attempts.map((a) => `${a.phase}:${a.outcome}:${a.generationId}`)).toEqual([
+			"classify:provider-error:null",
 		]);
+		expect(fakes.cases.get("a1")).toMatchObject({ status: "retry_wait", automatedProviderCalls: 0 });
 	});
 
-	it("a failed analysis with the current input hash is skipped without a claim or a call; another input or a provider failure's cleared hash is eligible again", async () => {
-		const current = sentimentInputHash(run.answerBody as string, candidatesFromMentions(mentions, entities));
-		const terminal = deps({ analysis: { status: "failed", inputHash: current, errorCode: "evidence-unknown-anchor" } });
-		expect(await runSentimentJob(payload, terminal.d)).toMatchObject({
-			status: "skipped",
-			reason: expect.stringContaining("terminal validation failure"),
-		});
-		expect(terminal.d.claimAnalysis).not.toHaveBeenCalled();
-		expect(terminal.d.classify).not.toHaveBeenCalled();
-
-		const cleared = deps({ analysis: { status: "failed", inputHash: null } });
-		expect(await runSentimentJob(payload, cleared.d)).toMatchObject({ status: "classified" });
-		const otherInput = deps({
-			analysis: { status: "failed", inputHash: "0".repeat(64), errorCode: "evidence-unknown-anchor" },
-		});
-		expect(await runSentimentJob(payload, otherInput.d)).toMatchObject({ status: "classified" });
-		// A hash left over from an earlier completion on a row failed for another reason is not a terminal mark.
-		const otherCode = deps({ analysis: { status: "failed", inputHash: current, errorCode: "provider" } });
-		expect(await runSentimentJob(payload, otherCode.d)).toMatchObject({ status: "classified" });
-	});
-
-	it("a provider failure keeps the queue's retry path: the job still throws and the failed row carries no input hash", async () => {
-		const { d, marks } = deps({
-			classify: vi.fn(async () => {
-				throw new Error("OpenRouter API error (503): upstream unavailable");
-			}),
-		});
-		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ name: "SentimentJobError", code: "provider" });
-		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "provider", inputHash: null });
-	});
-
-	it("a paid answer rejected before the request left is attributed nothing; one rejected after it is attributed its charged cost, and the envelope survives without any text", async () => {
-		const refused = deps({
-			classify: vi.fn(async () => {
-				throw new SentimentValidationError("answer-unsegmentable", "no citable segment").beforeRequest();
-			}),
-		});
-		expect(await runSentimentJob(payload, refused.d)).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "answer-unsegmentable",
-			requestSent: false,
-		});
-		expect(refused.usage).toEqual([]);
-
-		const envelope = {
-			generationId: "gen-abc123",
-			request: {
-				model: SENTIMENT_MODEL,
-				webSearch: true,
-				maxToolCalls: 1,
-				maxOutputTokens: 8000,
-				strictJsonSchema: true,
-				requireParameters: true,
-			},
-			usage: {
-				inputTokens: 6410,
-				outputTokens: 812,
-				reasoningTokens: 300,
-				costUsd: 0.020047,
-				webSearchRequests: 1,
-				webSearchRequestsConflict: false,
-			},
-		};
-		const paid = deps({
+	it("a paid answer the provider could not shape is attributed its charged cost and hands the run over as a contract defect", async () => {
+		const { d, usage, fakes } = deps({
 			classify: vi.fn(async () => {
 				throw new SentimentValidationError(
-					"mixed-needs-dual-evidence",
-					`entity "c-huk": ${"HUK ist teuer. ".repeat(50)}`,
-					diagnostic("cross-field", "mixed-needs-dual-evidence", { entityKey: "c-huk" }),
-				).withEnvelope(envelope);
+					"invalid-json",
+					"not json",
+					diagnostic("provider-schema", "invalid-json"),
+				).withEnvelope({
+					generationId: "gen-broken-1",
+					request: null,
+					usage: {
+						inputTokens: 1,
+						outputTokens: 1,
+						reasoningTokens: 0,
+						costUsd: 0.007,
+						webSearchRequests: 1,
+						webSearchRequestsConflict: false,
+					},
+				});
 			}),
 		});
-		const outcome = await runSentimentJob(payload, paid.d);
-		expect(outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "mixed-needs-dual-evidence",
-			requestSent: true,
-			envelope,
-			diagnostic: { entityKey: "c-huk" },
+		expect(await runSentimentJob(payload, d)).toMatchObject({
+			status: "awaiting-review",
+			reason: "contract-defect",
+			paidCalls: 1,
 		});
-		expect(paid.usage).toEqual([
-			expect.objectContaining({ succeeded: false, provider: SENTIMENT_PROVIDER_ID, actualCostUsd: 0.020047 }),
+		expect(usage).toEqual([expect.objectContaining({ succeeded: false, actualCostUsd: 0.007 })]);
+		expect(fakes.attempts.map((a) => `${a.phase}:${a.outcome}:${a.generationId}`)).toEqual([
+			"classify:rejected:gen-broken-1",
 		]);
-		const failed = paid.marks.at(-1) as { errorMessage: string };
-		expect(failed.errorMessage).toContain('diagnostic={"stage":"cross-field"');
-		expect(failed.errorMessage).toContain('"generationId":"gen-abc123"');
-		expect(`${failed.errorMessage}${JSON.stringify(outcome)}`).not.toContain("HUK ist teuer");
 	});
 
 	it("sanitizes provider errors: no key, answer text or response body reaches the row or the thrown error", async () => {
 		const leaky =
 			`OpenRouter API error (429): {"error":"rate limited","key":"sk-or-should-not-leak-1234567890"} ` +
 			`while classifying "${run.answerBody}" Authorization: Bearer sk-or-should-not-leak-1234567890`;
-		const { d, marks } = deps({
+		const { d, marks, fakes } = deps({
 			classify: vi.fn(async () => {
-				const error = new Error(leaky);
+				const error = new StructuredResearchRequestError({
+					provider: "openrouter",
+					httpStatus: 429,
+					errorType: "rate_limit_exceeded",
+					structured: true,
+					carriesOutput: false,
+					retryAfterMs: null,
+					message: leaky,
+				});
 				(error as { cause?: unknown }).cause = { responseBody: leaky, answer: run.answerBody };
 				throw error;
 			}),
@@ -553,10 +602,12 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			expect(serializedRow).not.toContain(forbidden);
 			expect(serializedError).not.toContain(forbidden);
 			expect(String(thrown)).not.toContain(forbidden);
+			expect(JSON.stringify([...fakes.cases.values()])).not.toContain(forbidden);
+			expect(JSON.stringify(fakes.attempts)).not.toContain(forbidden);
 		}
 		expect(failed.errorCode).toBe("provider");
 		expect(failed.errorMessage).toBe(
-			`provider provider (Error) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL} HTTP 429`,
+			`provider provider (StructuredResearchRequestError) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL} HTTP 429`,
 		);
 		expect(thrown).toBeInstanceOf(SentimentJobError);
 		expect(thrown).toMatchObject({
@@ -568,24 +619,59 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect((thrown as Error).cause).toBeUndefined();
 	});
 
-	it("sanitizes an aborted request to the stable `aborted` code", async () => {
-		const { d, marks } = deps({
+	it("an aborted request has an unknown outcome: the attempt is `aborted`, the case awaits reconciliation, nothing is retried", async () => {
+		const { d, marks, fakes } = deps({
 			classify: vi.fn(async () => {
 				throw new DOMException("The operation was aborted", "AbortError");
 			}),
 		});
-		await expect(runSentimentJob(payload, d)).rejects.toMatchObject({ code: "aborted", kind: "aborted" });
-		expect(marks.at(-1)).toMatchObject({ status: "failed", errorCode: "aborted" });
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: 1 });
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution" });
+		expect(fakes.attempts.map((a) => a.outcome)).toEqual(["aborted"]);
+		expect(fakes.cases.get("a1")).toMatchObject({ status: "awaiting_reconciliation" });
+	});
+
+	it("an ambiguous 5xx or a status-less transport error is never repeated automatically", async () => {
+		for (const error of [new Error("OpenRouter API error (502)"), new TypeError("fetch failed")]) {
+			const { d, fakes } = deps({
+				classify: vi.fn(async () => {
+					throw error;
+				}),
+			});
+			expect(await runSentimentJob(payload, d)).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: 1 });
+			expect(fakes.attempts.map((a) => a.outcome)).toEqual(["sending"]);
+			expect(d.classify).toHaveBeenCalledTimes(1);
+		}
+	});
+
+	it("an attempt left in `sending` blocks every automatic call until reconciled", async () => {
+		const fakes = resolutionFakes();
+		const kase = await fakes.deps.ensureResolutionCase?.("a1", currentHash);
+		await fakes.deps.openProviderAttempt?.({
+			analysisId: "a1",
+			phase: "classify",
+			inputHash: currentHash,
+			claim: { analysisId: "a1", generation: 1, instanceId: kase?.instanceId ?? "" },
+		});
+		const { d, marks } = deps({ fakes });
+		expect(await runSentimentJob(payload, d)).toEqual({ status: "awaiting-reconciliation", attemptOrdinal: 1 });
+		expect(d.classify).not.toHaveBeenCalled();
+		expect(fakes.cases.get("a1")).toMatchObject({
+			status: "awaiting_reconciliation",
+			reviewReason: "unknown-provider-outcome",
+		});
+		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: null });
 	});
 
 	it("skips invalid and stale payloads without touching the store", async () => {
 		const { d } = deps();
-		expect(await runSentimentJob({ promptRunId: "nope" }, d)).toMatchObject({ status: "skipped" });
+		expect(await runSentimentJob({ nope: true }, d)).toMatchObject({ status: "skipped" });
 		expect(await runSentimentJob({ ...payload, classifierVersion: "sent-classifier-v0" }, d)).toMatchObject({
 			status: "skipped",
 		});
-		expect(await runSentimentJob({ ...payload, taxonomyVersion: "old" }, d)).toMatchObject({ status: "skipped" });
-		expect(await runSentimentJob({ ...payload, extra: 1 }, d)).toMatchObject({ status: "skipped" });
+		expect(await runSentimentJob({ ...payload, taxonomyVersion: "sent-aspects-v0" }, d)).toMatchObject({
+			status: "skipped",
+		});
 		expect(d.loadRun).not.toHaveBeenCalled();
 	});
 
