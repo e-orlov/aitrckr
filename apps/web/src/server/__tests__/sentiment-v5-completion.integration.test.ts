@@ -199,7 +199,7 @@ afterAll(async () => {
 describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 	let calls = 0;
 
-	it("classified: overall + coverage persisted, price dropped, one filtered claim, one paid success", async () => {
+	it("classified: overall + coverage persisted, price dropped, one filtered claim, one classification and its verification", async () => {
 		const outcome = await runSentimentJob(payload(RUN_CAVEAT), {
 			resolveProvider: () => withResolutionPhases(caveatProvider(() => calls++)),
 			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
@@ -255,10 +255,14 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 		]);
 
 		const usage = await client.query<{ event_type: string; estimated_cost_usd: string }>(
-			"SELECT event_type, estimated_cost_usd::text FROM usage_events WHERE brand_id = $1 AND event_type LIKE 'sentiment%'",
+			"SELECT event_type, estimated_cost_usd::text FROM usage_events WHERE brand_id = $1 AND event_type LIKE 'sentiment%' ORDER BY created_at",
 			[BRAND],
 		);
-		expect(usage.rows).toEqual([{ event_type: "sentiment_classification", estimated_cost_usd: "0.019128" }]);
+		// The classification with the cost the provider charged, then the independent verification.
+		expect(usage.rows).toEqual([
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.019128" },
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.001000" },
+		]);
 	});
 
 	it("the audit table has no column that could hold answer text, a prompt or a payload", async () => {
@@ -298,7 +302,7 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 				[RUN_CAVEAT],
 			),
 		).toBe(1);
-		expect(await count("usage_events WHERE brand_id = $1 AND event_type LIKE 'sentiment%'", [BRAND])).toBe(1);
+		expect(await count("usage_events WHERE brand_id = $1 AND event_type LIKE 'sentiment%'", [BRAND])).toBe(2);
 	});
 
 	it("re-persisting the same classification does not duplicate audit rows", async () => {
@@ -347,7 +351,7 @@ describe("V5-RED-010 the 2da20f88 shape completes on real Postgres", () => {
 });
 
 describe("V5-RED-012 persistence failure rolls observations, aspects and audit back together", () => {
-	it("nothing of the attempt survives; the analysis is failed with the persistence code and the paid call attributed", async () => {
+	it("nothing of the attempt survives; the run is parked with the persistence code, the paid answers stay attributed, and the retry completes from the stored candidate", async () => {
 		const { persistClassification } = await import("@workspace/lib/sentiment");
 		const persist: typeof persistClassification = async (args) => {
 			// Fail after the row-level writes began: drop the mention the entity needs.
@@ -366,7 +370,7 @@ describe("V5-RED-012 persistence failure rolls observations, aspects and audit b
 			"SELECT status, error_code FROM sentiment_analyses WHERE prompt_run_id = $1",
 			[RUN_PERSIST_FAIL],
 		);
-		expect(analysis.rows).toEqual([{ status: "failed", error_code: "persistence" }]);
+		expect(analysis.rows).toEqual([{ status: "pending_resolution", error_code: "persistence" }]);
 		expect(await count("sentiment_observations WHERE prompt_run_id = $1", [RUN_PERSIST_FAIL])).toBe(0);
 		expect(
 			await count(
@@ -374,8 +378,36 @@ describe("V5-RED-012 persistence failure rolls observations, aspects and audit b
 				[RUN_PERSIST_FAIL],
 			),
 		).toBe(0);
+		// Two paid answers for the caveat run, two for this one — each attributed once, none lost with the rollback.
 		expect(await count("usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification'", [BRAND])).toBe(
-			2,
+			4,
+		);
+
+		// The queue's retry resumes from the stored candidate: one more verification, no second classification.
+		let laterCalls = 0;
+		const phases: string[] = [];
+		expect(
+			await runSentimentJob(payload(RUN_PERSIST_FAIL), {
+				resolveProvider: () =>
+					withResolutionPhases(
+						caveatProvider(() => laterCalls++),
+						{ onPhase: (p) => phases.push(p) },
+					),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toMatchObject({ status: "classified", filteredClaimCount: 1 });
+		expect(laterCalls).toBe(0);
+		expect(phases).toEqual(["verify"]);
+		expect(
+			(
+				await client.query<{ status: string; verified_at: string | null }>(
+					"SELECT status, verified_at::text FROM sentiment_analyses WHERE prompt_run_id = $1",
+					[RUN_PERSIST_FAIL],
+				)
+			).rows,
+		).toEqual([{ status: "completed", verified_at: expect.any(String) }]);
+		expect(await count("usage_events WHERE brand_id = $1 AND event_type = 'sentiment_classification'", [BRAND])).toBe(
+			5,
 		);
 	});
 });
@@ -428,9 +460,9 @@ describe("V5-RED-014 / V5-RED-015 read selection v5 → v4 → v3", () => {
 			aspect: "overall",
 			timezone: "UTC",
 		});
-		// 5 seeded runs + the completed caveat run each select exactly one analysis; only the
-		// persist-failure run (no completed analysis of any version) counts as failed.
-		expect(overview.coverage.analyses).toMatchObject({ completed: 6, failed: 1, pending: 0 });
+		// 5 seeded runs, the completed caveat run and the recovered persist-failure run each select exactly one
+		// analysis; nothing is ever `failed`.
+		expect(overview.coverage.analyses).toMatchObject({ completed: 7, failed: 0, pending: 0 });
 		const brandRow = overview.entities.find((e) => e.entityType === "brand");
 		expect(brandRow?.mentions).toBe(7);
 	});
@@ -438,7 +470,8 @@ describe("V5-RED-014 / V5-RED-015 read selection v5 → v4 → v3", () => {
 	it("V5-RED-018: aspect denominators count persisted aspect rows only — the dropped price claim is not a price sample", async () => {
 		const scope = { brandId: BRAND, lookback: "1m" as const, timezone: "UTC" };
 		const overall = await loadSentimentOverview({ ...scope, aspect: "overall" });
-		expect(overall.availableAspects.find((a) => a.key === "coverage")?.count).toBe(1);
+		// The caveat run and the recovered persist-failure run each persisted one coverage row; neither persisted price.
+		expect(overall.availableAspects.find((a) => a.key === "coverage")?.count).toBe(2);
 		expect(overall.availableAspects.find((a) => a.key === "price")?.count).toBe(0);
 		const price = await loadSentimentOverview({ ...scope, aspect: "price" });
 		const brandPrice = price.entities.find((e) => e.entityType === "brand");
@@ -446,7 +479,7 @@ describe("V5-RED-014 / V5-RED-015 read selection v5 → v4 → v3", () => {
 		expect(brandPrice?.metrics.sentiment).toBeNull();
 		const coverage = await loadSentimentOverview({ ...scope, aspect: "coverage" });
 		expect(coverage.entities.find((e) => e.entityType === "brand")).toMatchObject({
-			sample: 1,
+			sample: 2,
 			metrics: { sentiment: 80 },
 		});
 	});

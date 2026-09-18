@@ -2,11 +2,13 @@
  * Runs against the disposable test database: `pnpm -C apps/web
  * test:integration` with DATABASE_URL pointing at it.
  *
- * IT-V5-ADR-001…005 — ADR-SENT-01-GROUNDED-COMPLETION on real Postgres: one
- * or every optional aspect claim dropped still completes the analysis with one
- * paid success and no retry; the same code on the overall is terminal; an
- * unknown or ambiguous defect is terminal; a persistence failure after the
- * audit rows were prepared rolls everything back. Plus the no-version-mixing
+ * IT-V5-ADR-001…005 — ADR-SENT-01-GROUNDED-COMPLETION on real Postgres under
+ * Amendment B: one or every optional aspect claim dropped still completes the
+ * analysis from one classification (plus its verification) with no retry; the
+ * same code on the overall, and an unknown or ambiguous aspect defect, are
+ * repair targets — never salvaged into a result, never a terminal failure; a
+ * persistence failure after the audit rows were prepared rolls everything
+ * back, parks the run and resumes from the stored candidate. Plus the no-version-mixing
  * proof (a zero-aspect v5 analysis never shows an older analysis's aspects;
  * removing the v5 fixture restores the old selection byte-identically) and the
  * audit-table safety invariants enforced by the database.
@@ -78,9 +80,23 @@ const rowsOfRun = (table: string) =>
 			: `${table} WHERE prompt_run_id = $1`;
 const usageOf = async (type: string) =>
 	client.query<{ estimated_cost_usd: string }>(
-		"SELECT estimated_cost_usd::text FROM usage_events WHERE brand_id = $1 AND event_type = $2",
+		"SELECT estimated_cost_usd::text FROM usage_events WHERE brand_id = $1 AND event_type = $2 ORDER BY created_at",
 		[BRAND, type],
 	);
+const attemptsOf = async (runId: string) =>
+	(
+		await client.query<{ phase: string; outcome: string; actual_cost_usd: string | null }>(
+			"SELECT t.phase, t.outcome, t.actual_cost_usd::text FROM sentiment_provider_attempts t JOIN sentiment_analyses a ON a.id = t.analysis_id WHERE a.prompt_run_id = $1 ORDER BY t.ordinal",
+			[runId],
+		)
+	).rows.map((t) => `${t.phase}:${t.outcome}:${t.actual_cost_usd}`);
+const analysisOf = async (runId: string) =>
+	(
+		await client.query<{ status: string; error_code: string | null; attempts: number; verified_at: string | null }>(
+			"SELECT status, error_code, attempts, verified_at::text FROM sentiment_analyses WHERE prompt_run_id = $1",
+			[runId],
+		)
+	).rows;
 
 const cite = (anchorId: string, polarity: "positive" | "negative" | "neutral") => ({ anchorId, polarity });
 const positive = (score: number, ...ids: string[]) => ({
@@ -233,7 +249,7 @@ afterAll(async () => {
 const brandEntity = (aspects: unknown[]) => ({ key: "brand", ...positive(70, "s0001", "s0009"), aspects });
 
 describe("IT-V5-ADR-001 one locally invalid aspect", () => {
-	it("completes with the overall and the valid aspect; the invalid aspect is one audit row; one paid success; no retry", async () => {
+	it("completes with the overall and the valid aspect; the invalid aspect is one audit row; one classification and its verification; no retry", async () => {
 		const calls = { n: 0 };
 		const answer = {
 			entities: [
@@ -278,7 +294,12 @@ describe("IT-V5-ADR-001 one locally invalid aspect", () => {
 				anchor_ids: ["s0007"],
 			},
 		]);
-		expect((await usageOf("sentiment_classification")).rows).toEqual([{ estimated_cost_usd: "0.020000" }]);
+		// Two paid answers, each attributed once: the classification and the independent verification.
+		expect(await attemptsOf(RUN_ONE_INVALID)).toEqual(["classify:accepted:0.020000", "verify:accepted:0.001000"]);
+		expect((await usageOf("sentiment_classification")).rows).toEqual([
+			{ estimated_cost_usd: "0.020000" },
+			{ estimated_cost_usd: "0.001000" },
+		]);
 		expect((await usageOf("sentiment_classification_failed")).rows).toEqual([]);
 
 		// A second job for the same input: no provider call, no new rows.
@@ -291,12 +312,12 @@ describe("IT-V5-ADR-001 one locally invalid aspect", () => {
 			status: "already-completed",
 		});
 		expect(calls.n).toBe(1);
-		expect(await count("usage_events WHERE brand_id = $1", [BRAND])).toBe(1);
+		expect(await count("usage_events WHERE brand_id = $1", [BRAND])).toBe(2);
 	});
 });
 
 describe("IT-V5-ADR-002 every optional aspect dropped", () => {
-	it("completes with the overall, zero aspect rows, four audit rows, one paid success; the read loaders treat it as complete", async () => {
+	it("completes with the overall, zero aspect rows, four audit rows, one classification and its verification; the read loaders treat it as complete", async () => {
 		const calls = { n: 0 };
 		const answer = {
 			entities: [
@@ -333,7 +354,9 @@ describe("IT-V5-ADR-002 every optional aspect dropped", () => {
 			[RUN_ALL_INVALID],
 		);
 		expect(audit.rows.map((r) => r.aspect_key)).toEqual(["price", "coverage", "service", "other"]);
-		expect((await usageOf("sentiment_classification")).rows).toHaveLength(2);
+		expect(await attemptsOf(RUN_ALL_INVALID)).toEqual(["classify:accepted:0.020000", "verify:accepted:0.001000"]);
+		// Brand-wide: two paid answers for this run and two for IT-V5-ADR-001.
+		expect((await usageOf("sentiment_classification")).rows).toHaveLength(4);
 		expect((await usageOf("sentiment_classification_failed")).rows).toEqual([]);
 
 		const overview = await loadSentimentOverview({
@@ -359,8 +382,8 @@ describe("IT-V5-ADR-002 every optional aspect dropped", () => {
 	});
 });
 
-describe("IT-V5-ADR-003 the same code on the overall is terminal", () => {
-	it("evidence-entity-unbound on the brand's overall: failed, no observation, aspect or audit row; no salvage", async () => {
+describe("IT-V5-ADR-003 the same code on the overall is a repair target, never a salvage", () => {
+	it("evidence-entity-unbound on the brand's overall: the classification is rejected and repaired for that entity only; nothing of the unbound answer is persisted", async () => {
 		const calls = { n: 0 };
 		const answer = {
 			entities: [
@@ -368,31 +391,43 @@ describe("IT-V5-ADR-003 the same code on the overall is terminal", () => {
 				{ key: ALPHA, ...positive(75, "s0002"), aspects: [] },
 			],
 		};
+		const phases: string[] = [];
+		const repair = {
+			entities: [{ key: "brand", ...positive(75, "s0001"), aspects: [{ key: "service", ...positive(70, "s0001") }] }],
+		};
 		const outcome = await runSentimentJob(payload(RUN_OVERALL_UNBOUND), {
-			resolveProvider: () => withResolutionPhases(provider(answer, calls)),
+			resolveProvider: () => withResolutionPhases(provider(answer, calls), { repair, onPhase: (p) => phases.push(p) }),
 			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
-		expect(outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "evidence-entity-unbound",
-			requestSent: true,
-		});
+		expect(outcome).toMatchObject({ status: "classified", entities: 2, paidCalls: 3, repairs: 1, verified: true });
 		expect(calls.n).toBe(1);
-		expect(
-			(
-				await client.query("SELECT status, error_code, attempts FROM sentiment_analyses WHERE prompt_run_id = $1", [
-					RUN_OVERALL_UNBOUND,
-				])
-			).rows,
-		).toEqual([{ status: "failed", error_code: "evidence-entity-unbound", attempts: 1 }]);
-		for (const table of ["sentiment_observations", "sentiment_aspect_observations", "sentiment_filtered_claims"]) {
-			expect(await count(rowsOfRun(table), [RUN_OVERALL_UNBOUND]), table).toBe(0);
-		}
-		expect((await usageOf("sentiment_classification_failed")).rows).toEqual([{ estimated_cost_usd: "0.020000" }]);
+		expect(phases).toEqual(["classify", "repair", "verify"]);
+		expect(await analysisOf(RUN_OVERALL_UNBOUND)).toEqual([
+			{ status: "completed", error_code: null, attempts: 1, verified_at: expect.any(String) },
+		]);
+		// The rejected classification is paid evidence on the ledger, attributed once; nothing failed.
+		expect(await attemptsOf(RUN_OVERALL_UNBOUND)).toEqual([
+			"classify:rejected:0.020000",
+			"repair:accepted:0.001000",
+			"verify:accepted:0.001000",
+		]);
+		expect((await usageOf("sentiment_classification_failed")).rows).toEqual([]);
+		// Only the repaired brand claim was persisted: its evidence is the brand's own sentence, never Alpha's.
+		const brand = await client.query<{ evidence: { start: number; end: number }[] }>(
+			"SELECT evidence FROM sentiment_observations WHERE prompt_run_id = $1 AND entity_key = 'brand'",
+			[RUN_OVERALL_UNBOUND],
+		);
+		expect(brand.rows).toHaveLength(1);
+		expect(TWO_ANSWER.slice(brand.rows[0].evidence[0].start, brand.rows[0].evidence[0].end)).toBe(
+			"Sent V5 ADR offers a solid service.",
+		);
+		expect(await count(rowsOfRun("sentiment_observations"), [RUN_OVERALL_UNBOUND])).toBe(2);
+		expect(await count(rowsOfRun("sentiment_aspect_observations"), [RUN_OVERALL_UNBOUND])).toBe(1);
+		expect(await count(rowsOfRun("sentiment_filtered_claims"), [RUN_OVERALL_UNBOUND])).toBe(0);
 	});
 });
 
-describe("IT-V5-ADR-004 unknown or ambiguous aspect defects are terminal", () => {
+describe("IT-V5-ADR-004 unknown or ambiguous aspect defects are repair targets, never filtered or salvaged", () => {
 	it.each([
 		[
 			"duplicate aspect",
@@ -409,24 +444,44 @@ describe("IT-V5-ADR-004 unknown or ambiguous aspect defects are terminal", () =>
 			[{ key: "coverage", ...positive(80, "s0042") }],
 			"evidence-unknown-anchor",
 		],
-	])("%s → failed with no observation, aspect or audit row", async (_label, runId, aspects, code) => {
-		const calls = { n: 0 };
-		const outcome = await runSentimentJob(payload(runId), {
-			resolveProvider: () => withResolutionPhases(provider({ entities: [brandEntity(aspects)] }, calls)),
-			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
-		});
-		expect(outcome).toMatchObject({ status: "terminal-validation-failure", code });
-		expect(
-			(await client.query("SELECT status, error_code FROM sentiment_analyses WHERE prompt_run_id = $1", [runId])).rows,
-		).toEqual([{ status: "failed", error_code: code }]);
-		for (const table of ["sentiment_observations", "sentiment_aspect_observations", "sentiment_filtered_claims"]) {
-			expect(await count(rowsOfRun(table), [runId]), table).toBe(0);
-		}
-	});
+	])(
+		"%s → the entity is repaired; the defective claim is neither persisted nor filtered",
+		async (_label, runId, aspects, code) => {
+			const calls = { n: 0 };
+			const phases: string[] = [];
+			const repair = { entities: [brandEntity([{ key: "coverage", ...positive(80, "s0003") }])] };
+			const outcome = await runSentimentJob(payload(runId), {
+				resolveProvider: () =>
+					withResolutionPhases(provider({ entities: [brandEntity(aspects)] }, calls), {
+						repair,
+						onPhase: (p) => phases.push(p),
+					}),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			});
+			expect(code).toMatch(/^(duplicate-aspect|evidence-unknown-anchor)$/);
+			expect(outcome).toMatchObject({ status: "classified", paidCalls: 3, repairs: 1, filteredClaimCount: 0 });
+			expect(calls.n).toBe(1);
+			expect(phases).toEqual(["classify", "repair", "verify"]);
+			expect(await attemptsOf(runId)).toEqual([
+				"classify:rejected:0.020000",
+				"repair:accepted:0.001000",
+				"verify:accepted:0.001000",
+			]);
+			expect(await analysisOf(runId)).toEqual([
+				{ status: "completed", error_code: null, attempts: 1, verified_at: expect.any(String) },
+			]);
+			const persisted = await client.query<{ aspect_key: string }>(
+				`SELECT a.aspect_key FROM ${rowsOfRun("sentiment_aspect_observations")}`,
+				[runId],
+			);
+			expect(persisted.rows.map((r) => r.aspect_key)).toEqual(["coverage"]);
+			expect(await count(rowsOfRun("sentiment_filtered_claims"), [runId])).toBe(0);
+		},
+	);
 });
 
 describe("IT-V5-ADR-005 persistence failure after the audit rows were prepared", () => {
-	it("rolls observations, aspects and audit back together; the analysis is failed/persistence; the paid call stays attributed once", async () => {
+	it("rolls observations, aspects and audit back together; the run is parked with the persistence code; the paid answers stay attributed once and the stored candidate completes it without another classification", async () => {
 		const calls = { n: 0 };
 		const answer = { entities: [brandEntity([{ key: "price", ...negative(30, "s0007") }])] };
 		// The audit insert is the last write of the transaction: a code outside the
@@ -451,15 +506,37 @@ describe("IT-V5-ADR-005 persistence failure after the audit rows were prepared",
 			kind: "store",
 			code: "persistence",
 		});
-		expect(
-			(await client.query("SELECT status, error_code FROM sentiment_analyses WHERE prompt_run_id = $1", [RUN_ROLLBACK]))
-				.rows,
-		).toEqual([{ status: "failed", error_code: "persistence" }]);
+		expect(await analysisOf(RUN_ROLLBACK)).toEqual([
+			{ status: "pending_resolution", error_code: "persistence", attempts: 1, verified_at: null },
+		]);
 		for (const table of ["sentiment_observations", "sentiment_aspect_observations", "sentiment_filtered_claims"]) {
 			expect(await count(rowsOfRun(table), [RUN_ROLLBACK]), table).toBe(0);
 		}
-		expect((await usageOf("sentiment_classification")).rows.length).toBe(successBefore + 1);
+		expect((await usageOf("sentiment_classification")).rows.length).toBe(successBefore + 2);
 		expect((await usageOf("sentiment_classification_failed")).rows.length).toBe(failedBefore);
+		expect(
+			(
+				await client.query<{ status: string; provisional_result: unknown }>(
+					"SELECT c.status, c.provisional_result FROM sentiment_resolution_cases c JOIN sentiment_analyses a ON a.id = c.analysis_id WHERE a.prompt_run_id = $1",
+					[RUN_ROLLBACK],
+				)
+			).rows,
+		).toMatchObject([{ status: "retry_wait", provisional_result: { entities: [{ key: "brand" }] } }]);
+
+		// The queue's retry: the stored candidate is verified again and persisted; the classification is not repeated.
+		const phases: string[] = [];
+		expect(
+			await runSentimentJob(payload(RUN_ROLLBACK), {
+				resolveProvider: () => withResolutionPhases(provider(answer, calls), { onPhase: (p) => phases.push(p) }),
+				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
+			}),
+		).toMatchObject({ status: "classified", filteredClaimCount: 1, paidCalls: 3 });
+		expect(calls.n).toBe(1);
+		expect(phases).toEqual(["verify"]);
+		expect(await analysisOf(RUN_ROLLBACK)).toEqual([
+			{ status: "completed", error_code: null, attempts: 2, verified_at: expect.any(String) },
+		]);
+		expect(await count(rowsOfRun("sentiment_filtered_claims"), [RUN_ROLLBACK])).toBe(1);
 	});
 });
 
