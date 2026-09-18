@@ -9,8 +9,9 @@
  * maintenance inventory, which rediscovers exactly the safely resumable cases
  * and enqueues them through the same deduplicated send.
  */
-import { PgBoss } from "pg-boss";
+
 import pg from "pg";
+import { PgBoss } from "pg-boss";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -156,6 +157,15 @@ const expireLease = (runId: string) =>
 		[runId, SENTIMENT_CLASSIFIER_VERSION],
 	);
 const phases = (script: Script) => script.calls.map((c) => c.phase);
+/** Wait (bounded) until A's classification request has left: its ledger row is `sending`. */
+async function untilSending(runId: string) {
+	for (let i = 0; i < 50; i++) {
+		const last = (await attemptsOf(runId)).at(-1);
+		if (last?.phase === "classify" && last.outcome === "sending") return;
+		await new Promise((r) => setTimeout(r, 100));
+	}
+	throw new Error(`no sending classify attempt for ${runId} within 5 s`);
+}
 const verifyOnly = () => scripted([{ phase: "verify", answer: ACCEPT }]);
 const resumableRuns = async () => (await listResumableSentimentRuns()).map((r) => r.promptRunId);
 
@@ -202,7 +212,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
 	await cleanup();
-	await boss.stop({ graceful: false, wait: false });
+	await boss.stop({ graceful: false });
 	await client.end();
 });
 
@@ -215,7 +225,7 @@ async function raceUntilParked(runId: string, deps: Partial<JobDeps> = {}) {
 		resolutionPolicy: fast,
 		...deps,
 	});
-	await new Promise((r) => setTimeout(r, 300));
+	await untilSending(runId);
 	await expireLease(runId);
 	const b = scripted([{ phase: "classify", answer: { entities: [brandOk] } }]);
 	expect(
@@ -397,8 +407,17 @@ describe("A2B1-5 the inventory selects only safely resumable cases", () => {
 		).toBe(before);
 		for (const i of [4, 5, 6, 7, 8, 9]) expect(await jobsFor(run(i))).toEqual([]);
 
+		// Once the stuck request finally answers, the run becomes resumable like any other and is completed here.
 		stuck.release();
-		await stuck.attemptA;
+		expect(await stuck.attemptA).toMatchObject({ status: "claim-lost" });
+		expect(await resumableRuns()).toContain(run(5));
+		const worker = verifyOnly();
+		expect(
+			await runSentimentJob(payload(run(5)), { resolveProvider: () => worker.provider, resolutionPolicy: fast }),
+		).toMatchObject({
+			status: "classified",
+			paidCalls: 2,
+		});
 	});
 });
 

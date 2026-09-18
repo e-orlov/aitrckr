@@ -125,7 +125,17 @@ export {
 	isAttributable,
 	namesOnlyOthers,
 } from "./grounding";
-export { runSentimentJob, type SentimentJobDeps, type SentimentJobOptions, type SentimentJobOutcome } from "./job";
+export {
+	enqueueResumableSentimentRuns,
+	listResumableSentimentRuns,
+	type ResumableEnqueueResult,
+	type ResumableSentimentRun,
+	resumableEvidence,
+	runSentimentJob,
+	type SentimentJobDeps,
+	type SentimentJobOptions,
+	type SentimentJobOutcome,
+} from "./job";
 export {
 	bucketForRange,
 	categoryLabel,

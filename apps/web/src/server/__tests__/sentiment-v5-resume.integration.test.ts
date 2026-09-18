@@ -136,6 +136,15 @@ const expireLease = (runId: string) =>
 		[runId, SENTIMENT_CLASSIFIER_VERSION],
 	);
 const phases = (script: Script) => script.calls.map((c) => c.phase);
+/** Wait (bounded) until the held phase's request has left: its ledger row is `sending`. */
+async function untilSending(runId: string, phase: string) {
+	for (let i = 0; i < 50; i++) {
+		const last = (await attemptsOf(runId)).at(-1);
+		if (last?.phase === phase && last.outcome === "sending") return;
+		await new Promise((r) => setTimeout(r, 100));
+	}
+	throw new Error(`no sending ${phase} attempt for ${runId} within 5 s`);
+}
 
 async function insertRun(id: string, minutesAgo: number) {
 	await client.query(
@@ -194,8 +203,7 @@ async function lateAnswerRace(runId: string, stepsA: Step[], holdPhase: "classif
 		resolutionPolicy: fast,
 		enqueueResume,
 	});
-	await new Promise((r) => setTimeout(r, 300));
-	expect((await attemptsOf(runId)).at(-1)).toMatchObject({ phase: holdPhase, outcome: "sending" });
+	await untilSending(runId, holdPhase);
 	await expireLease(runId);
 	const b = scripted([
 		{ phase: "classify", answer: { entities: [brandOk] } },

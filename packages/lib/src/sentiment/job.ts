@@ -15,6 +15,7 @@ import {
 } from "./classifier";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import { diagnostic, type SentimentDiagnostic, safeGenerationId } from "./diagnostics";
+import { type SentimentSender, sendSentimentJob } from "./enqueue";
 import {
 	ClaimLostError,
 	type SafeSentimentError,
@@ -50,6 +51,7 @@ import {
 	ensureResolutionCase,
 	finishProviderAttempt,
 	isAnalysisCurrent,
+	listUnresolvedCases,
 	type loadAnalysisState,
 	loadDetectableEntities,
 	loadDetection,
@@ -151,11 +153,14 @@ export interface SentimentJobDeps extends SentimentClassifierDeps {
 	loadProviderAttempts?: typeof loadProviderAttempts;
 	loadResolutionCase?: typeof loadResolutionCase;
 	/**
-	 * Queue an idempotent re-invocation of this run's job (the worker passes the
+	 * Queue an immediate re-invocation of this run's job (the worker passes the
 	 * singleton-keyed send). Fired by a worker that lost its claim after its paid
-	 * answer's evidence was committed, so the parked case can resume from it.
+	 * answer's evidence was committed. An optimization only: the resolved job id
+	 * proves a successor exists, `null` proves nothing but that the queue already
+	 * holds a queued-or-active job for the run — the durable guarantee is
+	 * `enqueueResumableSentimentRuns` on the maintenance schedule.
 	 */
-	enqueueResume?: (promptRunId: string) => Promise<unknown>;
+	enqueueResume?: (promptRunId: string) => Promise<string | null>;
 	/** Runs the settlement of one paid answer (ledger row, usage event, case budget) as one transaction. */
 	transaction?: <T>(fn: (tx: Executor) => Promise<T>) => Promise<T>;
 	/** Overrides of the automatic budget and backoff (tests); production uses `RESOLUTION_POLICY`. */
@@ -362,7 +367,16 @@ async function settlePaidAnswer(
 async function wakeResume(w: Workflow): Promise<void> {
 	if (!w.deps.enqueueResume) return;
 	try {
-		await w.deps.enqueueResume(w.run.id);
+		const jobId = await w.deps.enqueueResume(w.run.id);
+		if (jobId === null) {
+			// Not a success: the exclusive queue already holds a queued-or-active job for this run, which may finish
+			// without ever seeing the evidence just committed. The maintenance inventory rediscovers the case.
+			console.warn(
+				`sentiment resume wake-up for run ${w.run.id}: no new job created (one is queued or active); the maintenance inventory rediscovers the case`,
+			);
+		} else {
+			console.log(`sentiment resume wake-up for run ${w.run.id}: queued job ${jobId}`);
+		}
 	} catch (error) {
 		console.error("sentiment resume wake-up failed:", error instanceof Error ? error.name : typeof error);
 	}
@@ -829,7 +843,7 @@ type StoredAttempt = Awaited<ReturnType<typeof loadProviderAttempts>>[number];
  * anywhere on the analysis. Verdicts, refusals, aborts, other instances or
  * inputs and malformed candidates never qualify.
  */
-function resumableEvidence(
+export function resumableEvidence(
 	kase: StoredResolutionCase,
 	inputHash: string,
 	attempts: StoredAttempt[],
@@ -843,6 +857,76 @@ function resumableEvidence(
 	if (!latest || latest.outcome !== "accepted" || latest.inputHash !== inputHash) return null;
 	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
 	return parsed.success ? { attempt: latest, candidate: parsed.data } : null;
+}
+
+export interface ResumableSentimentRun {
+	analysisId: string;
+	promptRunId: string;
+	/** Ordinal of the attempt whose stored candidate the resumed workflow will reuse. */
+	attemptOrdinal: number;
+}
+
+/**
+ * The parked cases the maintenance schedule may wake: exactly those the
+ * resume predicate accepts against their frozen instance input (the job
+ * re-checks it against the live input under a new claim). Cases awaiting
+ * review, cases with an unresolved `sending` request, retry waits and every
+ * other `pending_resolution` state are never listed, so the inventory cannot
+ * keep queueing work that would only park again.
+ */
+export async function listResumableSentimentRuns(): Promise<ResumableSentimentRun[]> {
+	const parked = (await listUnresolvedCases()).filter(
+		(row) => row.status === "awaiting_reconciliation" && row.reviewReason === "unknown-provider-outcome",
+	);
+	const resumable: ResumableSentimentRun[] = [];
+	for (const row of parked) {
+		const kase = await loadResolutionCase(row.analysisId);
+		if (!kase) continue;
+		const evidence = resumableEvidence(kase, kase.inputHash, await loadProviderAttempts(row.analysisId));
+		if (evidence) {
+			resumable.push({
+				analysisId: row.analysisId,
+				promptRunId: row.promptRunId,
+				attemptOrdinal: evidence.attempt.ordinal,
+			});
+		}
+	}
+	return resumable;
+}
+
+export interface ResumableEnqueueResult {
+	discovered: number;
+	/** Jobs the queue accepted (a new job id). */
+	enqueued: number;
+	/** Sends the exclusive queue refused because a job for the run is already queued or active. */
+	deduplicated: number;
+	failed: number;
+}
+
+/**
+ * The durable wake-up for resumable parked cases, run on the maintenance
+ * schedule: every discovered run is sent through the same singleton-keyed
+ * send the workers use, so a job already queued or active for the run is
+ * never duplicated and a run whose immediate wake-up was lost (send refused,
+ * process gone before enqueue) is picked up within one schedule interval.
+ */
+export async function enqueueResumableSentimentRuns(sender: SentimentSender): Promise<ResumableEnqueueResult> {
+	const runs = await listResumableSentimentRuns();
+	const result: ResumableEnqueueResult = { discovered: runs.length, enqueued: 0, deduplicated: 0, failed: 0 };
+	for (const run of runs) {
+		try {
+			const jobId = await sendSentimentJob(sender, run.promptRunId);
+			if (jobId === null) result.deduplicated += 1;
+			else result.enqueued += 1;
+		} catch (error) {
+			result.failed += 1;
+			console.error(
+				`sentiment resume enqueue failed for run ${run.promptRunId}:`,
+				error instanceof Error ? error.name : typeof error,
+			);
+		}
+	}
+	return result;
 }
 
 /** What the ledger says the instance has paid for: answered attempts and their charged cost. */

@@ -13,6 +13,7 @@ import {
 	resolveBrandPromptRunPlans,
 	targetKey,
 } from "@workspace/lib/run-policy";
+import { enqueueResumableSentimentRuns } from "@workspace/lib/sentiment";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Job } from "pg-boss";
 import boss from "../boss";
@@ -46,6 +47,29 @@ export async function scheduleMaintenanceJob(jobs: Job<ScheduleMaintenanceData>[
 			console.error("[schedule-maintenance] Maintenance check failed:", error);
 			throw error; // Will trigger retry
 		}
+		await wakeResumableSentimentRuns();
+	}
+}
+
+/**
+ * Durable wake-up for sentiment cases parked on an unknown provider outcome
+ * whose own late answer has since been recorded: the worker that recorded it
+ * may have lost its immediate enqueue (exclusive-queue refusal, process gone),
+ * so every schedule tick rediscovers them from the database. Isolated from the
+ * prompt schedule: a failure here is logged and reported, never a retry of the
+ * whole maintenance job.
+ */
+async function wakeResumableSentimentRuns(): Promise<void> {
+	try {
+		const result = await enqueueResumableSentimentRuns(boss);
+		if (result.discovered > 0) {
+			console.log(
+				`[schedule-maintenance] Resumable sentiment cases: ${result.discovered} discovered, ${result.enqueued} enqueued, ${result.deduplicated} already queued or active, ${result.failed} failed`,
+			);
+		}
+	} catch (error) {
+		console.error("[schedule-maintenance] Resumable sentiment wake-up failed:", error);
+		Sentry.captureException(error);
 	}
 }
 
