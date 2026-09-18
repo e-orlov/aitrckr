@@ -29,12 +29,39 @@ export const SENTIMENT_READABLE_CLASSIFIER_VERSIONS = [
 ] as const;
 
 /**
- * Versioned separately from the classifier: a later taxonomy must never
- * silently rewrite what an older aspect row meant. The aspect *keys* and
- * their meaning are unchanged in v4 and v5; the routing rules that send a
- * statement to one key belong to the classifier contract, not to the taxonomy.
+ * The aspect taxonomy each classifier version was shipped with. A taxonomy
+ * change is a classifier-semantic change: it ships as a new classifier version
+ * with its own entry here, which is what makes every stored analysis of the
+ * old version historical and the new identity eligible exactly once. There is
+ * deliberately no way to change the current taxonomy without adding a version.
  */
-export const SENTIMENT_TAXONOMY_VERSION = "sent-aspects-v1";
+export const SENTIMENT_CLASSIFIER_TAXONOMIES = Object.freeze({
+	"sent-classifier-v3": "sent-aspects-v1",
+	"sent-classifier-v4": "sent-aspects-v1",
+	"sent-classifier-v5": "sent-aspects-v1",
+} as const satisfies Record<string, string>);
+
+/**
+ * Stored on every analysis row so a later taxonomy can never silently rewrite
+ * what an older aspect row meant. Derived from the current classifier version:
+ * the aspect *keys* and their meaning are unchanged in v4 and v5; the routing
+ * rules that send a statement to one key belong to the classifier contract.
+ */
+export const SENTIMENT_TAXONOMY_VERSION: string = SENTIMENT_CLASSIFIER_TAXONOMIES[SENTIMENT_CLASSIFIER_VERSION];
+
+/**
+ * A current-version analysis row that names a taxonomy the current version
+ * never shipped with. Not stale work — the resolution identity (run, input,
+ * classifier version) is untouched — but a versioning defect: the same
+ * classifier version has been deployed with two taxonomies. Inventory and
+ * worker both refuse to act on it and report it.
+ */
+export function isTaxonomyDrift(analysis: { classifierVersion: string; taxonomyVersion: string }): boolean {
+	return (
+		analysis.classifierVersion === SENTIMENT_CLASSIFIER_VERSION &&
+		analysis.taxonomyVersion !== SENTIMENT_TAXONOMY_VERSION
+	);
+}
 
 export const SENTIMENT_CATEGORIES = ["positive", "neutral", "mixed", "negative"] as const;
 export type SentimentCategory = (typeof SENTIMENT_CATEGORIES)[number];

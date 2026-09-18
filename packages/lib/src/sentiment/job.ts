@@ -72,6 +72,7 @@ import {
 	updateResolutionCase,
 } from "./store";
 import {
+	isTaxonomyDrift,
 	SENTIMENT_CLASSIFIER_VERSION,
 	SENTIMENT_MODEL,
 	SENTIMENT_TAXONOMY_VERSION,
@@ -1133,6 +1134,16 @@ export async function runSentimentJob(
 	if (!run) return { status: "skipped", reason: "prompt run not found" };
 
 	const analysis = await (deps.ensureAnalysis ?? ensureAnalysis)({ promptRunId: run.id, brandId: run.brandId });
+	if (isTaxonomyDrift(analysis)) {
+		// The same disposition the inventory gives: a versioning defect, not work — no claim, no call, nothing rewritten.
+		console.error(
+			`[sentiment] taxonomy drift on analysis ${analysis.id}: ${analysis.classifierVersion} row carries ${analysis.taxonomyVersion}, current is ${SENTIMENT_TAXONOMY_VERSION}; a taxonomy change ships as a classifier version`,
+		);
+		return {
+			status: "skipped",
+			reason: `taxonomy drift: ${analysis.classifierVersion} analysis carries ${analysis.taxonomyVersion}, expected ${SENTIMENT_TAXONOMY_VERSION}`,
+		};
+	}
 	const entities = await (deps.loadEntities ?? loadDetectableEntities)(run.brandId, "historical");
 	const mentions = await resolveMentions(run, entities, deps);
 	const candidates = candidatesFromMentions(mentions, entities);

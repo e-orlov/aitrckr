@@ -14,8 +14,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test stack");
 
+const { SENTIMENT_CLASSIFIER_TAXONOMIES } = await import("@workspace/lib/sentiment/types");
 const {
-	SENTIMENT_CLASSIFIER_TAXONOMIES,
 	SENTIMENT_CLASSIFIER_VERSION,
 	SENTIMENT_MODEL,
 	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
@@ -308,8 +308,9 @@ describe("A3-3/4/5 a taxonomy change ships with a classifier-version bump", () =
 		expect(await casesOf(run(2))).toHaveLength(1);
 
 		// A3-4: nothing left to do, no call.
+		// Brand-wide: run 1 (A3-1) and run 2 are now the completed ones.
 		const after = await inventory();
-		expect(after.counts).toMatchObject({ completed: 1, eligible: 0, taxonomyDrift: 0 });
+		expect(after.counts).toMatchObject({ completed: 2, eligible: 0, taxonomyDrift: 0 });
 		expect(after.sent).not.toContain(run(2));
 		const again = complete();
 		expect(

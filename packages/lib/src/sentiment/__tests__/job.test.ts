@@ -383,11 +383,16 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(d.claimAnalysis).toHaveBeenCalledWith("a1", { allowFinished: true, resumeResolution: true });
 	});
 
-	it("B8: a completed analysis under another taxonomy or without a hash never counts as current", async () => {
+	it("B8: a completed analysis without a hash never counts as current; one under another taxonomy is version drift, not work", async () => {
 		const stale = deps({
 			analysis: { status: "completed", taxonomyVersion: "sent-aspects-v0", inputHash: currentHash },
 		});
-		expect(await runSentimentJob(payload, stale.d)).toMatchObject({ status: "classified" });
+		expect(await runSentimentJob(payload, stale.d)).toMatchObject({
+			status: "skipped",
+			reason: expect.stringContaining("taxonomy drift"),
+		});
+		expect(stale.d.classify).not.toHaveBeenCalled();
+		expect(stale.d.claimAnalysis).not.toHaveBeenCalled();
 		const hashless = deps({ analysis: { status: "completed", inputHash: null } });
 		expect(await runSentimentJob(payload, hashless.d)).toMatchObject({ status: "classified" });
 	});

@@ -786,13 +786,15 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 		);
 	});
 
-	it("a taxonomy mismatch on a completed analysis never counts as current", async () => {
+	it("a taxonomy mismatch under the unchanged classifier version is configuration drift: not current, not actionable, no call", async () => {
 		await client.query("UPDATE sentiment_analyses SET taxonomy_version = 'sent-aspects-v0' WHERE prompt_run_id = $1", [
 			RUN_MENTIONS,
 		]);
 		expect((await runSentimentEnqueue({ enqueue: false, brandId: BRAND })).counts).toMatchObject({
 			completed: 0,
-			eligibleStale: 1,
+			eligible: 0,
+			eligibleStale: 0,
+			taxonomyDrift: 1,
 		});
 		const overview = await loadSentimentOverview({
 			brandId: BRAND,
@@ -801,17 +803,15 @@ describe("IT-SNT-011 input hash and freshness (B8)", () => {
 			timezone: "UTC",
 		});
 		expect(overview.entities.find((e) => e.key === ALPHA)?.classified).toBe(0);
-		// A resolution instance is identified by run, input hash and classifier version: the resolved instance stands and
-		// the job makes no call. A taxonomy change ships as a classifier version, which opens a new analysis row.
+		// The worker gives the inventory's disposition: a versioning defect it will not act on. A taxonomy change ships as
+		// a classifier version, which opens a new analysis row and resolution instance.
 		let calls = 0;
 		expect(
 			await runSentimentJob(payload, {
 				resolveProvider: () => withResolutionPhases(fakeProvider({ onCall: () => calls++ })),
 				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 			}),
-		).toEqual({
-			status: "already-completed",
-		});
+		).toMatchObject({ status: "skipped", reason: expect.stringContaining("taxonomy drift") });
 		expect(calls).toBe(0);
 		await client.query("UPDATE sentiment_analyses SET taxonomy_version = $2 WHERE prompt_run_id = $1", [
 			RUN_MENTIONS,
