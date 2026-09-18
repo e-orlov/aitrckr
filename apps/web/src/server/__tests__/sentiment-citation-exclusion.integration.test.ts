@@ -8,9 +8,10 @@
  * resumes without duplicates, digests are reproducible and independent of
  * citation URLs, a stale classifier-version analysis is kept but never counted,
  * no job is enqueued by the reprojection, the outbound request binds the exact
- * candidate keys, and the three live failure shapes end as attributed terminal
- * failures — with the charged cost, never the estimate — while a canary
- * preflight refusal records nothing.
+ * candidate keys, and the three live failure shapes are contract defects of the
+ * resolution workflow: one paid answer, attributed once with the charged cost —
+ * never the estimate — then an open `awaiting_review` case that no further job
+ * spends on, while a canary preflight refusal records nothing.
  */
 import { createHash } from "node:crypto";
 import pg from "pg";
@@ -77,6 +78,62 @@ const payload = (promptRunId: string) => ({
 });
 const count = async (table: string, where = "brand_id = $1", params: unknown[] = [BRAND]) =>
 	(await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table} WHERE ${where}`, params)).rows[0].n;
+
+/** The current-version analysis row of a run with its verification state. */
+const analysisOf = async (runId: string) =>
+	(
+		await client.query<{
+			status: string;
+			error_code: string | null;
+			attempts: number;
+			verifier_version: string | null;
+			verified: boolean;
+		}>(
+			"SELECT status, error_code, attempts, verifier_version, verified_at IS NOT NULL AS verified FROM sentiment_analyses WHERE prompt_run_id = $1 AND classifier_version = $2",
+			[runId, SENTIMENT_CLASSIFIER_VERSION],
+		)
+	).rows;
+
+/** The resolution case of a run: the operator's work item and its budget. */
+const caseOf = async (runId: string) =>
+	(
+		await client.query<{
+			status: string;
+			review_reason: string | null;
+			automated_provider_calls: number;
+			total_actual_cost_usd: string;
+			input_hash: string;
+			provisional_result: unknown;
+		}>(
+			"SELECT c.status, c.review_reason, c.automated_provider_calls, c.total_actual_cost_usd::text, c.input_hash, c.provisional_result FROM sentiment_resolution_cases c JOIN sentiment_analyses a ON a.id = c.analysis_id WHERE a.prompt_run_id = $1 AND a.classifier_version = $2",
+			[runId, SENTIMENT_CLASSIFIER_VERSION],
+		)
+	).rows;
+
+/** The paid-attempt ledger of a run as `phase:outcome:cost:candidate-stored`. */
+const attemptsOf = async (runId: string) =>
+	(
+		await client.query<{ phase: string; outcome: string; actual_cost_usd: string | null; has_candidate: boolean }>(
+			"SELECT t.phase, t.outcome, t.actual_cost_usd::text, t.candidate IS NOT NULL AS has_candidate FROM sentiment_provider_attempts t JOIN sentiment_analyses a ON a.id = t.analysis_id WHERE a.prompt_run_id = $1 AND a.classifier_version = $2 ORDER BY t.ordinal",
+			[runId, SENTIMENT_CLASSIFIER_VERSION],
+		)
+	).rows.map((t) => `${t.phase}:${t.outcome}:${t.actual_cost_usd}:${t.has_candidate ? "candidate" : "no-candidate"}`);
+
+/** Every attempt row of a run must carry the provider's generation id: a paid answer is never anonymous. */
+const generationlessAttempts = async (runId: string) =>
+	count(
+		"sentiment_provider_attempts t JOIN sentiment_analyses a ON a.id = t.analysis_id",
+		"a.prompt_run_id = $1 AND t.generation_id IS NULL",
+		[runId],
+	);
+
+const usageOfPrompt = async () =>
+	(
+		await client.query<{ event_type: string; estimated_cost_usd: string }>(
+			"SELECT event_type, estimated_cost_usd FROM usage_events WHERE brand_id = $1 AND prompt_id = $2 ORDER BY created_at",
+			[BRAND, PROMPT],
+		)
+	).rows;
 
 const lockedRequest: StructuredResearchRequestSummary = {
 	model: SENTIMENT_MODEL,
@@ -411,17 +468,34 @@ describe("IT-SNT-CIT-001 digests and request contract", () => {
 		expect(sha(buildSentimentPrompt({ answerBody: body, candidates }))).toBe(a?.providerPromptSha256);
 	});
 
-	it("the request schema sent through the job core binds the exact candidate keys; a conforming answer completes under the current version", async () => {
+	it("the request schema sent through the job core binds the exact candidate keys; a conforming answer is verified and completes under the current version", async () => {
 		let sent: z.ZodType | null = null;
+		const phases: string[] = [];
+		// The classification double answers the initial request only; the independent verifier is scripted to accept.
 		const outcome = await runSentimentJob(payload(RUN_ENUM), {
 			resolveProvider: () =>
-				fakeProvider((keys) => ({ entities: keys.map((key) => goodEntity(key, ownAnchor(key))) }), {
-					onSchema: (schema) => {
-						sent = schema;
-					},
-				}),
+				withResolutionPhases(
+					fakeProvider((keys) => ({ entities: keys.map((key) => goodEntity(key, ownAnchor(key))) }), {
+						onSchema: (schema) => {
+							sent = schema;
+						},
+					}),
+					{ onPhase: (phase) => phases.push(phase) },
+				),
 		});
-		expect(outcome).toMatchObject({ status: "classified", entities: 3, entityKeys: ["brand", ALPHA, BETA] });
+		expect(outcome).toMatchObject({
+			status: "classified",
+			entities: 3,
+			entityKeys: ["brand", ALPHA, BETA],
+			verified: true,
+			verifierVersion: "sent-verifier-v1",
+			paidCalls: 2,
+			repairs: 0,
+			verifierRejections: 0,
+			filteredClaimCount: 0,
+		});
+		// Exactly one classification and one verification; nothing needed a repair.
+		expect(phases).toEqual(["classify", "verify"]);
 		// The schema as the provider sees it: per-request enums once under `$defs`, expanded here for the assertion.
 		const raw = toStructuredOutputJsonSchema(sent as unknown as z.ZodType) as {
 			$defs: Record<string, { enum?: string[] }>;
@@ -441,80 +515,152 @@ describe("IT-SNT-CIT-001 digests and request contract", () => {
 		expect(row.rows).toEqual([
 			{ status: "completed", classifier_version: SENTIMENT_CLASSIFIER_VERSION, input_hash: expect.any(String) },
 		]);
+		// Only a verified result is current: the row names its verifier and the case is closed.
+		expect(await analysisOf(RUN_ENUM)).toEqual([
+			{ status: "completed", error_code: null, attempts: 1, verifier_version: "sent-verifier-v1", verified: true },
+		]);
+		expect(await caseOf(RUN_ENUM)).toMatchObject([
+			{ status: "resolved", review_reason: null, automated_provider_calls: 2, total_actual_cost_usd: "0.013300" },
+		]);
 		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_ENUM])).toBe(3);
-		const usage = await client.query<{ event_type: string; estimated_cost_usd: string }>(
-			"SELECT event_type, estimated_cost_usd FROM usage_events WHERE brand_id = $1 ORDER BY created_at",
-			[BRAND],
-		);
-		expect(usage.rows).toEqual([{ event_type: "sentiment_classification", estimated_cost_usd: "0.012300" }]);
+		// Both paid answers on the ledger with their generation ids, each attributed once with its charged cost.
+		expect(await attemptsOf(RUN_ENUM)).toEqual([
+			"classify:accepted:0.012300:candidate",
+			"verify:accepted:0.001000:no-candidate",
+		]);
+		expect(await generationlessAttempts(RUN_ENUM)).toBe(0);
+		expect(await usageOfPrompt()).toEqual([
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.012300" },
+			{ event_type: "sentiment_classification", estimated_cost_usd: "0.001000" },
+		]);
 	});
 });
 
 describe("IT-SNT-CIT-001 the three live failure shapes through the job core", () => {
-	const failedRow = async (runId: string) =>
-		(
-			await client.query<{ status: string; error_code: string; input_hash: string | null; attempts: number }>(
-				"SELECT status, error_code, input_hash, attempts FROM sentiment_analyses WHERE prompt_run_id = $1 AND classifier_version = $2",
-				[runId, SENTIMENT_CLASSIFIER_VERSION],
-			)
-		).rows[0];
+	/**
+	 * A contract defect leaves the automatic workflow after its one paid answer:
+	 * the analysis is parked, the case is the operator's work item, the answer's
+	 * charged cost sits on the ledger, and nothing is persisted as a result.
+	 */
+	async function expectContractDefectHandOver(runId: string, costUsd: string) {
+		expect(await analysisOf(runId)).toEqual([
+			{ status: "pending_resolution", error_code: null, attempts: 1, verifier_version: null, verified: false },
+		]);
+		expect(await caseOf(runId)).toMatchObject([
+			{
+				status: "awaiting_review",
+				review_reason: "contract-defect",
+				automated_provider_calls: 1,
+				total_actual_cost_usd: costUsd,
+				input_hash: expect.any(String),
+			},
+		]);
+		expect(await generationlessAttempts(runId)).toBe(0);
+		expect(await count("sentiment_observations", "prompt_run_id = $1", [runId])).toBe(0);
+		expect(
+			await count(
+				"sentiment_filtered_claims c JOIN sentiment_analyses a ON a.id = c.analysis_id",
+				"a.prompt_run_id = $1",
+				[runId],
+			),
+		).toBe(0);
+	}
 
-	it("a display name instead of the opaque key is refused by the request schema itself: paid, terminal, charged cost attributed", async () => {
-		const outcome = await runSentimentJob(payload(RUN_LIVE_KEY), {
-			resolveProvider: () =>
-				fakeProvider(
-					(keys) => ({
-						entities: keys.map((key) => goodEntity(key === "brand" ? "Citebrand" : key, ownAnchor(key))),
-					}),
-					{ costUsd: 0.016477 },
-				),
-		});
-		expect(outcome).toMatchObject({ status: "terminal-validation-failure", code: "schema", requestSent: true });
-		expect(await failedRow(RUN_LIVE_KEY)).toMatchObject({
-			status: "failed",
-			error_code: "schema",
-			attempts: 1,
-			input_hash: expect.any(String),
-		});
-		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_LIVE_KEY])).toBe(0);
-		const usage = await client.query<{ event_type: string; estimated_cost_usd: string }>(
-			"SELECT event_type, estimated_cost_usd FROM usage_events WHERE brand_id = $1 AND prompt_id = $2 ORDER BY created_at DESC LIMIT 1",
-			[BRAND, PROMPT],
-		);
-		expect(usage.rows[0]).toEqual({ event_type: "sentiment_classification_failed", estimated_cost_usd: "0.016477" });
-		// Terminal for this exact input: a second job makes no call.
-		const again = await runSentimentJob(payload(RUN_LIVE_KEY), {
+	/** An open review case spends nothing more: a later job for the same input never resolves a provider. */
+	async function expectNoFurtherSpend(runId: string, costUsd: number) {
+		const attemptsBefore = await attemptsOf(runId);
+		const usageBefore = await usageOfPrompt();
+		const again = await runSentimentJob(payload(runId), {
 			resolveProvider: () => {
 				throw new Error("must not be called");
 			},
 		});
-		expect(again).toMatchObject({ status: "skipped" });
-	});
+		expect(again).toEqual({
+			status: "awaiting-review",
+			reason: "contract-defect",
+			paidCalls: 1,
+			costUsd,
+			unresolved: 0,
+		});
+		expect(await attemptsOf(runId)).toEqual(attemptsBefore);
+		expect(await usageOfPrompt()).toEqual(usageBefore);
+	}
 
-	it("a provider that ignored the schema and still answered with the display name is refused locally as unknown-entity", async () => {
-		const outcome = await runSentimentJob(payload(RUN_LIVE_BYPASS), {
+	it("a display name instead of the opaque key is refused by the request schema itself: one paid, unshapeable answer attributed as failed with the charged cost, then awaiting_review", async () => {
+		const phases: string[] = [];
+		const outcome = await runSentimentJob(payload(RUN_LIVE_KEY), {
 			resolveProvider: () =>
-				fakeProvider(
-					(keys) => ({
-						entities: keys.map((key) => goodEntity(key === "brand" ? "Citebrand" : key, ownAnchor(key))),
-					}),
-					{ bypass: true, costUsd: 0.016744 },
+				withResolutionPhases(
+					fakeProvider(
+						(keys) => ({
+							entities: keys.map((key) => goodEntity(key === "brand" ? "Citebrand" : key, ownAnchor(key))),
+						}),
+						{ costUsd: 0.016477 },
+					),
+					{ onPhase: (phase) => phases.push(phase) },
 				),
 		});
-		expect(outcome).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "unknown-entity",
-			diagnostic: expect.objectContaining({ stage: "entity", reason: "unknown-entity" }),
+		expect(outcome).toEqual({
+			status: "awaiting-review",
+			reason: "contract-defect",
+			paidCalls: 1,
+			costUsd: 0.016477,
+			unresolved: 0,
 		});
-		expect(await failedRow(RUN_LIVE_BYPASS)).toMatchObject({ status: "failed", error_code: "unknown-entity" });
-		const usage = await client.query<{ event_type: string; estimated_cost_usd: string }>(
-			"SELECT event_type, estimated_cost_usd FROM usage_events WHERE brand_id = $1 ORDER BY created_at DESC LIMIT 1",
-			[BRAND],
-		);
-		expect(usage.rows[0]).toEqual({ event_type: "sentiment_classification_failed", estimated_cost_usd: "0.016744" });
+		// The request schema refused the display name; no repair or verification was attempted on it.
+		expect(phases).toEqual(["classify"]);
+		await expectContractDefectHandOver(RUN_LIVE_KEY, "0.016477");
+		// A paid answer that could not be shaped: rejected on the ledger without a candidate, attributed as failed with the charged cost, never the estimate.
+		expect(await attemptsOf(RUN_LIVE_KEY)).toEqual(["classify:rejected:0.016477:no-candidate"]);
+		expect((await usageOfPrompt()).at(-1)).toEqual({
+			event_type: "sentiment_classification_failed",
+			estimated_cost_usd: "0.016477",
+		});
+		await expectNoFurtherSpend(RUN_LIVE_KEY, 0.016477);
 	});
 
-	it("one anchor with two labels inside one non-Mixed overall list is structurally impossible: refused by the request schema, and locally when the provider ignored it", async () => {
+	it("a provider that ignored the schema and still answered with the display name is refused locally as unknown-entity: a shaped paid answer, rejected on the ledger with its candidate, attributed once, then awaiting_review", async () => {
+		const phases: string[] = [];
+		const outcome = await runSentimentJob(payload(RUN_LIVE_BYPASS), {
+			resolveProvider: () =>
+				withResolutionPhases(
+					fakeProvider(
+						(keys) => ({
+							entities: keys.map((key) => goodEntity(key === "brand" ? "Citebrand" : key, ownAnchor(key))),
+						}),
+						{ bypass: true, costUsd: 0.016744 },
+					),
+					{ onPhase: (phase) => phases.push(phase) },
+				),
+		});
+		expect(outcome).toEqual({
+			status: "awaiting-review",
+			reason: "contract-defect",
+			paidCalls: 1,
+			costUsd: 0.016744,
+			unresolved: 0,
+		});
+		// An unknown entity key is a contract defect, not a repair target: no repair, no verification.
+		expect(phases).toEqual(["classify"]);
+		await expectContractDefectHandOver(RUN_LIVE_BYPASS, "0.016744");
+		// The answer was shaped, so the ledger keeps it as evidence for the operator: the stored candidate
+		// names the display name the local validator refused, and the paid answer is attributed once, not as failed.
+		expect(await attemptsOf(RUN_LIVE_BYPASS)).toEqual(["classify:rejected:0.016744:candidate"]);
+		const [{ candidate }] = (
+			await client.query<{ candidate: { entities: { key: string }[] } }>(
+				"SELECT t.candidate FROM sentiment_provider_attempts t JOIN sentiment_analyses a ON a.id = t.analysis_id WHERE a.prompt_run_id = $1",
+				[RUN_LIVE_BYPASS],
+			)
+		).rows;
+		expect(candidate.entities.map((entity) => entity.key)).toEqual(["Citebrand", ALPHA, BETA]);
+		expect(await caseOf(RUN_LIVE_BYPASS)).toMatchObject([{ provisional_result: null }]);
+		const usage = await usageOfPrompt();
+		expect(usage.at(-1)).toEqual({ event_type: "sentiment_classification", estimated_cost_usd: "0.016744" });
+		expect(usage.filter((u) => u.event_type === "sentiment_classification_failed")).toHaveLength(1);
+		await expectNoFurtherSpend(RUN_LIVE_BYPASS, 0.016744);
+	});
+
+	it("one anchor with two labels inside one non-Mixed overall list is structurally impossible: refused by the request schema, and locally when the provider ignored it — each one paid answer attributed as failed, then awaiting_review", async () => {
 		const twoLabels = (keys: string[]) => ({
 			entities: keys.map((key) =>
 				key === BETA
@@ -528,25 +674,53 @@ describe("IT-SNT-CIT-001 the three live failure shapes through the job core", ()
 					: goodEntity(key, ownAnchor(key)),
 			),
 		});
+		const failedBefore = (await usageOfPrompt()).filter((u) => u.event_type === "sentiment_classification_failed");
+		const phases: string[] = [];
 		const outcome = await runSentimentJob(payload(RUN_LIVE_POLARITY), {
-			resolveProvider: () => withResolutionPhases(fakeProvider(twoLabels, { costUsd: 0.01758 })),
+			resolveProvider: () =>
+				withResolutionPhases(fakeProvider(twoLabels, { costUsd: 0.01758 }), { onPhase: (phase) => phases.push(phase) }),
 			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
-		expect(outcome).toMatchObject({ status: "terminal-validation-failure", code: "schema", requestSent: true });
-		expect(await failedRow(RUN_LIVE_POLARITY)).toMatchObject({ status: "failed", error_code: "schema" });
-		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_LIVE_POLARITY])).toBe(0);
+		expect(outcome).toEqual({
+			status: "awaiting-review",
+			reason: "contract-defect",
+			paidCalls: 1,
+			costUsd: 0.01758,
+			unresolved: 0,
+		});
+		expect(phases).toEqual(["classify"]);
+		await expectContractDefectHandOver(RUN_LIVE_POLARITY, "0.017580");
+		expect(await attemptsOf(RUN_LIVE_POLARITY)).toEqual(["classify:rejected:0.017580:no-candidate"]);
 
+		// The provider ignored the schema: the same shape is refused by the local wire schema before any
+		// candidate exists, so nothing is stored for repair and the answer is attributed as failed too.
+		const bypassedPhases: string[] = [];
 		const bypassed = await runSentimentJob(payload(RUN_LIVE_BYPASS_POLARITY), {
-			resolveProvider: () => withResolutionPhases(fakeProvider(twoLabels, { bypass: true, costUsd: 0.01758 })),
+			resolveProvider: () =>
+				withResolutionPhases(fakeProvider(twoLabels, { bypass: true, costUsd: 0.01758 }), {
+					onPhase: (phase) => bypassedPhases.push(phase),
+				}),
 			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
-		expect(bypassed).toMatchObject({
-			status: "terminal-validation-failure",
-			code: "schema",
-			diagnostic: expect.objectContaining({ stage: "provider-schema", reason: "schema" }),
+		expect(bypassed).toEqual({
+			status: "awaiting-review",
+			reason: "contract-defect",
+			paidCalls: 1,
+			costUsd: 0.01758,
+			unresolved: 0,
 		});
-		expect(await failedRow(RUN_LIVE_BYPASS_POLARITY)).toMatchObject({ status: "failed", error_code: "schema" });
-		expect(await count("sentiment_observations", "prompt_run_id = $1", [RUN_LIVE_BYPASS_POLARITY])).toBe(0);
+		expect(bypassedPhases).toEqual(["classify"]);
+		await expectContractDefectHandOver(RUN_LIVE_BYPASS_POLARITY, "0.017580");
+		expect(await attemptsOf(RUN_LIVE_BYPASS_POLARITY)).toEqual(["classify:rejected:0.017580:no-candidate"]);
+
+		// Exactly two new failed attributions, each the charged cost of its refused answer.
+		const failedAfter = (await usageOfPrompt()).filter((u) => u.event_type === "sentiment_classification_failed");
+		expect(failedAfter.slice(failedBefore.length)).toEqual([
+			{ event_type: "sentiment_classification_failed", estimated_cost_usd: "0.017580" },
+			{ event_type: "sentiment_classification_failed", estimated_cost_usd: "0.017580" },
+		]);
+		await expectNoFurtherSpend(RUN_LIVE_POLARITY, 0.01758);
+		await expectNoFurtherSpend(RUN_LIVE_BYPASS_POLARITY, 0.01758);
 	});
 });
 
