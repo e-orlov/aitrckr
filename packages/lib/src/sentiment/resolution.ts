@@ -17,6 +17,7 @@ import type { AnalyzableText } from "./ranges";
 import {
 	ANCHOR_ID_PATTERN,
 	SENTIMENT_ASPECT_KEYS,
+	SENTIMENT_SCHEMA_DEFINITIONS,
 	type SentimentAspectKey,
 	type SentimentCandidate,
 	type SentimentClassificationResult,
@@ -170,26 +171,45 @@ export interface VerifierIssue {
 
 export type VerifierResult = { verdict: "accept"; issues: [] } | { verdict: "reject"; issues: VerifierIssue[] };
 
+export const VERIFIER_MAX_ISSUES = 12;
+
 /**
- * Phase D wire contract: accept with no issue, or reject with one to twelve
- * bounded structural issues naming an exact entity key, a target and a code
- * from the fixed vocabulary, optionally one of the answer's anchors. Strict
- * subset only (`anyOf`, `enum`, bounds).
+ * Phase D wire contract: one strict object — a verdict and a bounded list of
+ * structural issues naming an exact entity key, a target and a code from the
+ * fixed vocabulary, optionally one of the answer's anchors. The root is a
+ * plain object because strict structured outputs refuse a root union; the
+ * relation between the verdict and the issue count (accept ⇔ no issue,
+ * reject ⇔ at least one) cannot be expressed in that subset and is enforced
+ * after wire parsing, so a contradictory answer is still rejected.
  */
 export function verifierResultSchemaFor(anchorIds: readonly string[], entityKeys: readonly string[]) {
-	const anchorId =
-		anchorIds.length > 0 ? z.enum(anchorIds as [string, ...string[]]) : z.string().regex(ANCHOR_ID_PATTERN);
-	const entityKey = entityKeys.length > 0 ? z.enum(entityKeys as [string, ...string[]]) : z.string().min(1);
+	// The same named leaf parts as the classify and repair requests: the per-answer anchor enum and the
+	// entity-key enum are each emitted once under `$defs` and referenced from every site.
+	const anchorId = (
+		anchorIds.length > 0 ? z.enum(anchorIds as [string, ...string[]]) : z.string().regex(ANCHOR_ID_PATTERN)
+	).meta({ id: SENTIMENT_SCHEMA_DEFINITIONS.anchorId });
+	const entityKey = (entityKeys.length > 0 ? z.enum(entityKeys as [string, ...string[]]) : z.string().min(1)).meta({
+		id: SENTIMENT_SCHEMA_DEFINITIONS.entityKey,
+	});
 	const issue = z.strictObject({
 		entityKey,
 		target: z.enum(["overall", ...SENTIMENT_ASPECT_KEYS]),
 		code: z.enum(VERIFIER_ISSUE_CODES),
 		anchorId: anchorId.nullable(),
 	});
-	return z.union([
-		z.strictObject({ verdict: z.enum(["accept"]), issues: z.array(issue).max(0) }),
-		z.strictObject({ verdict: z.enum(["reject"]), issues: z.array(issue).min(1).max(12) }),
-	]);
+	return z
+		.strictObject({
+			verdict: z.enum(["accept", "reject"]),
+			issues: z.array(issue).max(VERIFIER_MAX_ISSUES),
+		})
+		.superRefine((value, ctx) => {
+			if (value.verdict === "accept" && value.issues.length > 0) {
+				ctx.addIssue({ code: "custom", path: ["issues"], message: "an accepted verdict carries no issue" });
+			}
+			if (value.verdict === "reject" && value.issues.length === 0) {
+				ctx.addIssue({ code: "custom", path: ["issues"], message: "a rejected verdict names at least one issue" });
+			}
+		});
 }
 
 /** Every verifier issue routes its entity to repair; an aspect issue is a repair of the entity, never a placeholder. */
