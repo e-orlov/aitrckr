@@ -1,4 +1,9 @@
-import { ANCHOR_ID_PATTERN, STRICT_STRUCTURED_OUTPUT_KEYWORDS } from "./types";
+import {
+	STRICT_STRUCTURED_OUTPUT_KEYWORDS,
+	STRICT_STRUCTURED_OUTPUT_LIMITS,
+	structuredOutputSchemaViolations,
+} from "../providers/schema-contract";
+import { ANCHOR_ID_PATTERN } from "./types";
 
 /**
  * Deterministic measurement of the JSON Schema exactly as it is sent to the
@@ -10,15 +15,7 @@ import { ANCHOR_ID_PATTERN, STRICT_STRUCTURED_OUTPUT_KEYWORDS } from "./types";
  * of the two the provider applies, so a raw PASS is a necessary, not a
  * sufficient, condition for acceptance.
  */
-export const PROVIDER_SCHEMA_LIMITS = Object.freeze({
-	enumValues: 1000,
-	/** Applies to a single enum with more than `largeEnumThreshold` values. */
-	largeEnumChars: 15_000,
-	largeEnumThreshold: 250,
-	totalStringLength: 120_000,
-	objectProperties: 5000,
-	nestingDepth: 10,
-});
+export const PROVIDER_SCHEMA_LIMITS = STRICT_STRUCTURED_OUTPUT_LIMITS;
 
 export interface SchemaBudget {
 	/** Literal enum values in the serialized document. */
@@ -63,6 +60,16 @@ function resolveRef(root: Node, ref: string): Node | null {
 	return isNode(node) ? node : null;
 }
 
+/**
+ * An `anchorId` site references the shared definition either directly or as a
+ * nullable wrapper (`anyOf` of the `$ref` and `null`); an inline enum is not.
+ */
+function refersToDefinition(site: Node): boolean {
+	if (typeof site.$ref === "string") return true;
+	if (!Array.isArray(site.anyOf)) return false;
+	return site.anyOf.every((branch) => isNode(branch) && (typeof branch.$ref === "string" || branch.type === "null"));
+}
+
 function isAnchorEnum(values: unknown[]): boolean {
 	return values.length > 0 && values.every((v) => typeof v === "string" && ANCHOR_ID_PATTERN.test(v));
 }
@@ -102,7 +109,7 @@ class RawPass {
 		for (const [name, value] of Object.entries(map)) {
 			this.budget.totalStringLength += name.length;
 			if (kind === "properties" && name === "anchorId" && isNode(value)) {
-				if (typeof value.$ref === "string") this.budget.anchorSitesWithRef += 1;
+				if (refersToDefinition(value)) this.budget.anchorSitesWithRef += 1;
 				else this.budget.anchorSitesWithoutRef += 1;
 			}
 			this.schema(value);
@@ -230,30 +237,23 @@ export interface SchemaBudgetViolation {
 	limit: number | string | boolean;
 }
 
-/** Every documented limit and contract requirement the raw serialized schema breaks; empty when it passes. */
+/**
+ * Every rule the raw serialized schema breaks: the provider's strict
+ * structured-output contract (the same rules the request boundary enforces
+ * before any network operation) plus the sentiment request contract — the
+ * per-answer anchor enum appears exactly once, referenced from every site.
+ * Empty when it passes.
+ */
 export function schemaBudgetViolations(schema: unknown): SchemaBudgetViolation[] {
 	const b = measureSchemaBudget(schema);
-	const L = PROVIDER_SCHEMA_LIMITS;
-	const rules: [string, boolean, number | string | boolean, number | string | boolean][] = [
-		["enum-values", b.rawEnumValues <= L.enumValues, b.rawEnumValues, L.enumValues],
-		["large-enum-chars", b.largeEnumChars <= L.largeEnumChars, b.largeEnumChars, L.largeEnumChars],
-		["total-string-length", b.totalStringLength <= L.totalStringLength, b.totalStringLength, L.totalStringLength],
-		["object-properties", b.objectProperties <= L.objectProperties, b.objectProperties, L.objectProperties],
-		["nesting-depth", b.nestingDepth <= L.nestingDepth, b.nestingDepth, L.nestingDepth],
-		["root-object", b.rootIsObject, b.rootIsObject, true],
-		["root-anyof", !b.rootHasAnyOf, b.rootHasAnyOf, false],
-		["all-required", b.objectsWithOptionalProperties === 0, b.objectsWithOptionalProperties, 0],
-		[
-			"additional-properties-false",
-			b.objectsWithoutAdditionalPropertiesFalse === 0,
-			b.objectsWithoutAdditionalPropertiesFalse,
-			0,
-		],
-		["unsupported-keywords", b.unsupportedKeywords.length === 0, b.unsupportedKeywords.join(","), ""],
+	const contract: [string, boolean, number | string | boolean, number | string | boolean][] = [
 		["anchor-enum-once", b.anchorEnumOccurrences === 1, b.anchorEnumOccurrences, 1],
 		["anchor-sites-by-ref", b.anchorSitesWithoutRef === 0, b.anchorSitesWithoutRef, 0],
 	];
-	return rules.filter(([, ok]) => !ok).map(([rule, , actual, limit]) => ({ rule, actual, limit }));
+	return [
+		...structuredOutputSchemaViolations(schema).map(({ rule, actual, limit }) => ({ rule, actual, limit })),
+		...contract.filter(([, ok]) => !ok).map(([rule, , actual, limit]) => ({ rule, actual, limit })),
+	];
 }
 
 /** Fails closed on the first schema that breaks a documented provider limit or the request contract. */

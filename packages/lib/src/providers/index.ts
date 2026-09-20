@@ -15,6 +15,15 @@ export { STATUS_TARGETS } from "@workspace/config/scrape-targets";
 export { parseScrapeTargets, validateScrapeTargets } from "./config";
 export { toStructuredOutputJsonSchema } from "./json-schema";
 export { selectTargetsForBrand } from "./runner";
+export {
+	assertStructuredOutputSchema,
+	prepareStructuredOutputSchema,
+	STRICT_STRUCTURED_OUTPUT_KEYWORDS,
+	STRICT_STRUCTURED_OUTPUT_LIMITS,
+	StructuredOutputSchemaError,
+	type StructuredOutputSchemaViolation,
+	structuredOutputSchemaViolations,
+} from "./schema-contract";
 export type {
 	ModelConfig,
 	Provider,

@@ -86,6 +86,10 @@ export function sanitizeSentimentError(error: unknown, stage: "provider" | "pers
 	if (error instanceof Error && error.name === "SentimentProviderError") {
 		return { ...base, code: "provider-unconfigured", kind: "configuration", httpStatus: null };
 	}
+	if (error instanceof Error && error.name === "StructuredOutputSchemaError") {
+		// The provider boundary refused the request schema locally: nothing left, nothing was charged.
+		return { ...base, code: "schema-budget-exceeded", kind: "validation", httpStatus: null, requestSent: false };
+	}
 	if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
 		return { ...base, code: "aborted", kind: "aborted", httpStatus: null };
 	}

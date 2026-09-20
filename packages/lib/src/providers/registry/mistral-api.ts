@@ -1,7 +1,8 @@
-import { z } from "zod";
+import type { z } from "zod";
 import { getCredential } from "../../secrets";
 import { type Citation, extractCitationsFromMistral } from "../../text-extraction";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS, warnIfOutputCapped } from "../config";
+import { prepareStructuredOutputSchema } from "../schema-contract";
 import type {
 	Provider,
 	ProviderOptions,
@@ -131,7 +132,7 @@ export const mistralApi: Provider = {
 		schema,
 		webSearch = true,
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
-		const jsonSchema = z.toJSONSchema(schema as z.ZodType);
+		const jsonSchema = prepareStructuredOutputSchema(schema as z.ZodType);
 		if (!webSearch) {
 			// Pure completion: plain chat endpoint with server-validated json_schema.
 			const data = await mistralPost("/v1/chat/completions", {
