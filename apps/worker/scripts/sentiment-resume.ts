@@ -8,12 +8,15 @@
  *   verify --apply --manifest <manifest.json> --manifest-sha256 <hex> [--limit 10]
  *          --actor A --reason R --correlation C
  *       Recomputes the selection, refuses on any drift from the frozen
- *       manifest, issues verify-only permits for one bounded batch and sends
- *       the jobs. Works under a held dispatch: the permits are the bypass.
+ *       manifest, authorizes one bounded batch with verify-only permits bound
+ *       to the manifest's sha256 (issued, reused when this manifest's permit is
+ *       still live, or replacing an expired unconsumed one) and sends the jobs.
+ *       A failed send is reported per case and retried by repeating the same
+ *       apply. Works under a held dispatch: the permits are the bypass.
  *
  * The reservation figure is a planning estimate, not a hard dollar ceiling;
  * the enforceable limits are one verify phase per case, the permit expiry and
- * the fencing. Exit codes: 0 ok · 1 error · 2 usage · 3 refused (drift).
+ * the fencing. Exit codes: 0 ok · 1 error (incl. one or more failed sends) · 2 usage · 3 refused (drift).
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
@@ -81,6 +84,7 @@ async function apply(): Promise<number> {
 		await ensureSentimentQueue(boss);
 		const result = await applyResumeForVerify({
 			manifest,
+			manifestSha256: values["manifest-sha256"],
 			limit,
 			sender: boss,
 			actor: values.actor ?? "",
@@ -88,7 +92,9 @@ async function apply(): Promise<number> {
 			correlationId: values.correlation ?? "",
 		});
 		console.log(JSON.stringify(result));
-		return result.drift ? EXIT.refused : EXIT.ok;
+		if (result.drift) return EXIT.refused;
+		// A failed singleton send leaves its permit standing; the same manifest apply retries it — say so with the exit code.
+		return result.failed.length > 0 ? EXIT.error : EXIT.ok;
 	} finally {
 		await boss.stop({ graceful: true, timeout: 10_000 });
 	}

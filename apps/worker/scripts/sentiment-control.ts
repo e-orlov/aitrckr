@@ -8,15 +8,22 @@
  *   hold   --actor A --reason R --correlation C
  *   open   --actor A --reason R --correlation C --expected held
  *   breaker list [--json] | breaker reset <scope-key> … | breaker open <scope-key> --until-seconds N …
- *   permit list [--analysis <id>] [--json] | permit issue --run <id> --purpose canary|resume-verify
+ *   permit list [--analysis <id>] [--live] [--json] | permit issue --run <id> --purpose canary
  *          --phases classify,repair,verify --estimated-budget 0.10 --ttl-seconds N [--contract-sha256 H] …
  *          | permit revoke <permit-id> …
  *   release-held --limit N [--dry-run] …
  *
+ * Resume permits are never minted here: `resume:sentiment verify --apply` is
+ * the only path, because it verifies the frozen manifest and the invariant
+ * selector that a resume permit is bound to. "Live" always means a live state
+ * and an expiry still ahead by the database clock; a stored row is shown with
+ * its state and whether it is effective, never rewritten by a read.
+ *
  * Money in this tool is an estimate: `estimated-budget` and the reservations
  * are planning figures, never a hard dollar ceiling. The enforceable limits
  * are the phases, the call count, the request token/tool limits, the expiry
- * and the fencing. Exit codes: 0 ok · 1 error · 2 usage · 3 refused.
+ * and the fencing. Exit codes: 0 ok · 1 error · 2 usage · 3 refused ·
+ * 10 (status only) dispatch is held.
  */
 import { parseArgs } from "node:util";
 import {
@@ -71,10 +78,15 @@ const { values, positionals } = parseArgs({
 		"contract-sha256": { type: "string" },
 		limit: { type: "string" },
 		"dry-run": { type: "boolean", default: false },
+		live: { type: "boolean", default: false },
 	},
 });
 
-const who = () => ({ actor: values.actor ?? "", reason: values.reason ?? "", correlationId: values.correlation ?? "" });
+const who = () => {
+	if (!values.actor || !values.reason || !values.correlation)
+		throw new UsageError("--actor, --reason and --correlation are required for a mutating command");
+	return { actor: values.actor, reason: values.reason, correlationId: values.correlation };
+};
 const out = (value: unknown) => console.log(values.json ? JSON.stringify(value, null, 2) : JSON.stringify(value));
 const positiveInt = (raw: string | undefined, flag: string): number => {
 	const n = Number.parseInt(raw ?? "", 10);
@@ -86,6 +98,7 @@ class UsageError extends Error {}
 async function status(): Promise<number> {
 	const dispatch = await readDispatchState();
 	const blocking = await listBlockingBreakers();
+	// Effective permits only: live state and unexpired by the database clock.
 	const live = await listPermits({ live: true });
 	const held = await listHeldWork(10_000);
 	const events = await listControlEvents("control", "dispatch");
@@ -107,7 +120,7 @@ async function status(): Promise<number> {
 				openedClass: b.openedClass,
 			})),
 		},
-		permits: { live: live.length },
+		permits: { live: live.length, liveIds: live.map((p) => p.id) },
 		heldWork: { pendingAnalyses: held.counts.a, receiptsWithoutAnalysis: held.counts.b },
 		note: "estimated budgets and reservations are planning figures, not hard dollar ceilings",
 	});
@@ -178,7 +191,7 @@ async function lifecycleOf(promptRunId: string) {
 async function permit(): Promise<number> {
 	const [, sub, permitId] = positionals;
 	if (sub === "list" || sub === undefined) {
-		out(await listPermits({ analysisId: values.analysis, live: false }));
+		out(await listPermits({ analysisId: values.analysis, live: values.live }));
 		return EXIT.ok;
 	}
 	if (sub === "revoke") {
@@ -192,9 +205,14 @@ async function permit(): Promise<number> {
 	const purpose = values.purpose as PermitPurpose;
 	if (!(PERMIT_PURPOSES as readonly string[]).includes(purpose))
 		throw new UsageError("--purpose must be canary or resume-verify");
+	if (purpose === "resume-verify") {
+		throw new UsageError(
+			"resume-verify permits are issued only by `resume:sentiment verify --apply` from a frozen manifest; this command cannot mint one",
+		);
+	}
 	const budget = Number(values["estimated-budget"]);
-	if (!Number.isFinite(budget))
-		throw new UsageError("--estimated-budget must be a number (a planning estimate, not a cap)");
+	if (!Number.isFinite(budget) || budget <= 0)
+		throw new UsageError("--estimated-budget must be a positive number (a planning estimate, not a cap)");
 	const { run, analysis, inputHash, instanceId } = await lifecycleOf(values.run);
 	const row = await issuePermit({
 		purpose,
