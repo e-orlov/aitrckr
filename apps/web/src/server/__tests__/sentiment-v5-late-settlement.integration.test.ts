@@ -155,6 +155,13 @@ const deferred = () => {
 	});
 	return { hold, release };
 };
+/** Poll (≤ 5 s) until worker A's request has left its `sending` row behind — a fixed wait straddled the real latency. */
+async function untilSending(runId: string): Promise<void> {
+	for (let waited = 0; waited < 5_000; waited += 50) {
+		if ((await attemptsOf(runId)).some((t) => t.outcome === "sending")) return;
+		await new Promise((r) => setTimeout(r, 50));
+	}
+}
 const expireLease = (runId: string) =>
 	client.query(
 		"UPDATE sentiment_analyses SET started_at = now() - interval '16 minutes' WHERE prompt_run_id = $1 AND classifier_version = $2",
@@ -209,7 +216,7 @@ async function raceToParked(runId: string, answer: unknown, generationId: string
 	const { hold, release } = deferred();
 	const a = scripted([{ phase: "classify", answer, hold, generationId }]);
 	const attemptA = runSentimentJob(payload(runId), { resolveProvider: () => a.provider, resolutionPolicy: fast });
-	await new Promise((r) => setTimeout(r, 300));
+	await untilSending(runId);
 	expect((await attemptsOf(runId)).map((t) => `${t.phase}:${t.outcome}`)).toEqual(["classify:sending"]);
 	const generationA = (await analysisOf(runId)).claim_generation;
 	await expireLease(runId);
@@ -298,7 +305,7 @@ describe("A2A-4 a late answer of an obsolete resolution instance is historical e
 		const { hold, release } = deferred();
 		const a = scripted([{ phase: "classify", answer: twoOk, hold, generationId: "gen-lcs-late-002" }]);
 		const attemptA = runSentimentJob(payload(run(2)), { resolveProvider: () => a.provider, resolutionPolicy: fast });
-		await new Promise((r) => setTimeout(r, 300));
+		await untilSending(run(2));
 		const oldInstance = (await caseOf(run(2))).instance_id;
 		const generationA = (await analysisOf(run(2))).claim_generation;
 		// The competitor gains an alias: a new classifier input, hence a new resolution instance for the next owner.
