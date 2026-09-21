@@ -54,7 +54,13 @@ const promptSchema = z.object({
 		.describe(`1-3 tags per prompt (ideally 1-2), drawn from the shared brand-tailored vocabulary. ${TAG_GUIDANCE}`),
 });
 
-function buildSchema(args: { maxCompetitors: number; maxPrompts: number }) {
+/**
+ * The exact schema every onboarding analysis request carries to the provider.
+ * Pure: the two limits are the only inputs that shape the document, so tests
+ * can serialize precisely what {@link buildAnalysisContext} sends without a
+ * website fetch.
+ */
+export function buildOnboardingAnalysisSchema(args: { maxCompetitors: number; maxPrompts: number }) {
 	return z.object({
 		brandName: z
 			.string()
@@ -84,7 +90,7 @@ function buildSchema(args: { maxCompetitors: number; maxPrompts: number }) {
 	});
 }
 
-type RawSuggestion = z.infer<ReturnType<typeof buildSchema>>;
+type RawSuggestion = z.infer<ReturnType<typeof buildOnboardingAnalysisSchema>>;
 
 export interface OnboardingCompetitor {
 	name: string;
@@ -139,7 +145,7 @@ export interface AnalysisContext {
 	/** Caller-supplied name, when there was one — it outranks the model's answer. */
 	providedBrandName?: string;
 	prompt: string;
-	schema: ReturnType<typeof buildSchema>;
+	schema: ReturnType<typeof buildOnboardingAnalysisSchema>;
 	maxCompetitors: number;
 	maxPrompts: number;
 }
@@ -173,7 +179,7 @@ export async function buildAnalysisContext(options: AnalyzeBrandOptions): Promis
 		brandNameHint,
 		...(providedBrandName !== undefined && { providedBrandName }),
 		prompt,
-		schema: buildSchema({ maxCompetitors, maxPrompts }),
+		schema: buildOnboardingAnalysisSchema({ maxCompetitors, maxPrompts }),
 		maxCompetitors,
 		maxPrompts,
 	};

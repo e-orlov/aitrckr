@@ -441,24 +441,9 @@ export function toProviderResult(raw: unknown): SentimentProviderResult {
  * provider supports. Anything else in a request schema is a contract defect
  * caught by tests before a call is ever made.
  */
-export const STRICT_STRUCTURED_OUTPUT_KEYWORDS = [
-	"$schema",
-	"$defs",
-	"$ref",
-	"type",
-	"properties",
-	"required",
-	"additionalProperties",
-	"items",
-	"anyOf",
-	"enum",
-	"minItems",
-	"maxItems",
-	"minimum",
-	"maximum",
-	"description",
-	"title",
-] as const;
+export { STRICT_STRUCTURED_OUTPUT_KEYWORDS } from "../providers/schema-contract";
+
+import { STRICT_STRUCTURED_OUTPUT_KEYWORDS } from "../providers/schema-contract";
 
 /** Throws when a serialized schema uses a keyword outside the supported subset (`if/then/else`, `contains`, `allOf`, `not`, `oneOf`, …). */
 export function assertStrictStructuredOutputSubset(schema: unknown): void {

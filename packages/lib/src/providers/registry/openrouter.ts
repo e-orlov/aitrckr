@@ -3,7 +3,7 @@ import { WEB_QUERIES_UNAVAILABLE } from "../../constants";
 import { getCredential } from "../../secrets";
 import { type Citation, normalizeCitationTitle } from "../../text-extraction";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS, warnIfOutputCapped } from "../config";
-import { toStructuredOutputJsonSchema } from "../json-schema";
+import { prepareStructuredOutputSchema } from "../schema-contract";
 import {
 	type Provider,
 	type ProviderOptions,
@@ -284,8 +284,9 @@ export const openrouter: Provider = {
 		maxOutputTokens,
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
 		// Raw fetch (no AI SDK) so we can attach OpenRouter's server-tool fields
-		// — the AI SDK's OpenAI-compat path doesn't pass them through.
-		const jsonSchema = toStructuredOutputJsonSchema(schema as z.ZodType);
+		// — the AI SDK's OpenAI-compat path doesn't pass them through. The schema is
+		// refused locally before the request leaves when strict mode would refuse it.
+		const jsonSchema = prepareStructuredOutputSchema(schema as z.ZodType);
 		const body: Record<string, unknown> = {
 			model: DEFAULT_RESEARCH_MODEL,
 			messages: [{ role: "user", content: prompt }],
