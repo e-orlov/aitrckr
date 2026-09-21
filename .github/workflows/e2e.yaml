@@ -360,6 +360,19 @@ jobs:
           SENTIMENT_NET_GUARD_LOG: /tmp/sentiment-net-guard.log
         run: |
           export ELMO_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+          # Migration 0024 seeds dispatch HELD. The matrix assumes the operator opened it (the dispatch-controls suite
+          # toggles and restores the state itself); vitest orders files by size, so open it here rather than rely on
+          # one suite running first. Exit 10 from `status` means held.
+          set +e
+          pnpm -C apps/worker exec tsx scripts/sentiment-control.ts status --json
+          status=$?
+          set -e
+          if [ "$status" = "10" ]; then
+            pnpm -C apps/worker exec tsx scripts/sentiment-control.ts open --expected held --actor ci --reason "sentiment integration matrix baseline" --correlation "${GITHUB_RUN_ID}"
+          elif [ "$status" != "0" ]; then
+            echo "sentiment-control status failed with exit $status" >&2
+            exit "$status"
+          fi
           pnpm -C apps/web exec vitest run --project=integration --reporter=verbose --reporter=json --outputFile=/tmp/sentiment-integration.json
 
       - name: "Sentiment DB verifier on the migrated database"
