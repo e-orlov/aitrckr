@@ -1,3 +1,4 @@
+import { drizzle } from "drizzle-orm/node-postgres";
 import { describe, expect, it, vi } from "vitest";
 import { StructuredOutputSchemaError } from "../../providers/schema-contract";
 import { StructuredResearchRequestError, StructuredResearchResponseError } from "../../providers/types";
@@ -7,6 +8,7 @@ import {
 	isPermitEffective,
 	isResumeVerifyBudget,
 	issuePermit,
+	lockedLifecyclePermits,
 	permitPurposeAllowsPhase,
 	permitSettlementFor,
 	readDispatchState,
@@ -277,6 +279,20 @@ describe("permit shape and settlement contract (F-2, F-3, F-7)", () => {
 		await expect(
 			issuePermit({ ...base, purpose: "canary", phaseBudget: { classify: 1, repair: 0, verify: 1 } }, neverExecutes),
 		).rejects.toThrow(/must refuse before opening/);
+	});
+
+	it("the unresolved-attempt lookup compares the attempt's permit id with the outer permit row, not with itself", () => {
+		// Never connects: only the rendered statement is inspected. A single-table select makes Drizzle strip every
+		// column object in the selection to a bare identifier, which once turned this lookup into a self-comparison.
+		const query = lockedLifecyclePermits(drizzle("postgres://unused:unused@127.0.0.1:1/unused"), {
+			analysisId: "a",
+			instanceId: "i",
+		}).toSQL().sql;
+		expect(query).toContain(
+			`exists (select 1 from "sentiment_provider_attempts" as unresolved where unresolved."permit_id" = "sentiment_dispatch_permits"."id" and unresolved."outcome" = 'sending')`,
+		);
+		expect(query).not.toMatch(/where "permit_id" = "id"/);
+		expect(query).toMatch(/for update$/);
 	});
 
 	it("a purpose authorizes only its phases", () => {

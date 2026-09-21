@@ -242,22 +242,20 @@ export class PermitConflictError extends Error {
 }
 
 /**
- * Durably expire the unconsumed (`issued`) permits of a lifecycle whose
- * `expires_at` has passed by the database clock, one audit event each. Runs
- * inside the caller's transaction with the rows locked, so a concurrent issuer
- * or consumer sees the transition. Permits that consumed a phase or carry an
- * unresolved `sending` attempt are never touched here.
+ * The live-state permits of one lifecycle, locked, with their expiry by the
+ * database clock and whether an unresolved `sending` attempt references them.
+ * In a single-table select Drizzle renders every column object inside a
+ * selection expression as a bare identifier, so the correlated lookup names
+ * its tables explicitly: the outer permit id and the aliased attempts table.
  */
-export async function expireUnconsumedPermits(
-	tx: Executor,
-	args: { analysisId: string; instanceId: string },
-): Promise<{ expired: string[]; blocking: { id: string; code: PermitConflictError["code"] }[] }> {
-	const live = await tx
+export function lockedLifecyclePermits(tx: Executor, args: { analysisId: string; instanceId: string }) {
+	const permitId = sql`${sentimentDispatchPermits}.${sql.identifier(sentimentDispatchPermits.id.name)}`;
+	return tx
 		.select({
 			id: sentimentDispatchPermits.id,
 			state: sentimentDispatchPermits.state,
 			expired: sql<boolean>`${sentimentDispatchPermits.expiresAt} <= now()`,
-			sending: sql<boolean>`exists (select 1 from ${sentimentProviderAttempts} where ${sentimentProviderAttempts.permitId} = ${sentimentDispatchPermits.id} and ${sentimentProviderAttempts.outcome} = 'sending')`,
+			sending: sql<boolean>`exists (select 1 from ${sentimentProviderAttempts} as unresolved where unresolved.${sql.identifier(sentimentProviderAttempts.permitId.name)} = ${permitId} and unresolved.${sql.identifier(sentimentProviderAttempts.outcome.name)} = 'sending')`,
 		})
 		.from(sentimentDispatchPermits)
 		.where(
@@ -269,6 +267,22 @@ export async function expireUnconsumedPermits(
 		)
 		.orderBy(sentimentDispatchPermits.id)
 		.for("update");
+}
+
+/**
+ * Durably expire the unconsumed (`issued`) permits of a lifecycle whose
+ * `expires_at` has passed by the database clock, one audit event each. Runs
+ * inside the caller's transaction with the rows locked, so a concurrent issuer
+ * or consumer sees the transition — and only a transaction that commits (the
+ * issue, replacement and resume-apply paths) makes it durable. Permits that
+ * consumed a phase or carry an unresolved `sending` attempt are never touched
+ * here; they are reported as blocking with their typed reason.
+ */
+export async function expireUnconsumedPermits(
+	tx: Executor,
+	args: { analysisId: string; instanceId: string },
+): Promise<{ expired: string[]; blocking: { id: string; code: PermitConflictError["code"] }[] }> {
+	const live = await lockedLifecyclePermits(tx, args);
 	const expired: string[] = [];
 	const blocking: { id: string; code: PermitConflictError["code"] }[] = [];
 	for (const permit of live) {
@@ -419,7 +433,8 @@ export type PermitConsumption =
  * One conditional UPDATE decides everything: the permit must be live and
  * unexpired by the database clock, the phase budget must be 1, and the
  * planning predicate `settled + reserved + estimate ≤ budget` must hold. A
- * loser of a race sees zero rows and is told why without any write.
+ * loser of a race sees zero rows and is told why; a refusal persists nothing
+ * because the caller rolls the dispatch transaction back.
  */
 export async function consumePermitPhase(
 	tx: Executor,
@@ -448,8 +463,10 @@ export async function consumePermitPhase(
 	if (row) return { consumed: true, permitId: row.id, reservedEstimateUsd: args.reserveUsd };
 	const live = await findLivePermit(args, tx);
 	if (!live) {
-		// A live-state permit that only failed the clock predicate is expired durably here (this is a mutating path);
-		// a permit that already consumed a phase keeps its state for reconciliation and is merely reported.
+		// Diagnostic only: the caller rolls this transaction back on a refusal, so nothing observed here becomes
+		// durable. The lifecycle's permits are classified to name the reason — a live-state permit that failed the
+		// clock predicate or already consumed a phase is reported as `expired`; its stored row is left for the
+		// committed issue/replacement/apply path (or the operator) to transition.
 		const stale = await expireUnconsumedPermits(tx, { analysisId: args.analysisId, instanceId: args.instanceId });
 		const any = stale.expired.length > 0 || stale.blocking.some((b) => b.code !== "permit-live");
 		return { consumed: false, reason: any ? "expired" : "no-live-permit" };

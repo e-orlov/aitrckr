@@ -112,6 +112,7 @@ export {
 	listControlEvents,
 	listPermits,
 	loadPermit,
+	lockedLifecyclePermits,
 	PERMIT_ESTIMATED_BUDGET_MAX_USD,
 	PERMIT_LIVE_STATES,
 	PERMIT_PHASES,

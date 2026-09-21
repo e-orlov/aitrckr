@@ -906,14 +906,21 @@ describe("IT-SNT-C-014 live means live by the database clock (F-7)", () => {
 		expect(await listPermits({ analysisId: lc.analysisId, live: true })).toEqual([]);
 		const listed = await listPermits({ analysisId: lc.analysisId });
 		expect(listed.map((p) => `${p.state}:${p.effective}`)).toEqual(["issued:false"]);
-		// The read did not rewrite the row; the job (a mutating path) expires it durably with an audit event and makes no call.
+		// The reads did not rewrite the row. The job observes the expired permit at the execution gate, authorizes zero
+		// calls and writes nothing: the stored row stays `issued` (ineffective by the database clock, one `issued` event),
+		// because the only paths that transition it durably are the committed issue, replacement and resume-apply paths.
 		const { provider, script } = scripted([{ phase: "classify", answer: { entities: [brandOk] } }]);
 		expect(await runSentimentJob(payload(run(24)), { resolveProvider: () => provider })).toMatchObject({
 			status: "held",
+			reason: "dispatch-held",
 		});
 		expect(script.calls).toEqual([]);
-		const stored = await permitRow(permit.id);
-		expect(stored.state).toBe("issued"); // the execution gate is read-only; only a consuming path transitions
+		expect(await attemptsOf(run(24))).toEqual([]);
+		expect(await permitRow(permit.id)).toMatchObject({ state: "issued" });
+		expect((await listPermits({ analysisId: lc.analysisId })).map((p) => `${p.state}:${p.effective}`)).toEqual([
+			"issued:false",
+		]);
+		expect((await listControlEvents("permit", permit.id)).map((e) => e.toState)).toEqual(["issued"]);
 		// A replacement can be issued: the stale permit is expired in the same transaction, one event, and the index is free.
 		const next = await canaryPermit(run(24), lc);
 		expect((await permitRow(permit.id)).state).toBe("expired");
@@ -939,6 +946,49 @@ describe("IT-SNT-C-014 live means live by the database clock (F-7)", () => {
 		await setDispatch("open");
 		expect((await listResumableSentimentRuns(1000)).map((r) => r.promptRunId)).not.toContain(run(25));
 		await setDispatch("held");
+	});
+});
+
+describe("IT-SNT-C-016 an expired permit with an unresolved attempt is never replaced (CR-N1)", () => {
+	it("issuing again is refused as permit-unresolved-attempt: no replacement, no expiry transition, no expiry event; without the attempt the same row is expired once, audited once and replaced once", async () => {
+		await setDispatch("held");
+		const lc = await lifecycleOf(run(28));
+		const permit = await canaryPermit(run(28), lc);
+		// Production never leaves an `issued` permit with an attempt (consumption sets `active` in the same transaction);
+		// the row is constructed by hand so the lookup itself is what refuses, not the consumed-phase branch.
+		const attempt = await client.query<{ id: string }>(
+			`INSERT INTO sentiment_provider_attempts (analysis_id, instance_id, ordinal, phase, provider, model, input_hash, outcome, permit_id)
+			 VALUES ($1, $2, 1, 'classify', 'openrouter', $3, $4, 'sending', $5) RETURNING id`,
+			[lc.analysisId, lc.instanceId, SENTIMENT_MODEL, lc.inputHash, permit.id],
+		);
+		await client.query("UPDATE sentiment_dispatch_permits SET expires_at = now() - interval '1 second' WHERE id = $1", [
+			permit.id,
+		]);
+		await expect(canaryPermit(run(28), lc)).rejects.toMatchObject({
+			name: "PermitConflictError",
+			code: "permit-unresolved-attempt",
+			permitId: permit.id,
+		});
+		expect((await listPermits({ analysisId: lc.analysisId })).map((p) => `${p.state}:${p.effective}`)).toEqual([
+			"issued:false",
+		]);
+		expect((await listControlEvents("permit", permit.id)).map((e) => e.toState)).toEqual(["issued"]);
+		// The adjacent behaviour is unchanged: once the attempt is resolved, the expired unconsumed permit is expired
+		// exactly once, audited exactly once and replaced exactly once.
+		await client.query("DELETE FROM sentiment_provider_attempts WHERE id = $1", [attempt.rows[0].id]);
+		const next = await canaryPermit(run(28), lc);
+		expect(await permitRow(permit.id)).toMatchObject({ state: "expired" });
+		expect((await listControlEvents("permit", permit.id)).map((e) => `${e.fromState}->${e.toState}`)).toEqual([
+			"null->issued",
+			"issued->expired",
+		]);
+		expect((await listPermits({ analysisId: lc.analysisId })).map((p) => `${p.state}:${p.effective}`).sort()).toEqual([
+			"expired:false",
+			"issued:true",
+		]);
+		expect((await listPermits({ analysisId: lc.analysisId, live: true })).map((p) => p.id)).toEqual([next.id]);
+		await expect(canaryPermit(run(28), lc)).rejects.toMatchObject({ code: "permit-live", permitId: next.id });
+		expect(await listControlEvents("permit", permit.id)).toHaveLength(2);
 	});
 });
 
