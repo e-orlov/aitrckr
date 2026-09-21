@@ -96,6 +96,7 @@ export {
 } from "./classifier";
 export {
 	type ControlActor,
+	consumePermitPhase,
 	DISPATCH_CONTROL_KEY,
 	type DispatchControlState,
 	type DispatchState,

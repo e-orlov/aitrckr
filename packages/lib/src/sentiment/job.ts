@@ -405,6 +405,10 @@ async function retryDbOnly<T>(w: Workflow, attemptOrdinal: number, step: () => P
 			return await step();
 		} catch (error) {
 			if (error instanceof ClaimLostError) throw error;
+			const pgCode = (error as { code?: unknown }).code;
+			console.warn(
+				`[sentiment] settlement step ${round}/${SETTLE_ATTEMPTS} failed on analysis ${w.claim.analysisId}: ${error instanceof Error ? error.name : typeof error}${typeof pgCode === "string" ? ` ${pgCode}` : ""}`,
+			);
 			if (round >= SETTLE_ATTEMPTS) throw new HandOver("unknown-provider-outcome", attemptOrdinal);
 			await (w.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(SETTLE_RETRY_MS);
 		}
@@ -775,6 +779,9 @@ async function requestFailure(
 	}
 	// Unknown outcome: the row keeps `sending` (or `aborted`) as the reconciliation record; the permit reservation and
 	// any probe lease stand until an operator reconciles the attempt. No automatic repeat.
+	console.warn(
+		`[sentiment] unknown provider outcome on analysis ${w.claim.analysisId} (${phase}, attempt ${attempt.ordinal}): ${safe.kind} ${safe.code} (${safe.errorName})`,
+	);
 	if (safe.kind === "aborted") await finish(attempt.id, { outcome: "aborted" });
 	return new HandOver("unknown-provider-outcome", attempt.ordinal, safe);
 }
