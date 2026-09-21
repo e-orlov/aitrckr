@@ -464,8 +464,14 @@ describe("the guarded provider re-authorizes from the store immediately before t
 			const { outcome, f, marks } = await afterT1((fakes) => mutate(fakes.permits[0] as never));
 			expect(f.calls, name).toEqual([]);
 			expect(outcome, name).toMatchObject({ status: "held", reason: "dispatch-held" });
-			expect(f.attempts.map((a) => `${a.phase}:${a.outcome}`), name).toEqual(["classify:accepted", "verify:aborted"]);
-			expect(f.permits[0], name).toMatchObject({ reservedEstimateUsd: 0, phaseBudget: { classify: 0, repair: 1, verify: 0 } });
+			expect(
+				f.attempts.map((a) => `${a.phase}:${a.outcome}`),
+				name,
+			).toEqual(["classify:accepted", "verify:aborted"]);
+			expect(f.permits[0], name).toMatchObject({
+				reservedEstimateUsd: 0,
+				phaseBudget: { classify: 0, repair: 1, verify: 0 },
+			});
 			expect(marks.at(-1), name).toMatchObject({ errorCode: "gate-breach:permit-ineligible" });
 		}
 	});
@@ -524,7 +530,11 @@ describe("the guarded provider re-authorizes from the store immediately before t
 
 	it("a paid answer without a reported cost keeps its reservation counted; the next phase is refused before any attempt", async () => {
 		const fakes = resolutionFakes({ dispatch: held });
-		const { d, fakes: f, classify } = harness({
+		const {
+			d,
+			fakes: f,
+			classify,
+		} = harness({
 			fakes,
 			classify: async () => ({ ...classified(), usage: { ...classified().usage, costUsd: undefined } }) as never,
 		});

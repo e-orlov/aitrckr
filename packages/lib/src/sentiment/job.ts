@@ -14,9 +14,9 @@ import {
 	databaseNow,
 	decideBreaker,
 	openBreaker,
+	type ProbeOutcome,
 	readBreaker,
 	settleProbe,
-	type ProbeOutcome,
 } from "./breaker";
 import {
 	assessCandidate,
@@ -574,48 +574,53 @@ function guardProvider(provider: Provider, w: Workflow): Provider {
 			if (schemaFp !== context.schemaFp || scopeKey !== context.scopeKey) {
 				throw new SentimentDispatchHeldError("fingerprint-mismatch");
 			}
-			const attempt = await w.controls.loadAttemptDispatch(context.attemptId);
-			if (attempt?.outcome !== "sending") throw new SentimentDispatchHeldError("attempt-not-sending");
-			if (
-				(attempt.permitId ?? null) !== context.permitId ||
-				attempt.scopeKey !== scopeKey ||
-				attempt.schemaFp !== schemaFp
-			) {
-				throw new SentimentDispatchHeldError("attempt-evidence-mismatch");
-			}
-			const held = isHeld(await w.controls.readDispatchState());
-			if (held && context.permitId === null) throw new SentimentDispatchHeldError("held-without-permit");
-			if (context.permitId !== null) {
-				const permit = await w.controls.loadPermit(context.permitId);
-				const now = await w.controls.databaseNow();
-				if (
-					!permit ||
-					permit.analysisId !== w.claim.analysisId ||
-					permit.instanceId !== w.claim.instanceId ||
-					permit.inputHash !== w.inputHash ||
-					!isPermitEffective(permit, now) ||
-					!permitPurposeAllowsPhase(permit.purpose, context.phase)
-				) {
-					throw new SentimentDispatchHeldError("permit-ineligible");
-				}
-			}
-			const breaker = await w.controls.readBreaker(scopeKey);
-			if (breaker && breaker.state !== "closed") {
-				const now = await w.controls.databaseNow();
-				if (breaker.state === "open") {
-					throw new SentimentDispatchHeldError("breaker-open", breaker.openUntil);
-				}
-				const ownsLiveProbe =
-					context.probeGeneration !== null &&
-					breaker.probeAttemptId === context.attemptId &&
-					breaker.probeGeneration === context.probeGeneration &&
-					breaker.probeLeaseUntil !== null &&
-					breaker.probeLeaseUntil.getTime() > now.getTime();
-				if (!ownsLiveProbe) throw new SentimentDispatchHeldError("probe-lost", breaker.probeLeaseUntil);
-			}
+			await reauthorizeAttempt(w, context, scopeKey, schemaFp);
+			await reauthorizePermit(w, context);
+			await reauthorizeBreaker(w, context, scopeKey);
 			return research(options);
 		},
 	};
+}
+
+/** The durable attempt must still be `sending` and carry exactly the permit, scope and shape T1 recorded. */
+async function reauthorizeAttempt(w: Workflow, context: DispatchContext, scopeKey: string, schemaFp: string) {
+	const attempt = await w.controls.loadAttemptDispatch(context.attemptId);
+	if (attempt?.outcome !== "sending") throw new SentimentDispatchHeldError("attempt-not-sending");
+	const matches =
+		(attempt.permitId ?? null) === context.permitId && attempt.scopeKey === scopeKey && attempt.schemaFp === schemaFp;
+	if (!matches) throw new SentimentDispatchHeldError("attempt-evidence-mismatch");
+}
+
+/** A held dispatch needs a permit; a permit must still be bound, live, unexpired by the database clock and fit for the phase. */
+async function reauthorizePermit(w: Workflow, context: DispatchContext) {
+	const held = isHeld(await w.controls.readDispatchState());
+	if (held && context.permitId === null) throw new SentimentDispatchHeldError("held-without-permit");
+	if (context.permitId === null) return;
+	const permit = await w.controls.loadPermit(context.permitId);
+	const now = await w.controls.databaseNow();
+	const eligible =
+		permit !== null &&
+		permit.analysisId === w.claim.analysisId &&
+		permit.instanceId === w.claim.instanceId &&
+		permit.inputHash === w.inputHash &&
+		isPermitEffective(permit, now) &&
+		permitPurposeAllowsPhase(permit.purpose, context.phase);
+	if (!eligible) throw new SentimentDispatchHeldError("permit-ineligible");
+}
+
+/** The scope must be absent or closed, or half-open with this attempt owning the still-live probe lease. */
+async function reauthorizeBreaker(w: Workflow, context: DispatchContext, scopeKey: string) {
+	const breaker = await w.controls.readBreaker(scopeKey);
+	if (!breaker || breaker.state === "closed") return;
+	if (breaker.state === "open") throw new SentimentDispatchHeldError("breaker-open", breaker.openUntil);
+	const now = await w.controls.databaseNow();
+	const ownsLiveProbe =
+		context.probeGeneration !== null &&
+		breaker.probeAttemptId === context.attemptId &&
+		breaker.probeGeneration === context.probeGeneration &&
+		breaker.probeLeaseUntil !== null &&
+		breaker.probeLeaseUntil.getTime() > now.getTime();
+	if (!ownsLiveProbe) throw new SentimentDispatchHeldError("probe-lost", breaker.probeLeaseUntil);
 }
 
 type StructuredResearchOptions<T> = Parameters<NonNullable<Provider["runStructuredResearch"]>>[0] & {
@@ -755,6 +760,14 @@ async function settleDispatch(
 	}
 }
 
+/** A boundary refusal parks the case: a breaker refusal until the scope may probe again, anything else as a gate breach. */
+function boundaryRefusal(w: Workflow, phase: PaidPhase, error: SentimentDispatchHeldError): Parked {
+	if (error.code === "breaker-open") return heldOutcome("breaker-open", error.until, error.code);
+	if (error.code === "probe-lost") return heldOutcome("probe-in-progress", error.until, error.code);
+	console.error(`[sentiment] gate-breach on analysis ${w.claim.analysisId} (${phase}): ${error.code}`);
+	return heldOutcome("dispatch-held", null, `gate-breach:${error.code}`);
+}
+
 /**
  * Decide what one failed request becomes. Returns the control-flow error the
  * caller throws: a paid-but-unshapeable answer is settled as rejected and
@@ -782,11 +795,7 @@ async function requestFailure(
 	if (error instanceof SentimentDispatchHeldError) {
 		// Nothing left: the attempt is a known-unpaid abort, its reservation is released and its probe lease freed.
 		await closeUnpaid("aborted", "released");
-		if (error.code === "breaker-open" || error.code === "probe-lost") {
-			return heldOutcome(error.code === "breaker-open" ? "breaker-open" : "probe-in-progress", error.until, error.code);
-		}
-		console.error(`[sentiment] gate-breach on analysis ${w.claim.analysisId} (${phase}): ${error.code}`);
-		return heldOutcome("dispatch-held", null, `gate-breach:${error.code}`);
+		return boundaryRefusal(w, phase, error);
 	}
 	if (safe.requestSent && safe.envelope?.generationId) {
 		// The provider answered and charged, but the answer could not be shaped: a paid, unusable attempt.

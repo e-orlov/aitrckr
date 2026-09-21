@@ -350,7 +350,12 @@ async function permitForCase(
  * never broadens selection.
  */
 export async function applyResumeForVerify(
-	args: { manifest: ResumeManifest; manifestSha256: string; limit: number; sender: SentimentSender } & Partial<ControlActor>,
+	args: {
+		manifest: ResumeManifest;
+		manifestSha256: string;
+		limit: number;
+		sender: SentimentSender;
+	} & Partial<ControlActor>,
 	executor: Executor = db,
 ): Promise<ResumeApplyResult> {
 	const who = requireActor(args);

@@ -335,8 +335,11 @@ describe("IT-SNT-C-007 verifier-only resume of cases parked for review", () => {
 		expect(applied.applied).toHaveLength(1);
 		expect(applied.applied[0].permit).toBe("issued");
 		expect(
-			(await client.query("SELECT contract_sha256 FROM sentiment_dispatch_permits WHERE id = $1", [applied.applied[0].permitId]))
-				.rows[0].contract_sha256,
+			(
+				await client.query("SELECT contract_sha256 FROM sentiment_dispatch_permits WHERE id = $1", [
+					applied.applied[0].permitId,
+				])
+			).rows[0].contract_sha256,
 		).toBe(shaOf(manifest));
 		expect(sends).toEqual([manifest.eligible[0].promptRunId]);
 		const firstRun = manifest.eligible[0].promptRunId;
@@ -434,17 +437,18 @@ describe("IT-SNT-C-008 a resume authorization survives a failed send and an expi
 		expect(replaced?.permitId).not.toBe(failed?.permitId);
 		const rows = await listPermits({ analysisId: target?.analysisId });
 		expect(rows.map((r) => `${r.state}:${r.effective}`).sort()).toEqual(["expired:false", "issued:true"]);
-		expect((await listControlEvents("permit", failed?.permitId ?? "")).map((e) => `${e.fromState}->${e.toState}`)).toEqual([
-			"null->issued",
-			"issued->expired",
-		]);
+		expect(
+			(await listControlEvents("permit", failed?.permitId ?? "")).map((e) => `${e.fromState}->${e.toState}`),
+		).toEqual(["null->issued", "issued->expired"]);
 		// 5. A consumed (active) permit is never replaced automatically: the case is refused with a typed reason.
 		await client.query(
 			"UPDATE sentiment_dispatch_permits SET state = 'active', expires_at = now() - interval '1 second' WHERE id = $1",
 			[replaced?.permitId],
 		);
 		const fourth = await applyResumeForVerify({ manifest, manifestSha256: sha, limit: 50, sender, ...ACTOR });
-		expect(fourth.skipped.find((x) => x.analysisId === target?.analysisId)).toMatchObject({ reason: "permit-consumed" });
+		expect(fourth.skipped.find((x) => x.analysisId === target?.analysisId)).toMatchObject({
+			reason: "permit-consumed",
+		});
 		expect(await listPermits({ analysisId: target?.analysisId })).toHaveLength(2);
 	});
 });
@@ -484,7 +488,11 @@ describe("IT-SNT-C-009 a verifier rejection under a resume permit returns the ca
 		expect(outcome).toMatchObject({ status: "awaiting-review", reason: "verifier-rejected", paidCalls: 2 });
 		expect(script.calls).toEqual(["verify"]);
 		const kase = await caseOf(run(9));
-		expect(kase).toMatchObject({ status: "awaiting_review", review_reason: "verifier-rejected", next_attempt_at: null });
+		expect(kase).toMatchObject({
+			status: "awaiting_review",
+			review_reason: "verifier-rejected",
+			next_attempt_at: null,
+		});
 		expect(kase.provisional_result).toMatchObject({ entities: [expect.objectContaining({ key: "brand" })] });
 		expect(kase.unresolved_targets).toEqual([expect.objectContaining({ entityKey: "brand", aspectKey: null })]);
 		expect(await analysisOf(run(9))).toMatchObject({ status: "pending_resolution" });
@@ -497,9 +505,10 @@ describe("IT-SNT-C-009 a verifier rejection under a resume permit returns the ca
 		]);
 		expect(attempts[2].generation_id).toMatch(/^gen-/);
 		const permit = (
-			await client.query("SELECT state, phase_budget, settled_cost_usd::text FROM sentiment_dispatch_permits WHERE id = $1", [
-				mine?.permitId,
-			])
+			await client.query(
+				"SELECT state, phase_budget, settled_cost_usd::text FROM sentiment_dispatch_permits WHERE id = $1",
+				[mine?.permitId],
+			)
 		).rows[0];
 		expect(permit).toMatchObject({ state: "exhausted", phase_budget: { classify: 0, repair: 0, verify: 0 } });
 		expect(Number(permit.settled_cost_usd)).toBeCloseTo(0.001, 6);
@@ -507,7 +516,10 @@ describe("IT-SNT-C-009 a verifier rejection under a resume permit returns the ca
 		await setDispatch("open");
 		expect((await listResumableSentimentRuns(1000)).map((r) => r.promptRunId)).not.toContain(run(9));
 		expect((await selectResumableForVerify()).eligible.map((e) => e.promptRunId)).not.toContain(run(9));
-		const again = scripted([{ phase: "repair", answer: { entities: [brandOk] } }, { phase: "verify", answer: ACCEPT }]);
+		const again = scripted([
+			{ phase: "repair", answer: { entities: [brandOk] } },
+			{ phase: "verify", answer: ACCEPT },
+		]);
 		expect(await runSentimentJob(payload(run(9)), { resolveProvider: () => again.provider })).toMatchObject({
 			status: "awaiting-review",
 			reason: "verifier-rejected",

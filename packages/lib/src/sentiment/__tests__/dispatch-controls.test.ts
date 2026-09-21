@@ -257,11 +257,19 @@ describe("permit shape and settlement contract (F-2, F-3, F-7)", () => {
 			).rejects.toThrow(/exactly/);
 		}
 		await expect(
-			issuePermit({ ...base, purpose: "resume-verify", phaseBudget: { classify: 0, repair: 0, verify: 1 } }, neverExecutes),
+			issuePermit(
+				{ ...base, purpose: "resume-verify", phaseBudget: { classify: 0, repair: 0, verify: 1 } },
+				neverExecutes,
+			),
 		).rejects.toThrow(/manifest/);
 		await expect(
 			issuePermit(
-				{ ...base, purpose: "resume-verify", phaseBudget: { classify: 0, repair: 0, verify: 1 }, contractSha256: "nope" },
+				{
+					...base,
+					purpose: "resume-verify",
+					phaseBudget: { classify: 0, repair: 0, verify: 1 },
+					contractSha256: "nope",
+				},
 				neverExecutes,
 			),
 		).rejects.toThrow(/manifest/);

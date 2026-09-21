@@ -275,7 +275,12 @@ export async function openBreaker(tx: Executor, evidence: BreakerOpenEvidence): 
 			fromState: row.state,
 			toState: "open",
 			evidence: sibling
-				? { failureClass: evidence.failureClass, siblingOf: evidence.scopeKey, rule: evidence.rule, consecutiveFailures: failures }
+				? {
+						failureClass: evidence.failureClass,
+						siblingOf: evidence.scopeKey,
+						rule: evidence.rule,
+						consecutiveFailures: failures,
+					}
 				: {
 						failureClass: evidence.failureClass,
 						phase: evidence.phase,

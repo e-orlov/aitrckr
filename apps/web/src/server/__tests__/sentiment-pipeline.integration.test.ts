@@ -1034,7 +1034,9 @@ describe("IT-SNT-007 bounded evidence at high cardinality (B5)", () => {
 	});
 
 	// The oracle queries over 3,000 rows are fixture verification, not the timed read path; give them room on a busy runner.
-	it("answers 10/10 non-overlapping extremes with LIMIT queries and records the plan", { timeout: 60_000 }, async () => {
+	it("answers 10/10 non-overlapping extremes with LIMIT queries and records the plan", {
+		timeout: 60_000,
+	}, async () => {
 		const total = (
 			await client.query<{ n: number }>(
 				`SELECT count(*)::int AS n FROM sentiment_observations o JOIN prompt_run_entity_mentions m ON m.id = o.mention_id AND m.superseded_at IS NULL

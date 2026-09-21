@@ -46,12 +46,8 @@ const {
 const { loadAttemptDispatch } = await import("../../../../../packages/lib/src/sentiment/store");
 const { openBreaker } = await import("../../../../../packages/lib/src/sentiment/breaker");
 const { prepareStructuredOutputSchema } = await import("../../../../../packages/lib/src/providers/schema-contract");
-const {
-	sentimentProviderResultSchemaFor,
-	schemaShapeFingerprint,
-	sentimentRequestProfile,
-	requestScopeKey,
-} = await import("@workspace/lib/sentiment");
+const { sentimentProviderResultSchemaFor, schemaShapeFingerprint, sentimentRequestProfile, requestScopeKey } =
+	await import("@workspace/lib/sentiment");
 const { StructuredResearchRequestError } = await import("@workspace/lib/providers/types");
 const { db } = await import("@workspace/lib/db/db");
 type Provider = import("@workspace/lib/providers/types").Provider;
@@ -565,7 +561,10 @@ describe("IT-SNT-C-005 retry-wait is durable and due by the database clock", () 
 async function lifecycleOf(runId: string) {
 	await runSentimentJob(payload(runId), { resolveProvider: () => scripted([]).provider });
 	const analysis = await analysisOf(runId);
-	const candidates = candidatesFromMentions(await loadMentions(runId), await loadDetectableEntities(BRAND, "historical"));
+	const candidates = candidatesFromMentions(
+		await loadMentions(runId),
+		await loadDetectableEntities(BRAND, "historical"),
+	);
 	const inputHash = sentimentInputHash(ANSWER, candidates, analyzeAnswerRanges(ANSWER));
 	const kase = await ensureResolutionCase(analysis.id, inputHash);
 	return { analysisId: analysis.id as string, inputHash, instanceId: kase.instanceId as string };
@@ -596,7 +595,9 @@ const permitRow = async (id: string) =>
 		)
 	).rows[0];
 const classifyScope = () => {
-	const fp = schemaShapeFingerprint(prepareStructuredOutputSchema(sentimentProviderResultSchemaFor(["s0001"], ["brand"])));
+	const fp = schemaShapeFingerprint(
+		prepareStructuredOutputSchema(sentimentProviderResultSchemaFor(["s0001"], ["brand"])),
+	);
 	return { schemaFp: fp, scopeKey: requestScopeKey(sentimentRequestProfile({ webSearch: true, schemaFp: fp })) };
 };
 const strike = (scopeKey: string, schemaFp: string) =>
@@ -636,14 +637,23 @@ describe("IT-SNT-C-010 resume permits are structurally verify-only (F-2)", () =>
 		await expect(resume({ classify: 0, repair: 0, verify: 1 }, null)).rejects.toThrow(/manifest/);
 		const sqlInsert = `INSERT INTO sentiment_dispatch_permits (purpose, prompt_run_id, analysis_id, instance_id, input_hash, classifier_version, provider, model, phase_budget, estimated_cost_budget_usd, expires_at, issued_by, reason, correlation_id, contract_sha256)
 			VALUES ('resume-verify', $1, $2, gen_random_uuid(), 'h', 'v5', 'openrouter', 'm', $3::jsonb, 0.02, now() + interval '1 hour', 'it', 'r', 'c', $4)`;
-		await expectRejected(sqlInsert, [run(13), lc.analysisId, '{"classify":1,"repair":0,"verify":1}', "a".repeat(64)], ["23514"]);
-		await expectRejected(sqlInsert, [run(13), lc.analysisId, '{"classify":0,"repair":1,"verify":1}', "a".repeat(64)], ["23514"]);
+		await expectRejected(
+			sqlInsert,
+			[run(13), lc.analysisId, '{"classify":1,"repair":0,"verify":1}', "a".repeat(64)],
+			["23514"],
+		);
+		await expectRejected(
+			sqlInsert,
+			[run(13), lc.analysisId, '{"classify":0,"repair":1,"verify":1}', "a".repeat(64)],
+			["23514"],
+		);
 		await expectRejected(sqlInsert, [run(13), lc.analysisId, '{"classify":0,"repair":0,"verify":1}', null], ["23514"]);
 		// The exact verify-only contract with its manifest hash is accepted by the CHECK (and stays valid once consumed to 0).
 		await client.query(sqlInsert, [run(13), lc.analysisId, '{"classify":0,"repair":0,"verify":1}', "a".repeat(64)]);
-		await client.query("UPDATE sentiment_dispatch_permits SET phase_budget = '{\"classify\":0,\"repair\":0,\"verify\":0}' WHERE analysis_id = $1", [
-			lc.analysisId,
-		]);
+		await client.query(
+			'UPDATE sentiment_dispatch_permits SET phase_budget = \'{"classify":0,"repair":0,"verify":0}\' WHERE analysis_id = $1',
+			[lc.analysisId],
+		);
 		await client.query("DELETE FROM sentiment_dispatch_permits WHERE analysis_id = $1", [lc.analysisId]);
 	});
 });
@@ -654,7 +664,10 @@ describe("IT-SNT-C-011 unknown paid cost keeps its reservation counted (F-3)", (
 		// Known cost 0.05 against a 0.06 budget: the verify reservation (0.02) is refused.
 		const a = await lifecycleOf(run(14));
 		const pa = await canaryPermit(run(14), a, { estimatedCostBudgetUsd: 0.06 });
-		const sa = scripted([{ phase: "classify", answer: { entities: [brandOk] }, costUsd: 0.05 }, { phase: "verify", answer: ACCEPT }]);
+		const sa = scripted([
+			{ phase: "classify", answer: { entities: [brandOk] }, costUsd: 0.05 },
+			{ phase: "verify", answer: ACCEPT },
+		]);
 		expect(await runSentimentJob(payload(run(14)), { resolveProvider: () => sa.provider })).toMatchObject({
 			status: "held",
 			reason: "permit-unavailable",
@@ -664,7 +677,10 @@ describe("IT-SNT-C-011 unknown paid cost keeps its reservation counted (F-3)", (
 		// Unknown cost against the same budget: the 0.05 classify reservation stays counted, so the verify is refused too.
 		const b = await lifecycleOf(run(15));
 		const pb = await canaryPermit(run(15), b, { estimatedCostBudgetUsd: 0.06 });
-		const sb = scripted([{ phase: "classify", answer: { entities: [brandOk] }, costUsd: null }, { phase: "verify", answer: ACCEPT }]);
+		const sb = scripted([
+			{ phase: "classify", answer: { entities: [brandOk] }, costUsd: null },
+			{ phase: "verify", answer: ACCEPT },
+		]);
 		expect(await runSentimentJob(payload(run(15)), { resolveProvider: () => sb.provider })).toMatchObject({
 			status: "held",
 			reason: "permit-unavailable",
@@ -692,7 +708,9 @@ describe("IT-SNT-C-012 concurrent breaker strikes are never lost (F-4)", () => {
 				)
 			).rows[0];
 		await client.query("DELETE FROM sentiment_provider_breakers WHERE scope_key = $1", [scopeKey]);
-		await client.query("DELETE FROM sentiment_control_events WHERE subject_kind = 'breaker' AND subject_key = $1", [scopeKey]);
+		await client.query("DELETE FROM sentiment_control_events WHERE subject_kind = 'breaker' AND subject_key = $1", [
+			scopeKey,
+		]);
 		await Promise.all([strike(scopeKey, schemaFp), strike(scopeKey, schemaFp)]);
 		let r = await row();
 		expect(r).toMatchObject({ state: "open", consecutive_failures: 2 });
@@ -700,10 +718,14 @@ describe("IT-SNT-C-012 concurrent breaker strikes are never lost (F-4)", () => {
 		expect(Number(r.open_minutes)).toBeLessThanOrEqual(31);
 		let events = await listControlEvents("breaker", scopeKey);
 		expect(events.map((e) => e.seq)).toEqual([1, 2]);
-		expect(events.map((e) => (e.evidence as { consecutiveFailures: number }).consecutiveFailures).sort()).toEqual([1, 2]);
+		expect(events.map((e) => (e.evidence as { consecutiveFailures: number }).consecutiveFailures).sort()).toEqual([
+			1, 2,
+		]);
 
 		await client.query("DELETE FROM sentiment_provider_breakers WHERE scope_key = $1", [scopeKey]);
-		await client.query("DELETE FROM sentiment_control_events WHERE subject_kind = 'breaker' AND subject_key = $1", [scopeKey]);
+		await client.query("DELETE FROM sentiment_control_events WHERE subject_kind = 'breaker' AND subject_key = $1", [
+			scopeKey,
+		]);
 		await Promise.all(Array.from({ length: 8 }, () => strike(scopeKey, schemaFp)));
 		r = await row();
 		expect(r.consecutive_failures).toBe(8);
@@ -717,7 +739,9 @@ describe("IT-SNT-C-012 concurrent breaker strikes are never lost (F-4)", () => {
 		expect(Number(r.open_minutes)).toBeGreaterThanOrEqual(14);
 		expect(Number(r.open_minutes)).toBeLessThanOrEqual(15);
 
-		await client.query("UPDATE sentiment_provider_breakers SET consecutive_failures = 30 WHERE scope_key = $1", [scopeKey]);
+		await client.query("UPDATE sentiment_provider_breakers SET consecutive_failures = 30 WHERE scope_key = $1", [
+			scopeKey,
+		]);
 		await strike(scopeKey, schemaFp);
 		r = await row();
 		expect(r.consecutive_failures).toBe(31);
@@ -744,7 +768,10 @@ describe("IT-SNT-C-013 the provider boundary re-authorizes from the database (F-
 		await setDispatch("open");
 		const { scopeKey, schemaFp } = classifyScope();
 		await client.query("DELETE FROM sentiment_provider_breakers WHERE scope_key = $1", [scopeKey]);
-		const { provider, script } = scripted([{ phase: "classify", answer: { entities: [brandOk] } }, { phase: "verify", answer: ACCEPT }]);
+		const { provider, script } = scripted([
+			{ phase: "classify", answer: { entities: [brandOk] } },
+			{ phase: "verify", answer: ACCEPT },
+		]);
 		const outcome = await runSentimentJob(payload(run(17)), {
 			resolveProvider: () => provider,
 			dispatch: pauseAfterT1(async () => {
@@ -774,14 +801,21 @@ describe("IT-SNT-C-013 the provider boundary re-authorizes from the database (F-
 				resolveProvider: () => provider,
 				dispatch: pauseAfterT1(async () => {
 					if (mode === "revoke") await revokePermit({ permitId: permit.id, ...ACTOR });
-					else await client.query("UPDATE sentiment_dispatch_permits SET expires_at = now() - interval '1 second' WHERE id = $1", [permit.id]);
+					else
+						await client.query(
+							"UPDATE sentiment_dispatch_permits SET expires_at = now() - interval '1 second' WHERE id = $1",
+							[permit.id],
+						);
 				}),
 			});
 			expect(script.calls, mode).toEqual([]);
 			expect(outcome).toMatchObject({ status: "held", reason: "dispatch-held" });
 			expect((await attemptsOf(run(i))).map((a) => `${a.phase}:${a.outcome}`)).toEqual(["classify:aborted"]);
 			// The consumed phase stays consumed (never refunded), the reservation of the aborted call is released.
-			expect(await permitRow(permit.id)).toMatchObject({ reserved_estimate_usd: "0.000000", phase_budget: { classify: 0, repair: 1, verify: 1 } });
+			expect(await permitRow(permit.id)).toMatchObject({
+				reserved_estimate_usd: "0.000000",
+				phase_budget: { classify: 0, repair: 1, verify: 1 },
+			});
 			expect((await analysisOf(run(i))).error_code).toBe("gate-breach:permit-ineligible");
 		}
 	});
@@ -814,7 +848,10 @@ describe("IT-SNT-C-013 the provider boundary re-authorizes from the database (F-
 					loadAttemptDispatch: (async (id: string, ex?: Parameters<typeof loadAttemptDispatch>[1]) => {
 						if (!attemptId) {
 							attemptId = id;
-							await client.query(`UPDATE sentiment_provider_attempts SET ${column} = $2 WHERE id = $1`, [id, `${column === "scope_key" ? "rp1" : "sfp1"}:${"0".repeat(64)}`]);
+							await client.query(`UPDATE sentiment_provider_attempts SET ${column} = $2 WHERE id = $1`, [
+								id,
+								`${column === "scope_key" ? "rp1" : "sfp1"}:${"0".repeat(64)}`,
+							]);
 						}
 						return loadAttemptDispatch(id, ex);
 					}) as typeof loadAttemptDispatch,
@@ -830,14 +867,20 @@ describe("IT-SNT-C-013 the provider boundary re-authorizes from the database (F-
 		await setDispatch("held");
 		const lc = await lifecycleOf(run(23));
 		const permit = await canaryPermit(run(23), lc);
-		const { provider, script } = scripted([{ phase: "classify", answer: { entities: [brandOk] } }, { phase: "verify", answer: ACCEPT }]);
+		const { provider, script } = scripted([
+			{ phase: "classify", answer: { entities: [brandOk] } },
+			{ phase: "verify", answer: ACCEPT },
+		]);
 		const outcome = await runSentimentJob(payload(run(23)), {
 			resolveProvider: () => provider,
 			// Between classify and verify (the second dispatch), the permit's expiry passes.
 			dispatch: {
 				readBreaker: async (scopeKey, ex) => {
 					if (script.calls.length === 1) {
-						await client.query("UPDATE sentiment_dispatch_permits SET expires_at = now() - interval '1 second' WHERE id = $1", [permit.id]);
+						await client.query(
+							"UPDATE sentiment_dispatch_permits SET expires_at = now() - interval '1 second' WHERE id = $1",
+							[permit.id],
+						);
 					}
 					return readBreaker(scopeKey, ex);
 				},
@@ -857,20 +900,27 @@ describe("IT-SNT-C-014 live means live by the database clock (F-7)", () => {
 		const lc = await lifecycleOf(run(24));
 		const permit = await canaryPermit(run(24), lc);
 		expect((await listPermits({ analysisId: lc.analysisId, live: true })).map((p) => p.id)).toEqual([permit.id]);
-		await client.query("UPDATE sentiment_dispatch_permits SET expires_at = now() - interval '1 second' WHERE id = $1", [permit.id]);
+		await client.query("UPDATE sentiment_dispatch_permits SET expires_at = now() - interval '1 second' WHERE id = $1", [
+			permit.id,
+		]);
 		expect(await listPermits({ analysisId: lc.analysisId, live: true })).toEqual([]);
 		const listed = await listPermits({ analysisId: lc.analysisId });
 		expect(listed.map((p) => `${p.state}:${p.effective}`)).toEqual(["issued:false"]);
 		// The read did not rewrite the row; the job (a mutating path) expires it durably with an audit event and makes no call.
 		const { provider, script } = scripted([{ phase: "classify", answer: { entities: [brandOk] } }]);
-		expect(await runSentimentJob(payload(run(24)), { resolveProvider: () => provider })).toMatchObject({ status: "held" });
+		expect(await runSentimentJob(payload(run(24)), { resolveProvider: () => provider })).toMatchObject({
+			status: "held",
+		});
 		expect(script.calls).toEqual([]);
 		const stored = await permitRow(permit.id);
 		expect(stored.state).toBe("issued"); // the execution gate is read-only; only a consuming path transitions
 		// A replacement can be issued: the stale permit is expired in the same transaction, one event, and the index is free.
 		const next = await canaryPermit(run(24), lc);
 		expect((await permitRow(permit.id)).state).toBe("expired");
-		expect((await listControlEvents("permit", permit.id)).map((e) => `${e.fromState}->${e.toState}`)).toEqual(["null->issued", "issued->expired"]);
+		expect((await listControlEvents("permit", permit.id)).map((e) => `${e.fromState}->${e.toState}`)).toEqual([
+			"null->issued",
+			"issued->expired",
+		]);
 		expect((await listPermits({ analysisId: lc.analysisId, live: true })).map((p) => p.id)).toEqual([next.id]);
 	});
 
@@ -895,8 +945,12 @@ describe("IT-SNT-C-014 live means live by the database clock (F-7)", () => {
 describe("IT-SNT-C-015 the canary entry point under a held dispatch (Amendment C)", () => {
 	const fast = { deadlineMs: 5_000, watchdogMs: 10_000 };
 	it("with a valid canary permit the canary reaches exactly its allowed phases; without one it makes zero calls; phase, call, estimate and expiry evidence reconcile", async () => {
-		const { inspectSentimentCanaryRun, inspectSentimentCanaryRunState, parseSentimentCanaryContract, runSentimentCanary } =
-			await import("@workspace/lib/sentiment");
+		const {
+			inspectSentimentCanaryRun,
+			inspectSentimentCanaryRunState,
+			parseSentimentCanaryContract,
+			runSentimentCanary,
+		} = await import("@workspace/lib/sentiment");
 		await setDispatch("held");
 		// Permitted: the operator surface creates the pending analysis and the case instance, then issues the permit.
 		const lc = await lifecycleOf(run(26));
@@ -928,7 +982,11 @@ describe("IT-SNT-C-015 the canary entry point under a held dispatch (Amendment C
 		await runSentimentJob(payload(run(27)), { resolveProvider: () => scripted([]).provider });
 		const bare = parseSentimentCanaryContract(await inspectSentimentCanaryRun(run(27)));
 		const unpermitted = scripted([{ phase: "classify", answer: { entities: [brandOk] } }]);
-		const refused = await runSentimentCanary({ contract: bare, deps: { resolveProvider: () => unpermitted.provider }, ...fast });
+		const refused = await runSentimentCanary({
+			contract: bare,
+			deps: { resolveProvider: () => unpermitted.provider },
+			...fast,
+		});
 		expect(unpermitted.script.calls).toEqual([]);
 		expect(refused.outcome).toMatchObject({ status: "held" });
 		expect(refused.verdict).toMatchObject({ status: "reject" });
