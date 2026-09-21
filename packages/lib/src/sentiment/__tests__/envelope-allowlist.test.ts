@@ -333,15 +333,10 @@ describe("H2 no arbitrary string of a hostile envelope reaches any surface", () 
 		const logged = spies.flatMap((spy) => spy.mock.calls.map((call) => call.map(String).join(" "))).join("\n");
 		for (const spy of spies) spy.mockRestore();
 		vi.unstubAllEnvs();
-		// The hostile generation id and request summary are dropped (null); the unbound overall is repaired; nothing
-		// hostile reaches the outcome, the routing rows, the usage events or the console.
-		expect(outcome).toMatchObject({
-			status: "classified",
-			generationId: null,
-			request: undefined,
-			paidCalls: 3,
-			repairs: 1,
-		});
+		// The hostile generation id is dropped (null), so the paid answer cannot be reconciled: Amendment C settles it as a
+		// paid, rejected attempt and hands the run over instead of building on it. Nothing hostile reaches the outcome,
+		// the routing rows, the usage events or the console.
+		expect(outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect", paidCalls: 1 });
 		for (const surface of [JSON.stringify(outcome), JSON.stringify(marks), JSON.stringify(usage), logged]) {
 			expect(surface).not.toMatch(LEAKY);
 		}
@@ -367,17 +362,12 @@ describe("H2 no arbitrary string of a hostile envelope reaches any surface", () 
 			model: SENTIMENT_MODEL,
 		};
 		const report = await runSentimentCanary({ contract, deps, deadlineMs: 1000, watchdogMs: 2000 });
-		// A hostile envelope leaves no reconcilable generation id and no verifiable request summary: the canary refuses.
+		// A hostile envelope leaves no reconcilable generation id: the job core settles the paid answer as rejected and
+		// hands the run over before the canary's persistence gate; the canary refuses on that outcome.
 		expect(report.verdict.status).toBe("reject");
 		const reasonCodes = report.verdict.status === "reject" ? report.verdict.reasons.map((r) => r.code) : [];
-		expect(reasonCodes).toContain("generation-id-missing");
-		expect(
-			reasonCodes.every((code) =>
-				/^(request-|usage-|web-search-|cost-|output-tokens-|generation-id-missing)/.test(code),
-			),
-		).toBe(true);
-		// The gate fires before persistence: the contract error is the outcome, nothing is written.
-		expect(report.outcome).toMatchObject({ status: "error", code: "canary-contract" });
+		expect(reasonCodes).toEqual(["job-outcome"]);
+		expect(report.outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect" });
 		expect(JSON.stringify(report)).not.toMatch(LEAKY);
 	});
 });

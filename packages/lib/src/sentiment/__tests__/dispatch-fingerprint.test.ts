@@ -66,17 +66,20 @@ describe("sfp1 schema-shape fingerprint", () => {
 			properties: { ...properties, issues: { ...properties.issues, maxItems: VERIFIER_MAX_ISSUES + 1 } },
 		};
 		expect(schemaShapeFingerprint(issuesMax)).not.toBe(schemaShapeFingerprint(verify));
-		const verdict = properties.verdict as { enum: string[] };
-		const widerVerdict = {
-			...verify,
-			properties: { ...properties, verdict: { ...verdict, enum: [...verdict.enum, "unsure"] } },
-		};
+		// Zod hoists reused parts under unnamed `$defs`; the verdict enum lives behind a `$ref`.
+		const defs = verify.$defs as Record<string, Record<string, unknown>>;
+		const verdictRef = (properties.verdict as { $ref?: string }).$ref;
+		const verdictName = verdictRef ? verdictRef.replace("#/$defs/", "") : null;
+		const verdict = (verdictName ? defs[verdictName] : properties.verdict) as { enum: string[] };
+		expect(verdict.enum).toEqual(["accept", "reject"]);
+		const widerVerdict = verdictName
+			? { ...verify, $defs: { ...defs, [verdictName]: { ...verdict, enum: [...verdict.enum, "unsure"] } } }
+			: { ...verify, properties: { ...properties, verdict: { ...verdict, enum: [...verdict.enum, "unsure"] } } };
 		expect(schemaShapeFingerprint(widerVerdict)).not.toBe(schemaShapeFingerprint(verify));
 		const { additionalProperties: _drop, ...openRoot } = verify;
 		expect(schemaShapeFingerprint(openRoot)).not.toBe(schemaShapeFingerprint(verify));
 		const rootUnion = { anyOf: [verify] };
 		expect(schemaShapeFingerprint(rootUnion)).not.toBe(schemaShapeFingerprint(verify));
-		const defs = verify.$defs as Record<string, unknown>;
 		const renamed = {
 			...verify,
 			$defs: { ...Object.fromEntries(Object.entries(defs).filter(([k]) => k !== "anchorId")), anchor: defs.anchorId },

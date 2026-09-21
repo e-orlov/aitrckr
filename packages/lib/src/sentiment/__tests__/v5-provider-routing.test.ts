@@ -170,9 +170,11 @@ describe("A1 closed automatic-retry allow-list", () => {
 		],
 	];
 	for (const [name, make] of retryable) {
-		it(`${name}: an unpaid provider-error attempt, retry_wait, the queue retries and the next run completes`, async () => {
+		it(`${name}: an unpaid provider-error attempt, retry_wait as a completed job, the next due run completes`, async () => {
 			const { d, fakes, row, marks, classify } = harness(make());
-			await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
+			// Amendment C: the queue never retries a parked case; the job completes with the due time and the
+			// maintenance inventory re-sends it when it is due.
+			expect(await runSentimentJob(payload, d)).toMatchObject({ status: "retry-wait", consecutiveFailures: 1 });
 			expect(classify).toHaveBeenCalledTimes(1);
 			expect(fakes.attempts.map((a) => a.outcome)).toEqual(["provider-error"]);
 			expect(fakes.cases.get("a1")).toMatchObject({ status: "retry_wait" });
@@ -188,7 +190,7 @@ describe("A1 closed automatic-retry allow-list", () => {
 			policy: { backoffBaseMs: 1_000, backoffMaxMs: 900_000 },
 		});
 		const before = Date.now();
-		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "retry-wait" });
 		const next = (fakes.cases.get("a1") as { nextAttemptAt: Date }).nextAttemptAt.getTime();
 		expect(next - before).toBeGreaterThanOrEqual(44_000);
 		expect(next - before).toBeLessThan(60_000);

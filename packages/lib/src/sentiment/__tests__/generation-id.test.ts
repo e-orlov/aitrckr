@@ -184,9 +184,10 @@ describe("H1 the generation id survives the successful path", () => {
 		for (const generationId of [undefined, null, "", `gen ${"x".repeat(10)}`, "y".repeat(65), 42]) {
 			const deps = fakes(providerWith(generationId));
 			const report = await runSentimentCanary({ contract, deps, ...fast });
-			expect(codes(report), JSON.stringify(generationId)).toEqual(["generation-id-missing"]);
-			// Decided at the persistence boundary like every other post-call rejection: nothing is written.
-			expect(report.outcome).toMatchObject({ status: "error", code: "canary-contract" });
+			// Amendment C: a paid answer without a reconcilable generation id is settled as a rejected attempt by the job
+			// core and handed over; the canary refuses on that outcome, before its own persistence gate is reached.
+			expect(codes(report), JSON.stringify(generationId)).toEqual(["job-outcome"]);
+			expect(report.outcome).toMatchObject({ status: "awaiting-review", reason: "contract-defect" });
 			expect(deps.persist).not.toHaveBeenCalled();
 			expect(deps.markAnalysis).toHaveBeenCalledWith(
 				expect.anything(),

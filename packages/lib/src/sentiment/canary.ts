@@ -554,6 +554,7 @@ export function evaluateSentimentCanary(
 	}
 	if (!outcome) reasons.push({ code: "job-outcome", detail: "none" });
 	else if (outcome.status === "error") reasons.push(rejectReasonForError(outcome));
+	else if (outcome.status === "retry-wait") reasons.push({ code: "provider-error" });
 	else if (outcome.status === "terminal-validation-failure") reasons.push({ code: "validation", detail: outcome.code });
 	else if (outcome.status !== "classified") reasons.push({ code: "job-outcome", detail: outcome.status });
 	else {

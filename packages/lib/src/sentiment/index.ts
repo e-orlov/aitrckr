@@ -26,6 +26,21 @@ export {
 	type SentimentEnqueueResult,
 } from "./backfill";
 export {
+	acquireProbe,
+	BREAKER_OPENING_CLASSES,
+	BREAKER_PROBE_LEASE_SECONDS,
+	breakerBackoffMs,
+	classifyDispatchFailure,
+	type DispatchFailureClass,
+	databaseNow,
+	decideBreaker,
+	listBlockingBreakers,
+	listBreakers,
+	openBreakerManually,
+	readBreaker,
+	resetBreaker,
+} from "./breaker";
+export {
 	acceptCanaryRunId,
 	evaluateSentimentCanary,
 	inspectSentimentCanaryRun,
@@ -80,6 +95,29 @@ export {
 	validateSentimentResultDetailed,
 } from "./classifier";
 export {
+	type ControlActor,
+	DISPATCH_CONTROL_KEY,
+	type DispatchControlState,
+	type DispatchState,
+	findLivePermit,
+	type IssuePermitArgs,
+	isHeld,
+	issuePermit,
+	listControlEvents,
+	listPermits,
+	PERMIT_ESTIMATED_BUDGET_MAX_USD,
+	PERMIT_PHASES,
+	PERMIT_PURPOSES,
+	type PermitPhase,
+	type PermitPurpose,
+	type PhaseBudget,
+	RESERVATION_ESTIMATES_USD,
+	readDispatchState,
+	requireActor,
+	revokePermit,
+	transitionDispatch,
+} from "./controls";
+export {
 	brandEntity,
 	competitorEntity,
 	containsBoundedTerm,
@@ -118,6 +156,14 @@ export {
 } from "./errors";
 export type { PaidResponseEnvelope } from "./errors-validation";
 export {
+	REQUEST_PROFILE_VERSION,
+	type RequestProfile,
+	requestScopeKey,
+	SCHEMA_FINGERPRINT_VERSION,
+	schemaShapeFingerprint,
+	sentimentRequestProfile,
+} from "./fingerprint";
+export {
 	type AnchorContext,
 	type AnchorGrounding,
 	type GroundingMap,
@@ -126,12 +172,17 @@ export {
 	namesOnlyOthers,
 } from "./grounding";
 export {
+	type DispatchContext,
+	type DispatchDeps,
 	enqueueResumableSentimentRuns,
 	listResumableSentimentRuns,
+	permitAllowsVerify,
+	RESUME_BATCH_MAX,
 	type ResumableEnqueueResult,
 	type ResumableSentimentRun,
 	resumableEvidence,
 	runSentimentJob,
+	SentimentDispatchHeldError,
 	type SentimentJobDeps,
 	type SentimentJobOptions,
 	type SentimentJobOutcome,

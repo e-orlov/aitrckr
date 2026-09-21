@@ -1,3 +1,4 @@
+import { type DispatchState, isHeld, readDispatchState } from "./controls";
 import { type DetectableEntity, detectEntityMentions } from "./detector";
 import { detectionResultFor, ensureAnalysis, persistDetection } from "./store";
 import {
@@ -20,6 +21,8 @@ export interface SentimentSender {
 export type SentimentEnqueueOutcome =
 	| { status: "accepted"; jobId: string; mentions: number }
 	| { status: "deduplicated"; mentions: number }
+	/** Dispatch is held: the receipt, mentions and the pending analysis row are durable; no job was sent. */
+	| { status: "held"; mentions: number }
 	| { status: "no-mentions" }
 	| { status: "no-answer" }
 	| { status: "failed"; error: string };
@@ -40,6 +43,8 @@ export async function enqueueSentimentBestEffort(args: {
 	sender: SentimentSender;
 	/** Injected in tests; production writes through the store. */
 	persist?: typeof persistDetection;
+	ensureAnalysis?: typeof ensureAnalysis;
+	readDispatchState?: () => Promise<DispatchState>;
 }): Promise<SentimentEnqueueOutcome> {
 	try {
 		const detected = args.answerBody === null ? [] : detectEntityMentions(args.answerBody, args.entities);
@@ -50,7 +55,10 @@ export async function enqueueSentimentBestEffort(args: {
 		});
 		if (args.answerBody === null) return { status: "no-answer" };
 		if (detected.length === 0) return { status: "no-mentions" };
-		await ensureAnalysis({ promptRunId: args.promptRunId, brandId: args.brandId });
+		// The pending analysis row is the durable record of held work, so it exists before the hold is consulted.
+		await (args.ensureAnalysis ?? ensureAnalysis)({ promptRunId: args.promptRunId, brandId: args.brandId });
+		if (isHeld(await (args.readDispatchState ?? readDispatchState)()))
+			return { status: "held", mentions: detected.length };
 		const jobId = await sendSentimentJob(args.sender, args.promptRunId);
 		return jobId === null
 			? { status: "deduplicated", mentions: detected.length }

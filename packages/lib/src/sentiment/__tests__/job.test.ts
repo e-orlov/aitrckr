@@ -292,7 +292,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(await runSentimentJob(payload, d)).toEqual({ status: "claim-lost", generation: 7 });
 	});
 
-	it("fence: a provider failure whose routing write is refused still throws for the queue", async () => {
+	it("fence: a provider failure whose routing write is refused ends as claim-lost, nothing more is written", async () => {
 		const { d } = deps({
 			classify: vi.fn(async () => {
 				throw new StructuredResearchRequestError({
@@ -307,7 +307,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 			}),
 			markAnalysis: vi.fn(async () => false),
 		});
-		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "claim-lost" });
 	});
 
 	it("fence: a no-mentions completion whose write is refused ends as claim-lost", async () => {
@@ -515,7 +515,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(again.d.classify).not.toHaveBeenCalled();
 	});
 
-	it("an allow-listed typed refusal keeps the queue's retry path: the job throws, the parked row carries no input hash, the case waits", async () => {
+	it("an allow-listed typed refusal parks the case for the inventory: the job completes as retry-wait, the parked row carries no input hash, the case waits", async () => {
 		const { d, marks, usage, fakes } = deps({
 			classify: vi.fn(async () => {
 				throw new StructuredResearchRequestError({
@@ -529,7 +529,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 				});
 			}),
 		});
-		await expect(runSentimentJob(payload, d)).rejects.toBeInstanceOf(SentimentJobError);
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "retry-wait", consecutiveFailures: 1 });
 		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: "provider", inputHash: null });
 		expect(usage).toEqual([]);
 		expect(fakes.attempts.map((a) => `${a.phase}:${a.outcome}:${a.generationId}`)).toEqual([
@@ -589,19 +589,14 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 				throw error;
 			}),
 		});
-		let thrown: unknown;
-		try {
-			await runSentimentJob(payload, d);
-		} catch (error) {
-			thrown = error;
-		}
+		// Amendment C: the typed 429 parks the case as retry-wait; the outcome is the only thing the queue sees.
+		const outcome = await runSentimentJob(payload, d);
 		const failed = marks.at(-1) as { errorCode: string; errorMessage: string };
 		const serializedRow = JSON.stringify(failed);
-		const serializedError = JSON.stringify(thrown, Object.getOwnPropertyNames(thrown as object));
+		const serializedOutcome = JSON.stringify(outcome);
 		for (const forbidden of ["sk-or-", "rate limited", "Authorization", run.answerBody ?? "", "responseBody"]) {
 			expect(serializedRow).not.toContain(forbidden);
-			expect(serializedError).not.toContain(forbidden);
-			expect(String(thrown)).not.toContain(forbidden);
+			expect(serializedOutcome).not.toContain(forbidden);
 			expect(JSON.stringify([...fakes.cases.values()])).not.toContain(forbidden);
 			expect(JSON.stringify(fakes.attempts)).not.toContain(forbidden);
 		}
@@ -609,14 +604,7 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(failed.errorMessage).toBe(
 			`provider provider (StructuredResearchRequestError) via ${SENTIMENT_PROVIDER_ID}/${SENTIMENT_MODEL} HTTP 429`,
 		);
-		expect(thrown).toBeInstanceOf(SentimentJobError);
-		expect(thrown).toMatchObject({
-			code: "provider",
-			httpStatus: 429,
-			provider: SENTIMENT_PROVIDER_ID,
-			model: SENTIMENT_MODEL,
-		});
-		expect((thrown as Error).cause).toBeUndefined();
+		expect(outcome).toMatchObject({ status: "retry-wait", consecutiveFailures: 1 });
 	});
 
 	it("an aborted request has an unknown outcome: the attempt is `aborted`, the case awaits reconciliation, nothing is retried", async () => {
