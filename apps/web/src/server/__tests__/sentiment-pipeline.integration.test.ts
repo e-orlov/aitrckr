@@ -499,25 +499,15 @@ describe("IT-SNT-010 atomic job-side claim under concurrency (B3)", () => {
 				});
 			},
 		} as unknown as Provider;
-		let thrown: unknown;
-		try {
-			await runSentimentJob(payload, {
-				resolveProvider: () => withResolutionPhases(failing),
-				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
-			});
-		} catch (error) {
-			thrown = error;
-		}
-		expect(thrown).toMatchObject({
-			name: "SentimentJobError",
-			code: "provider",
-			httpStatus: 429,
-			provider: "openrouter",
+		// Amendment C: the typed 429 parks the case as a completed job; the outcome is what the queue sees.
+		const outcome = await runSentimentJob(payload, {
+			resolveProvider: () => withResolutionPhases(failing),
+			resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 		});
-		const thrownText = JSON.stringify(thrown, Object.getOwnPropertyNames(thrown as object)) + String(thrown);
+		expect(outcome).toMatchObject({ status: "retry-wait", consecutiveFailures: 1 });
+		const outcomeText = JSON.stringify(outcome);
 		for (const forbidden of ["sk-or-", "rate limited", "Authorization", ANSWER])
-			expect(thrownText).not.toContain(forbidden);
-		expect((thrown as Error).cause).toBeUndefined();
+			expect(outcomeText).not.toContain(forbidden);
 		const [row] = (
 			await client.query<{
 				status: string;
@@ -845,6 +835,7 @@ describe("IT-SNT-014 superseded mention lifecycle", () => {
 					],
 				}) as T,
 				modelVersion: SENTIMENT_MODEL,
+				generationId: "gen-alias-001",
 			}),
 		} as unknown as Provider;
 		expect(
@@ -1439,7 +1430,7 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		expect(first.preflight).toEqual({ status: "passed" });
 		expect(firstCalls).toBe(1);
 		expect(first.providerCalls).toBe(1);
-		expect(first.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error", detail: "503" }] });
+		expect(first.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error" }] });
 		expect(await analysisRow(RUN_CANARY_RETRY)).toEqual({
 			status: "pending_resolution",
 			error_code: "provider",
@@ -1572,7 +1563,7 @@ describe("IT-SNT-021 canary post-call gate on real Postgres (E1)", () => {
 		expect(reportB.preflight).toEqual({ status: "passed" });
 		expect(aCalls).toBe(1);
 		expect(reportA.providerCalls).toBe(1);
-		expect(reportA.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error", detail: "503" }] });
+		expect(reportA.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error" }] });
 
 		expect(bCalls).toBe(0);
 		expect(reportB.attempts).toBe(1);
@@ -1794,7 +1785,7 @@ describe("IT-SNT-025 a rejected overall claim is repaired, not terminal (grounde
 		expect(await row()).toEqual(before);
 	});
 
-	it("an allow-listed typed refusal keeps the retry path: the job throws, the parked row carries no input hash and the next attempt classifies", {
+	it("an allow-listed typed refusal parks the case for the inventory: the job completes as retry-wait, the parked row carries no input hash and the next attempt classifies", {
 		timeout: 120_000,
 	}, async () => {
 		// A changed answer is a new input and a new resolution instance.
@@ -1817,16 +1808,12 @@ describe("IT-SNT-025 a rejected overall claim is repaired, not terminal (grounde
 				});
 			},
 		} as unknown as Provider;
-		await expect(
-			runSentimentJob(terminalPayload, {
+		expect(
+			await runSentimentJob(terminalPayload, {
 				resolveProvider: () => withResolutionPhases(flaky),
 				resolutionPolicy: { backoffBaseMs: 1, backoffMaxMs: 2 },
 			}),
-		).rejects.toMatchObject({
-			name: "SentimentJobError",
-			code: "provider",
-			httpStatus: 503,
-		});
+		).toMatchObject({ status: "retry-wait", consecutiveFailures: 1 });
 		expect(await row()).toMatchObject({
 			status: "pending_resolution",
 			input_hash: null,
@@ -1851,6 +1838,7 @@ describe("IT-SNT-025 a rejected overall claim is repaired, not terminal (grounde
 						})),
 					}),
 					modelVersion: SENTIMENT_MODEL,
+					generationId: `gen-good-${calls.n}`,
 				};
 			},
 		} as unknown as Provider;
