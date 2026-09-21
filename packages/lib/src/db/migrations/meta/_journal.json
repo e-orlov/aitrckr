@@ -169,6 +169,13 @@
       "when": 1789683590461,
       "tag": "0023_sentiment_attempt_candidate",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1789989385343,
+      "tag": "0024_sentiment_dispatch_controls",
+      "breakpoints": true
     }
   ]
 }

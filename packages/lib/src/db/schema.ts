@@ -735,7 +735,7 @@ export const sentimentResolutionCases = pgTable(
 		costCheck: check("sentiment_resolution_cases_cost_check", sql`${table.totalActualCostUsd} >= 0`),
 		reviewReasonCheck: check(
 			"sentiment_resolution_cases_review_reason_check",
-			sql`${table.reviewReason} IS NULL OR ${table.reviewReason} IN ('call-limit', 'cost-limit', 'contract-defect', 'unknown-provider-outcome', 'initial-classification-limit')`,
+			sql`${table.reviewReason} IS NULL OR ${table.reviewReason} IN ('call-limit', 'cost-limit', 'contract-defect', 'unknown-provider-outcome', 'initial-classification-limit', 'retry-exhausted')`,
 		),
 	}),
 ).enableRLS();
@@ -772,6 +772,13 @@ export const sentimentProviderAttempts = pgTable(
 		 * reusable result behind. Null for unanswered attempts and for verdicts.
 		 */
 		candidate: jsonb("candidate"),
+		/** The dispatch permit that authorized this request while dispatch was held; null under open dispatch. */
+		permitId: uuid("permit_id").references(() => sentimentDispatchPermits.id),
+		/** `rp1:` request-profile scope and `sfp1:` schema-shape fingerprint of the exact document sent. */
+		scopeKey: text("scope_key"),
+		schemaFp: text("schema_fp"),
+		/** Planning estimate reserved against the permit before dispatch; released or replaced by the settled cost. */
+		reservedEstimateUsd: numeric("reserved_estimate_usd", { precision: 10, scale: 6 }),
 		startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
 		finishedAt: timestamp("finished_at", { withTimezone: true }),
 	},
@@ -805,6 +812,181 @@ export const sentimentProviderAttempts = pgTable(
 	}),
 ).enableRLS();
 
+// ============================================================================
+// Sentiment dispatch safety controls (ADR-SENT-01-GROUNDED-COMPLETION, Amendment C)
+// ============================================================================
+
+/**
+ * One row per control; `dispatch` gates every v5 sentiment provider request.
+ * Readers treat an absent or unreadable row as `held`. Transitions are
+ * compare-and-swap on `state` and bump `epoch`; every transition also appends
+ * a `sentiment_control_events` row.
+ */
+export const sentimentControls = pgTable(
+	"sentiment_controls",
+	{
+		key: text("key").primaryKey().notNull(),
+		state: text("state").notNull(),
+		epoch: integer("epoch").notNull(),
+		changedAt: timestamp("changed_at", { withTimezone: true }).defaultNow().notNull(),
+		actor: text("actor").notNull(),
+		reason: text("reason").notNull(),
+		correlationId: text("correlation_id").notNull(),
+	},
+	(table) => ({
+		stateCheck: check("sentiment_controls_state_check", sql`${table.state} IN ('held', 'open')`),
+		epochCheck: check("sentiment_controls_epoch_check", sql`${table.epoch} >= 1`),
+	}),
+).enableRLS();
+
+/** Append-only audit of control, permit and breaker transitions; `seq` is dense per subject and never rewritten. */
+export const sentimentControlEvents = pgTable(
+	"sentiment_control_events",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		subjectKind: text("subject_kind").notNull(),
+		subjectKey: text("subject_key").notNull(),
+		seq: integer("seq").notNull(),
+		fromState: text("from_state"),
+		toState: text("to_state").notNull(),
+		actor: text("actor").notNull(),
+		reason: text("reason").notNull(),
+		correlationId: text("correlation_id").notNull(),
+		/** Identifiers, codes and counts only — never prompts, answers, schema documents or credentials. */
+		evidence: jsonb("evidence"),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		subjectSeqUnique: uniqueIndex("sentiment_control_events_subject_seq_idx").on(
+			table.subjectKind,
+			table.subjectKey,
+			table.seq,
+		),
+		kindCheck: check(
+			"sentiment_control_events_kind_check",
+			sql`${table.subjectKind} IN ('control', 'permit', 'breaker', 'alert')`,
+		),
+		seqCheck: check("sentiment_control_events_seq_check", sql`${table.seq} >= 1`),
+	}),
+).enableRLS();
+
+/**
+ * The only bypass of a held dispatch: one lifecycle of one analysis instance
+ * for one exact input, with a per-phase call budget in {0,1}, a DB-clock
+ * expiry and an estimated cost budget. The estimate is a planning figure —
+ * the enforceable limits are the phases, the calls, the request token/tool
+ * limits, the expiry and the fencing; actual cost is known only after settlement.
+ */
+export const sentimentDispatchPermits = pgTable(
+	"sentiment_dispatch_permits",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		purpose: text("purpose").notNull(),
+		promptRunId: uuid("prompt_run_id").notNull(),
+		analysisId: uuid("analysis_id")
+			.references(() => sentimentAnalyses.id, { onDelete: "cascade" })
+			.notNull(),
+		instanceId: uuid("instance_id").notNull(),
+		inputHash: text("input_hash").notNull(),
+		classifierVersion: text("classifier_version").notNull(),
+		provider: text("provider").notNull(),
+		model: text("model").notNull(),
+		/** Remaining calls per phase, e.g. {"classify":1,"repair":1,"verify":1}; consumed atomically per dispatch. */
+		phaseBudget: jsonb("phase_budget").notNull(),
+		estimatedCostBudgetUsd: numeric("estimated_cost_budget_usd", { precision: 10, scale: 6 }).notNull(),
+		settledCostUsd: numeric("settled_cost_usd", { precision: 10, scale: 6 }).notNull().default("0"),
+		reservedEstimateUsd: numeric("reserved_estimate_usd", { precision: 10, scale: 6 }).notNull().default("0"),
+		state: text("state").notNull().default("issued"),
+		issuedAt: timestamp("issued_at", { withTimezone: true }).defaultNow().notNull(),
+		expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+		issuedBy: text("issued_by").notNull(),
+		reason: text("reason").notNull(),
+		correlationId: text("correlation_id").notNull(),
+		contractSha256: text("contract_sha256"),
+	},
+	(table) => ({
+		liveUnique: uniqueIndex("sentiment_dispatch_permits_live_idx")
+			.on(table.analysisId, table.instanceId)
+			.where(sql`${table.state} IN ('issued', 'active')`),
+		analysisIdx: index("sentiment_dispatch_permits_analysis_idx").on(table.analysisId, table.state),
+		purposeCheck: check(
+			"sentiment_dispatch_permits_purpose_check",
+			sql`${table.purpose} IN ('canary', 'resume-verify')`,
+		),
+		stateCheck: check(
+			"sentiment_dispatch_permits_state_check",
+			sql`${table.state} IN ('issued', 'active', 'exhausted', 'expired', 'revoked')`,
+		),
+		budgetCheck: check(
+			"sentiment_dispatch_permits_budget_check",
+			sql`${table.estimatedCostBudgetUsd} > 0 AND ${table.estimatedCostBudgetUsd} <= 0.10`,
+		),
+		amountsCheck: check(
+			"sentiment_dispatch_permits_amounts_check",
+			sql`${table.settledCostUsd} >= 0 AND ${table.reservedEstimateUsd} >= 0`,
+		),
+		phaseBudgetCheck: check(
+			"sentiment_dispatch_permits_phase_budget_check",
+			sql`jsonb_typeof(${table.phaseBudget}) = 'object' AND (${table.phaseBudget} - 'classify' - 'repair' - 'verify') = '{}'::jsonb AND coalesce((${table.phaseBudget}->>'classify')::int, 0) IN (0, 1) AND coalesce((${table.phaseBudget}->>'repair')::int, 0) IN (0, 1) AND coalesce((${table.phaseBudget}->>'verify')::int, 0) IN (0, 1)`,
+		),
+	}),
+).enableRLS();
+
+/**
+ * Circuit breaker per `rp1:` request-profile scope (adapter, endpoint, model,
+ * tool mode, strict-output mode and the `sfp1:` schema shape). An absent row
+ * is `closed`. The half-open probe is a fenced lease on one attempt.
+ */
+export const sentimentProviderBreakers = pgTable(
+	"sentiment_provider_breakers",
+	{
+		scopeKey: text("scope_key").primaryKey().notNull(),
+		provider: text("provider").notNull(),
+		model: text("model").notNull(),
+		schemaFp: text("schema_fp").notNull(),
+		/** The sanitized request profile the key hashes: no schema document, prompt or credential. */
+		requestProfile: jsonb("request_profile").notNull(),
+		state: text("state").notNull().default("closed"),
+		openedAt: timestamp("opened_at", { withTimezone: true }),
+		openUntil: timestamp("open_until", { withTimezone: true }),
+		consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+		probeAttemptId: uuid("probe_attempt_id"),
+		probeGeneration: integer("probe_generation").notNull().default(0),
+		probeLeaseUntil: timestamp("probe_lease_until", { withTimezone: true }),
+		openedClass: text("opened_class"),
+		openedPhase: text("opened_phase"),
+		lastAttemptId: uuid("last_attempt_id"),
+		lastHttpStatus: integer("last_http_status"),
+		lastErrorType: text("last_error_type"),
+		lastRule: text("last_rule"),
+		lastChangedBy: text("last_changed_by").notNull(),
+		lastReason: text("last_reason").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		schemaFpIdx: index("sentiment_provider_breakers_schema_fp_idx").on(table.schemaFp),
+		stateCheck: check(
+			"sentiment_provider_breakers_state_check",
+			sql`${table.state} IN ('closed', 'open', 'half_open')`,
+		),
+		failuresCheck: check("sentiment_provider_breakers_failures_check", sql`${table.consecutiveFailures} >= 0`),
+	}),
+).enableRLS();
+
+/** Alert baselines, watermarks, cooldowns and the maintenance heartbeat; written by the alert evaluator (PR-2). */
+export const sentimentAlertState = pgTable("sentiment_alert_state", {
+	signal: text("signal").primaryKey().notNull(),
+	baseline: jsonb("baseline"),
+	watermark: jsonb("watermark"),
+	evaluatedAt: timestamp("evaluated_at", { withTimezone: true }),
+	lastAlertedAt: timestamp("last_alerted_at", { withTimezone: true }),
+	cooldownUntil: timestamp("cooldown_until", { withTimezone: true }),
+	updatedBy: text("updated_by"),
+	correlationId: text("correlation_id"),
+	updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}).enableRLS();
+
 export type SentimentDetection = typeof sentimentDetections.$inferSelect;
 export type PromptRunEntityMention = typeof promptRunEntityMentions.$inferSelect;
 export type NewPromptRunEntityMention = typeof promptRunEntityMentions.$inferInsert;
@@ -814,6 +996,11 @@ export type SentimentAspectObservation = typeof sentimentAspectObservations.$inf
 export type SentimentFilteredClaim = typeof sentimentFilteredClaims.$inferSelect;
 export type SentimentResolutionCase = typeof sentimentResolutionCases.$inferSelect;
 export type SentimentProviderAttempt = typeof sentimentProviderAttempts.$inferSelect;
+export type SentimentControl = typeof sentimentControls.$inferSelect;
+export type SentimentControlEvent = typeof sentimentControlEvents.$inferSelect;
+export type SentimentDispatchPermit = typeof sentimentDispatchPermits.$inferSelect;
+export type SentimentProviderBreaker = typeof sentimentProviderBreakers.$inferSelect;
+export type SentimentAlertState = typeof sentimentAlertState.$inferSelect;
 
 // Encrypted overrides for credential environment variables, keyed by the env-var
 // name they stand in for. Separate table, strictest access.
