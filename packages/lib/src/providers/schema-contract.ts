@@ -4,8 +4,14 @@ import { toStructuredOutputJsonSchema } from "./json-schema";
 /**
  * Keywords the strict structured-output mode of the OpenAI-compatible
  * providers accepts (https://developers.openai.com/api/docs/guides/structured-outputs,
- * "Supported schemas"). `anyOf` is allowed inside a property; the root itself
- * must be a plain object.
+ * "Supported schemas"): the structural keywords, `anyOf` inside a property,
+ * `enum`/`const`, and the documented per-type constraints for strings
+ * (`pattern`, `format`, `minLength`, `maxLength`), numbers (`minimum`,
+ * `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`) and arrays
+ * (`minItems`, `maxItems`). The composition keywords the documentation lists
+ * as unsupported (`allOf`, `not`, `if`/`then`/`else`, `dependentRequired`,
+ * `dependentSchemas`, `oneOf`, `patternProperties`) are deliberately absent.
+ * The root itself must be a plain object.
  */
 export const STRICT_STRUCTURED_OUTPUT_KEYWORDS = [
 	"$schema",
@@ -18,10 +24,18 @@ export const STRICT_STRUCTURED_OUTPUT_KEYWORDS = [
 	"items",
 	"anyOf",
 	"enum",
+	"const",
 	"minItems",
 	"maxItems",
 	"minimum",
 	"maximum",
+	"exclusiveMinimum",
+	"exclusiveMaximum",
+	"multipleOf",
+	"minLength",
+	"maxLength",
+	"pattern",
+	"format",
 	"description",
 	"title",
 ] as const;
