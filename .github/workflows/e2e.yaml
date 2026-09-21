@@ -265,7 +265,8 @@ jobs:
   scheduling-policy:
     name: Scheduling Policy Verification
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # The sentiment real-Postgres matrix appended to this job runs ~10 minutes on its own.
+    timeout-minutes: 40
 
     services:
       postgres:
@@ -340,6 +341,35 @@ jobs:
           sleep 15
           npx tsx e2e/scheduling/verify-scheduling.ts cloud
           kill "$(cat /tmp/worker.pid)" || true
+
+      # The sentiment dispatch control layer (ADR-SENT-01 Amendment C) is proven on real Postgres: every
+      # *.integration.test.ts under apps/web must run, pass, and reach only loopback targets (a real provider
+      # request is a hard failure), and the smoke verifier must pass on the migrated database. The reconcile
+      # step prints the exact file inventory and test counts so the job log is the evidence.
+      - name: "Sentiment real-Postgres integration matrix"
+        env:
+          DEPLOYMENT_MODE: local
+          VITE_DEPLOYMENT_MODE: local
+          VITE_APP_URL: http://localhost:3000
+          SCRAPE_TARGETS: stub:stub
+          ANTHROPIC_API_KEY: placeholder-ci-no-network
+          OPENAI_API_KEY: placeholder-ci-no-network
+          DATAFORSEO_LOGIN: placeholder
+          DATAFORSEO_PASSWORD: placeholder
+          NODE_OPTIONS: --require ${{ github.workspace }}/e2e/sentiment-ci/net-guard.cjs
+          SENTIMENT_NET_GUARD_LOG: /tmp/sentiment-net-guard.log
+        run: |
+          export ELMO_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+          pnpm -C apps/web exec vitest run --project=integration --reporter=verbose --reporter=json --outputFile=/tmp/sentiment-integration.json
+
+      - name: "Sentiment DB verifier on the migrated database"
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/e2e/sentiment-ci/net-guard.cjs
+          SENTIMENT_NET_GUARD_LOG: /tmp/sentiment-net-guard.log
+        run: pnpm -C apps/worker exec tsx scripts/verify-sentiment-db.ts
+
+      - name: "Reconcile the sentiment matrix inventory and network guard"
+        run: node e2e/sentiment-ci/reconcile.cjs /tmp/sentiment-integration.json apps/web/src/server/__tests__ /tmp/sentiment-net-guard.log
 
       - name: Dump worker logs
         if: failure()
