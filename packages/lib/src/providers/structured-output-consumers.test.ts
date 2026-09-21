@@ -1,20 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
+import type { z } from "zod";
+import { buildOnboardingAnalysisSchema } from "../onboarding/analyze";
 import { segmentAnswer } from "../sentiment/anchors";
 import { repairResultSchemaFor, verifierResultSchemaFor } from "../sentiment/resolution";
 import { sentimentProviderResultSchemaFor } from "../sentiment/types";
 import { sourceClassificationResultSchema } from "../source-classification/types";
 import { toStructuredOutputJsonSchema } from "./json-schema";
-import { structuredOutputSchemaViolations } from "./schema-contract";
+import { prepareStructuredOutputSchema, structuredOutputSchemaViolations } from "./schema-contract";
 
 const anchors = segmentAnswer("Alpha is fast. Beta is slow. Gamma is cheap.").map((a) => a.id);
 const keys = ["brand", "5e970007-0000-4000-8000-00000000000a"];
 
 /**
- * Every structured-output request the repository can send, with the exact Zod
- * schema (or an exact structural replica where the builder is module-private)
- * that reaches `runStructuredResearch`. A new consumer must be added here or
- * the file-level inventory assertion below fails.
+ * Every structured-output request this package can send, serialized from the
+ * exact Zod schema instance (or the exact production factory) the runtime
+ * caller hands to `runStructuredResearch`. Nothing here is a copy. The
+ * opportunities report lives in `apps/web` and is proven there from its own
+ * production symbol; `structured-output-consumer-registry.test.ts` asserts
+ * that every call site in the repository is covered by one of the two.
  */
 const CONSUMERS: { consumer: string; source: string; schema: () => z.ZodType }[] = [
 	{
@@ -38,55 +41,17 @@ const CONSUMERS: { consumer: string; source: string; schema: () => z.ZodType }[]
 		schema: () => sourceClassificationResultSchema,
 	},
 	{
-		// Structural replica of `buildSchema` in onboarding/analyze.ts (module-private, async context builder):
-		// plain z.object with described strings and arrays of plain objects.
 		consumer: "onboarding analysis",
 		source: "packages/lib/src/onboarding/analyze.ts",
-		schema: () =>
-			z.object({
-				brandName: z.string().describe("name"),
-				additionalDomains: z.array(z.string()).describe("domains"),
-				aliases: z.array(z.string()).describe("aliases"),
-				competitors: z.array(
-					z.object({
-						name: z.string().describe("n"),
-						domains: z.array(z.string()).describe("d"),
-						aliases: z.array(z.string()).describe("a"),
-					}),
-				),
-				suggestedPrompts: z.array(
-					z.object({ prompt: z.string().describe("p"), tags: z.array(z.string()).describe("t") }),
-				),
-			}),
-	},
-	{
-		// Structural replica of `opportunitiesSchema` in apps/web/src/server/opportunities.ts (web app, not importable here).
-		consumer: "opportunities report",
-		source: "apps/web/src/server/opportunities.ts",
-		schema: () =>
-			z.object({
-				summary: z.array(z.string()).describe("s"),
-				opportunities: z.array(
-					z.object({
-						category: z.enum(["creation", "existing-content", "outreach", "social"]).describe("c"),
-						title: z.string().describe("t"),
-						why: z.string().describe("w"),
-						relatedPrompts: z.array(z.string()).describe("r"),
-					}),
-				),
-				risks: z.array(z.string()).describe("r"),
-			}),
+		schema: () => buildOnboardingAnalysisSchema({ maxCompetitors: 10, maxPrompts: 30 }),
 	},
 ];
 
 describe("every structured-output consumer's wire schema passes the shared provider contract", () => {
-	it("the inventory covers every runStructuredResearch call site", () => {
-		// One entry per call site: classifier.ts, job.ts (repair + verify), source-classification, onboarding llm.ts
-		// (analysis + opportunities completion). The compare-onboarding script reuses the onboarding schema.
+	it("the package inventory names every consumer whose schema is defined in this package", () => {
 		expect(CONSUMERS.map((c) => c.consumer).sort()).toEqual(
 			[
 				"onboarding analysis",
-				"opportunities report",
 				"sentiment classify",
 				"sentiment repair",
 				"sentiment verify",
@@ -99,6 +64,38 @@ describe("every structured-output consumer's wire schema passes the shared provi
 		const json = toStructuredOutputJsonSchema(schema());
 		expect(structuredOutputSchemaViolations(json)).toEqual([]);
 		expect(json.type).toBe("object");
+		expect(prepareStructuredOutputSchema(schema())).toEqual(json);
+	});
+
+	it("source classification keeps its string bounds on the wire and still passes", () => {
+		const json = prepareStructuredOutputSchema(sourceClassificationResultSchema) as {
+			properties: Record<string, Record<string, unknown>>;
+		};
+		expect(json.properties.reason).toMatchObject({ type: "string", minLength: 1, maxLength: 500 });
+	});
+
+	it("the verifier root is a closed object, not a union", () => {
+		const json = prepareStructuredOutputSchema(verifierResultSchemaFor(anchors, keys));
+		expect(json.type).toBe("object");
+		expect(json.anyOf).toBeUndefined();
+		expect(json.oneOf).toBeUndefined();
+		expect(json.additionalProperties).toBe(false);
+		expect(json.required).toEqual(expect.arrayContaining(["verdict", "issues"]));
+	});
+
+	// The onboarding limits are the only inputs that shape its document: they
+	// change field descriptions, never structure, so every boundary must pass.
+	it.each([
+		{ label: "both disabled", maxCompetitors: 0, maxPrompts: 0 },
+		{ label: "minimum", maxCompetitors: 1, maxPrompts: 1 },
+		{ label: "defaults", maxCompetitors: 10, maxPrompts: 30 },
+		{ label: "large", maxCompetitors: 1_000_000, maxPrompts: 1_000_000 },
+	])("onboarding analysis at boundary limits: $label", ({ maxCompetitors, maxPrompts }) => {
+		const json = prepareStructuredOutputSchema(buildOnboardingAnalysisSchema({ maxCompetitors, maxPrompts }));
+		expect(json.type).toBe("object");
+		expect(Object.keys((json as { properties: object }).properties).sort()).toEqual(
+			["additionalDomains", "aliases", "brandName", "competitors", "suggestedPrompts"].sort(),
+		);
 	});
 });
 
