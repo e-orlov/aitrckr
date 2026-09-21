@@ -2,7 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { StructuredOutputSchemaError } from "../../providers/schema-contract";
 import { StructuredResearchRequestError, StructuredResearchResponseError } from "../../providers/types";
 import { breakerBackoffMs, classifyDispatchFailure, decideBreaker } from "../breaker";
-import { isHeld, readDispatchState } from "../controls";
+import {
+	isHeld,
+	isPermitEffective,
+	isResumeVerifyBudget,
+	issuePermit,
+	permitPurposeAllowsPhase,
+	permitSettlementFor,
+	readDispatchState,
+} from "../controls";
 import { enqueueSentimentBestEffort } from "../enqueue";
 import { sanitizeSentimentError } from "../errors";
 import type { Executor } from "../store";
@@ -212,5 +220,82 @@ describe("breaker decision and backoff", () => {
 		expect(breakerBackoffMs(3)).toBe(60 * 60_000);
 		expect(breakerBackoffMs(6)).toBe(6 * 60 * 60_000);
 		expect(breakerBackoffMs(40)).toBe(6 * 60 * 60_000);
+	});
+});
+
+describe("permit shape and settlement contract (F-2, F-3, F-7)", () => {
+	const neverExecutes = {
+		transaction: async () => {
+			throw new Error("issuePermit must refuse before opening a transaction");
+		},
+	} as unknown as Executor;
+	const base = {
+		promptRunId: "r",
+		analysisId: "a",
+		instanceId: "i",
+		inputHash: "h",
+		classifierVersion: "v5",
+		estimatedCostBudgetUsd: 0.02,
+		ttlSeconds: 60,
+		actor: "t",
+		reason: "r",
+		correlationId: "c",
+	};
+
+	it("a resume-verify permit is exactly verify-only and bound to its manifest", async () => {
+		expect(isResumeVerifyBudget({ classify: 0, repair: 0, verify: 1 })).toBe(true);
+		expect(isResumeVerifyBudget({ classify: 1, repair: 0, verify: 1 })).toBe(false);
+		expect(isResumeVerifyBudget({ classify: 0, repair: 1, verify: 1 })).toBe(false);
+		expect(isResumeVerifyBudget({ classify: 0, repair: 0, verify: 0 })).toBe(false);
+		for (const phaseBudget of [
+			{ classify: 1, repair: 1, verify: 1 },
+			{ classify: 0, repair: 1, verify: 1 },
+			{ classify: 1, repair: 0, verify: 0 },
+		] as const) {
+			await expect(
+				issuePermit({ ...base, purpose: "resume-verify", phaseBudget, contractSha256: "a".repeat(64) }, neverExecutes),
+			).rejects.toThrow(/exactly/);
+		}
+		await expect(
+			issuePermit({ ...base, purpose: "resume-verify", phaseBudget: { classify: 0, repair: 0, verify: 1 } }, neverExecutes),
+		).rejects.toThrow(/manifest/);
+		await expect(
+			issuePermit(
+				{ ...base, purpose: "resume-verify", phaseBudget: { classify: 0, repair: 0, verify: 1 }, contractSha256: "nope" },
+				neverExecutes,
+			),
+		).rejects.toThrow(/manifest/);
+		// A canary keeps its approved per-phase {0,1} budgets: validation passes and the transaction is reached.
+		await expect(
+			issuePermit({ ...base, purpose: "canary", phaseBudget: { classify: 1, repair: 0, verify: 1 } }, neverExecutes),
+		).rejects.toThrow(/must refuse before opening/);
+	});
+
+	it("a purpose authorizes only its phases", () => {
+		expect(permitPurposeAllowsPhase("resume-verify", "verify")).toBe(true);
+		expect(permitPurposeAllowsPhase("resume-verify", "classify")).toBe(false);
+		expect(permitPurposeAllowsPhase("resume-verify", "repair")).toBe(false);
+		expect(permitPurposeAllowsPhase("canary", "classify")).toBe(true);
+		expect(permitPurposeAllowsPhase("other", "verify")).toBe(false);
+	});
+
+	it("settlement never turns an unknown cost into a known zero", () => {
+		expect(permitSettlementFor(false, null)).toEqual({ kind: "unpaid" });
+		expect(permitSettlementFor(true, 0.021)).toEqual({ kind: "paid", actualCostUsd: 0.021 });
+		expect(permitSettlementFor(true, 0)).toEqual({ kind: "paid", actualCostUsd: 0 });
+		expect(permitSettlementFor(true, null)).toEqual({ kind: "paid-unknown-cost" });
+	});
+
+	it("live means a live state and an expiry still ahead of the database clock", () => {
+		const now = new Date("2026-09-21T12:00:00Z");
+		const later = new Date("2026-09-21T12:00:01Z");
+		const earlier = new Date("2026-09-21T11:59:59Z");
+		expect(isPermitEffective({ state: "issued", expiresAt: later }, now)).toBe(true);
+		expect(isPermitEffective({ state: "active", expiresAt: later }, now)).toBe(true);
+		expect(isPermitEffective({ state: "issued", expiresAt: earlier }, now)).toBe(false);
+		expect(isPermitEffective({ state: "issued", expiresAt: now }, now)).toBe(false);
+		expect(isPermitEffective({ state: "exhausted", expiresAt: later }, now)).toBe(false);
+		expect(isPermitEffective({ state: "revoked", expiresAt: later }, now)).toBe(false);
+		expect(isPermitEffective({ state: "expired", expiresAt: later }, now)).toBe(false);
 	});
 });

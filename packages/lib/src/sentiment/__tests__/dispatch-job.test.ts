@@ -12,7 +12,7 @@ import type { DetectableEntity } from "../detector";
 import { runSentimentJob, type SentimentJobDeps } from "../job";
 import { verifierResultSchemaFor } from "../resolution";
 import { candidatesFromMentions, type StoredMention, type StoredRunForSentiment } from "../store";
-import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION } from "../types";
+import { SENTIMENT_CLASSIFIER_VERSION, SENTIMENT_TAXONOMY_VERSION, sentimentProviderResultSchemaFor } from "../types";
 import { resolutionFakes } from "./resolution-fakes";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
@@ -394,6 +394,155 @@ describe("the guarded provider is the last line", () => {
 		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "held", reason: "dispatch-held" });
 		expect(f.attempts.map((a) => `${a.phase}:${a.outcome}`)).toEqual(["classify:aborted"]);
 		expect(f.calls).toEqual([]);
+	});
+});
+
+describe("the guarded provider re-authorizes from the store immediately before the request (F-5)", () => {
+	/**
+	 * Run one held-permit lifecycle. The classify stub answers without a provider request, so the verify phase is the
+	 * first guarded request: its T1 commits, `between` runs before the guard's re-read, and the test reports what left.
+	 */
+	async function afterT1(between: (f: ReturnType<typeof resolutionFakes>, permitId: string) => void, dispatch = held) {
+		const fakes = resolutionFakes({ dispatch });
+		const { d, fakes: f, marks } = harness({ fakes });
+		const permit = f.issuePermit({
+			id: "p1",
+			analysisId: "a1",
+			instanceId: (await d.ensureResolutionCase?.("a1", currentHash))?.instanceId ?? "",
+			inputHash: currentHash,
+			phaseBudget: { classify: 1, repair: 1, verify: 1 },
+			estimatedCostBudgetUsd: 0.1,
+			expiresAt: new Date(Date.now() + 60_000),
+		});
+		const inner = f.deps.dispatch?.loadAttemptDispatch;
+		let once = false;
+		d.dispatch = {
+			...f.deps.dispatch,
+			loadAttemptDispatch: async (id, ex) => {
+				if (!once) {
+					once = true;
+					between(f, permit.id);
+				}
+				return (inner as NonNullable<typeof inner>)(id, ex);
+			},
+		};
+		const outcome = await runSentimentJob(payload, d);
+		return { outcome, f, marks, permit };
+	}
+
+	it("a breaker committed open after T1 refuses the request: zero calls, aborted attempt, case parked until open_until", async () => {
+		const { outcome, f } = await afterT1((fakes) => {
+			const sending = fakes.attempts.at(-1);
+			const key = sending?.scopeKey ?? "";
+			fakes.breakers.set(key, {
+				scopeKey: key,
+				state: "open",
+				openUntil: new Date(Date.now() + 15 * 60_000),
+				probeAttemptId: null,
+				probeGeneration: 0,
+				probeLeaseUntil: null,
+				consecutiveFailures: 1,
+				openedClass: "request-refused-400",
+				schemaFp: sending?.schemaFp ?? "",
+				events: [],
+			});
+		});
+		expect(f.calls).toEqual([]);
+		expect(outcome).toMatchObject({ status: "held", reason: "breaker-open" });
+		expect(f.attempts.map((a) => `${a.phase}:${a.outcome}`)).toEqual(["classify:accepted", "verify:aborted"]);
+		expect(f.cases.get("a1")).toMatchObject({ status: "retry_wait" });
+		// The classify settled its known cost; the aborted verify released its reservation but its phase stays consumed.
+		expect(f.permits[0]).toMatchObject({ reservedEstimateUsd: 0, phaseBudget: { classify: 0, repair: 1, verify: 0 } });
+	});
+
+	it("a permit revoked, expired or re-bound after T1 is refused: zero calls, reservation released, phase not refunded", async () => {
+		for (const [name, mutate] of [
+			["revoked", (p: { state: string }) => (p.state = "revoked")],
+			["expired", (p: { expiresAt: Date }) => (p.expiresAt = new Date(Date.now() - 1))],
+			["other input", (p: { inputHash: string }) => (p.inputHash = "other")],
+		] as const) {
+			const { outcome, f, marks } = await afterT1((fakes) => mutate(fakes.permits[0] as never));
+			expect(f.calls, name).toEqual([]);
+			expect(outcome, name).toMatchObject({ status: "held", reason: "dispatch-held" });
+			expect(f.attempts.map((a) => `${a.phase}:${a.outcome}`), name).toEqual(["classify:accepted", "verify:aborted"]);
+			expect(f.permits[0], name).toMatchObject({ reservedEstimateUsd: 0, phaseBudget: { classify: 0, repair: 1, verify: 0 } });
+			expect(marks.at(-1), name).toMatchObject({ errorCode: "gate-breach:permit-ineligible" });
+		}
+	});
+
+	it("a resume-verify permit never authorizes a classify request at the boundary", async () => {
+		const fakes = resolutionFakes({ dispatch: held });
+		const { d, fakes: f } = harness({
+			fakes,
+			// The classifier really asks the guarded provider, under the classify document and web search.
+			classify: (async (
+				_args: unknown,
+				classifyDeps: { resolveProvider: () => { runStructuredResearch: (o: unknown) => Promise<unknown> } },
+			) =>
+				classifyDeps.resolveProvider().runStructuredResearch({
+					prompt: "classify",
+					schema: sentimentProviderResultSchemaFor(["s0001", "s0002"], ["brand", "c-huk"]),
+					webSearch: true,
+				})) as never,
+		});
+		f.issuePermit({
+			id: "p1",
+			purpose: "resume-verify",
+			analysisId: "a1",
+			instanceId: (await d.ensureResolutionCase?.("a1", currentHash))?.instanceId ?? "",
+			inputHash: currentHash,
+			// A malformed budget the store's CHECK would refuse; the boundary must still refuse the classify on purpose alone.
+			phaseBudget: { classify: 1, repair: 0, verify: 1 },
+			estimatedCostBudgetUsd: 0.1,
+			expiresAt: new Date(Date.now() + 60_000),
+		});
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "held", reason: "dispatch-held" });
+		expect(f.calls).toEqual([]);
+		expect(f.attempts.map((a) => `${a.phase}:${a.outcome}`)).toEqual(["classify:aborted"]);
+	});
+
+	it("dispatch held after T1 without a permit is refused by the last-line hold check", async () => {
+		const fakes = resolutionFakes();
+		const { d, fakes: f, marks } = harness({ fakes });
+		const inner = f.deps.dispatch?.loadAttemptDispatch;
+		let once = false;
+		d.dispatch = {
+			...f.deps.dispatch,
+			loadAttemptDispatch: async (id, ex) => {
+				if (!once) {
+					once = true;
+					f.setDispatch(held);
+				}
+				return (inner as NonNullable<typeof inner>)(id, ex);
+			},
+		};
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "held", reason: "dispatch-held" });
+		expect(f.calls).toEqual([]);
+		expect(f.attempts.map((a) => `${a.phase}:${a.outcome}`)).toEqual(["classify:accepted", "verify:aborted"]);
+		expect(marks.at(-1)).toMatchObject({ errorCode: "gate-breach:held-without-permit" });
+	});
+
+	it("a paid answer without a reported cost keeps its reservation counted; the next phase is refused before any attempt", async () => {
+		const fakes = resolutionFakes({ dispatch: held });
+		const { d, fakes: f, classify } = harness({
+			fakes,
+			classify: async () => ({ ...classified(), usage: { ...classified().usage, costUsd: undefined } }) as never,
+		});
+		f.issuePermit({
+			id: "p1",
+			analysisId: "a1",
+			instanceId: (await d.ensureResolutionCase?.("a1", currentHash))?.instanceId ?? "",
+			inputHash: currentHash,
+			phaseBudget: { classify: 1, repair: 1, verify: 1 },
+			estimatedCostBudgetUsd: 0.06,
+			expiresAt: new Date(Date.now() + 60_000),
+		});
+		// classify (unknown cost, its 0.05 reservation stays) → the verify reservation 0.02 would exceed 0.06 → refused.
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "held", reason: "permit-unavailable" });
+		expect(classify).toHaveBeenCalledTimes(1);
+		expect(f.calls).toEqual([]);
+		expect(f.permits[0]).toMatchObject({ settledCostUsd: 0, reservedEstimateUsd: 0.05 });
+		expect(f.attempts.map((a) => `${a.phase}:${a.outcome}:${a.actualCostUsd}`)).toEqual(["classify:accepted:null"]);
 	});
 });
 

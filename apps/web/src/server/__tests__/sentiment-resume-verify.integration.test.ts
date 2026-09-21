@@ -26,7 +26,11 @@ const {
 	selectResumableForVerify,
 	applyResumeForVerify,
 	listResumableSentimentRuns,
+	listControlEvents,
+	listPermits,
+	manifestSha256,
 } = await import("@workspace/lib/sentiment");
+const shaOf = (manifest: unknown) => manifestSha256(JSON.stringify(manifest, null, 2));
 const { StructuredResearchRequestError } = await import("@workspace/lib/providers/types");
 type Provider = import("@workspace/lib/providers/types").Provider;
 
@@ -121,7 +125,7 @@ const attemptsOf = async (runId: string) =>
 const caseOf = async (runId: string) =>
 	(
 		await client.query(
-			`SELECT c.status, c.review_reason FROM sentiment_resolution_cases c JOIN sentiment_analyses a ON a.id = c.analysis_id WHERE a.prompt_run_id = $1`,
+			`SELECT c.status, c.review_reason, c.next_attempt_at, c.provisional_result, c.unresolved_targets FROM sentiment_resolution_cases c JOIN sentiment_analyses a ON a.id = c.analysis_id WHERE a.prompt_run_id = $1`,
 			[runId],
 		)
 	).rows[0];
@@ -300,7 +304,13 @@ describe("IT-SNT-C-007 verifier-only resume of cases parked for review", () => {
 		// Apply refuses a stale manifest.
 		const stale = { ...manifest, count: manifest.count + 1 };
 		expect(
-			await applyResumeForVerify({ manifest: stale, limit: 10, sender: { send: async () => "x" }, ...ACTOR }),
+			await applyResumeForVerify({
+				manifest: stale,
+				manifestSha256: shaOf(stale),
+				limit: 10,
+				sender: { send: async () => "x" },
+				...ACTOR,
+			}),
 		).toMatchObject({
 			drift: expect.stringMatching(/count/),
 			applied: [],
@@ -311,6 +321,7 @@ describe("IT-SNT-C-007 verifier-only resume of cases parked for review", () => {
 		const sends: string[] = [];
 		const applied = await applyResumeForVerify({
 			manifest,
+			manifestSha256: shaOf(manifest),
 			limit: 1,
 			sender: {
 				send: async (_q, data: { promptRunId: string }) => {
@@ -322,6 +333,11 @@ describe("IT-SNT-C-007 verifier-only resume of cases parked for review", () => {
 		});
 		expect(applied.drift).toBeNull();
 		expect(applied.applied).toHaveLength(1);
+		expect(applied.applied[0].permit).toBe("issued");
+		expect(
+			(await client.query("SELECT contract_sha256 FROM sentiment_dispatch_permits WHERE id = $1", [applied.applied[0].permitId]))
+				.rows[0].contract_sha256,
+		).toBe(shaOf(manifest));
 		expect(sends).toEqual([manifest.eligible[0].promptRunId]);
 		const firstRun = manifest.eligible[0].promptRunId;
 		// The resumed job makes exactly one verify call and no classify or repair.
@@ -346,7 +362,13 @@ describe("IT-SNT-C-007 verifier-only resume of cases parked for review", () => {
 		expect(permit).toMatchObject({ state: "exhausted", phase_budget: { classify: 0, repair: 0, verify: 0 } });
 		expect(Number(permit.settled_cost_usd)).toBeCloseTo(0.001, 6);
 		// A second apply from the same manifest now drifts (the first case left the selection); nothing broadens.
-		const again = await applyResumeForVerify({ manifest, limit: 10, sender: { send: async () => "x" }, ...ACTOR });
+		const again = await applyResumeForVerify({
+			manifest,
+			manifestSha256: shaOf(manifest),
+			limit: 10,
+			sender: { send: async () => "x" },
+			...ACTOR,
+		});
 		expect(again.drift).toMatch(/count/);
 		expect(again.applied).toEqual([]);
 		// The not-yet-permitted case is still not touched by any automatic path.
@@ -357,5 +379,139 @@ describe("IT-SNT-C-007 verifier-only resume of cases parked for review", () => {
 		expect((await listResumableSentimentRuns(1000)).map((r) => r.promptRunId)).not.toContain(
 			manifest.eligible[1].promptRunId,
 		);
+	});
+});
+
+describe("IT-SNT-C-008 a resume authorization survives a failed send and an expired permit (Amendment C, F-1)", () => {
+	it("send failure is reported per case; the same manifest reuses the permit and retries the singleton send; an expired unconsumed permit is expired durably and replaced", async () => {
+		await parkForReview(run(8));
+		await setDispatch("held");
+		const manifest = await selectResumableForVerify();
+		const sha = shaOf(manifest);
+		const target = manifest.eligible.find((e) => e.promptRunId === run(8));
+		expect(target).toBeDefined();
+		const failing = {
+			send: async () => {
+				throw new Error("queue unavailable");
+			},
+		};
+		// 1. The permit transaction commits, the send fails: reported per case, nothing thrown, the permit stands.
+		const first = await applyResumeForVerify({ manifest, manifestSha256: sha, limit: 50, sender: failing, ...ACTOR });
+		expect(first.drift).toBeNull();
+		const failed = first.failed.find((f) => f.analysisId === target?.analysisId);
+		expect(failed).toMatchObject({ error: "Error" });
+		expect(await listPermits({ analysisId: target?.analysisId, live: true })).toHaveLength(1);
+		// 2. Repeating the same manifest reuses that permit and retries the send — no second authorization.
+		const sends: string[] = [];
+		const sender = {
+			send: async (_q: string, data: { promptRunId: string }) => {
+				sends.push(data.promptRunId);
+				return `job-${sends.length}`;
+			},
+		};
+		const second = await applyResumeForVerify({ manifest, manifestSha256: sha, limit: 50, sender, ...ACTOR });
+		const reused = second.applied.find((a) => a.analysisId === target?.analysisId);
+		expect(reused).toMatchObject({ permit: "reused", permitId: failed?.permitId });
+		expect(sends).toContain(run(8));
+		expect(await listPermits({ analysisId: target?.analysisId })).toHaveLength(1);
+		// 3. A different manifest hash is not this permit's contract: refused, typed, no write.
+		const other = await applyResumeForVerify({
+			manifest,
+			manifestSha256: "f".repeat(64),
+			limit: 50,
+			sender,
+			...ACTOR,
+		});
+		expect(other.skipped.find((x) => x.analysisId === target?.analysisId)).toMatchObject({ reason: "permit-mismatch" });
+		// 4. The unconsumed permit expires by the database clock: it is expired durably (one audit event) and replaced.
+		await client.query("UPDATE sentiment_dispatch_permits SET expires_at = now() - interval '1 second' WHERE id = $1", [
+			failed?.permitId,
+		]);
+		expect(await listPermits({ analysisId: target?.analysisId, live: true })).toHaveLength(0);
+		const third = await applyResumeForVerify({ manifest, manifestSha256: sha, limit: 50, sender, ...ACTOR });
+		const replaced = third.applied.find((a) => a.analysisId === target?.analysisId);
+		expect(replaced).toMatchObject({ permit: "replaced-expired" });
+		expect(replaced?.permitId).not.toBe(failed?.permitId);
+		const rows = await listPermits({ analysisId: target?.analysisId });
+		expect(rows.map((r) => `${r.state}:${r.effective}`).sort()).toEqual(["expired:false", "issued:true"]);
+		expect((await listControlEvents("permit", failed?.permitId ?? "")).map((e) => `${e.fromState}->${e.toState}`)).toEqual([
+			"null->issued",
+			"issued->expired",
+		]);
+		// 5. A consumed (active) permit is never replaced automatically: the case is refused with a typed reason.
+		await client.query(
+			"UPDATE sentiment_dispatch_permits SET state = 'active', expires_at = now() - interval '1 second' WHERE id = $1",
+			[replaced?.permitId],
+		);
+		const fourth = await applyResumeForVerify({ manifest, manifestSha256: sha, limit: 50, sender, ...ACTOR });
+		expect(fourth.skipped.find((x) => x.analysisId === target?.analysisId)).toMatchObject({ reason: "permit-consumed" });
+		expect(await listPermits({ analysisId: target?.analysisId })).toHaveLength(2);
+	});
+});
+
+describe("IT-SNT-C-009 a verifier rejection under a resume permit returns the case to human review (Amendment C, F-6)", () => {
+	it("no repair or classify, no retry wait: awaiting_review/verifier-rejected with the candidate and issues kept, excluded from rediscovery even when open, permit exhausted", async () => {
+		await parkForReview(run(9));
+		await setDispatch("held");
+		const manifest = await selectResumableForVerify();
+		const sha = shaOf(manifest);
+		const sends: string[] = [];
+		const applied = await applyResumeForVerify({
+			manifest,
+			manifestSha256: sha,
+			limit: 50,
+			sender: {
+				send: async (_q: string, data: { promptRunId: string }) => {
+					sends.push(data.promptRunId);
+					return "job";
+				},
+			},
+			...ACTOR,
+		});
+		const analysis9 = await analysisOf(run(9));
+		const mine = applied.applied.find((a) => a.analysisId === analysis9.id);
+		expect(mine).toBeDefined();
+		const { provider, script } = scripted([
+			{
+				phase: "verify",
+				answer: {
+					verdict: "reject",
+					issues: [{ entityKey: "brand", target: "overall", code: "polarity-mismatch", anchorId: "s0001" }],
+				},
+			},
+		]);
+		const outcome = await runSentimentJob(payload(run(9)), { resolveProvider: () => provider });
+		expect(outcome).toMatchObject({ status: "awaiting-review", reason: "verifier-rejected", paidCalls: 2 });
+		expect(script.calls).toEqual(["verify"]);
+		const kase = await caseOf(run(9));
+		expect(kase).toMatchObject({ status: "awaiting_review", review_reason: "verifier-rejected", next_attempt_at: null });
+		expect(kase.provisional_result).toMatchObject({ entities: [expect.objectContaining({ key: "brand" })] });
+		expect(kase.unresolved_targets).toEqual([expect.objectContaining({ entityKey: "brand", aspectKey: null })]);
+		expect(await analysisOf(run(9))).toMatchObject({ status: "pending_resolution" });
+		const attempts = await attemptsOf(run(9));
+		expect(attempts.map((a) => `${a.phase}:${a.outcome}`)).toEqual([
+			"classify:accepted",
+			"verify:provider-error",
+			// A valid reject verdict is an accepted (usable, paid) answer of the verify attempt; the verdict lives in the case.
+			"verify:accepted",
+		]);
+		expect(attempts[2].generation_id).toMatch(/^gen-/);
+		const permit = (
+			await client.query("SELECT state, phase_budget, settled_cost_usd::text FROM sentiment_dispatch_permits WHERE id = $1", [
+				mine?.permitId,
+			])
+		).rows[0];
+		expect(permit).toMatchObject({ state: "exhausted", phase_budget: { classify: 0, repair: 0, verify: 0 } });
+		expect(Number(permit.settled_cost_usd)).toBeCloseTo(0.001, 6);
+		// Not rediscovered by the inventory under OPEN, not re-selected by the resume selector, and a re-run makes no call.
+		await setDispatch("open");
+		expect((await listResumableSentimentRuns(1000)).map((r) => r.promptRunId)).not.toContain(run(9));
+		expect((await selectResumableForVerify()).eligible.map((e) => e.promptRunId)).not.toContain(run(9));
+		const again = scripted([{ phase: "repair", answer: { entities: [brandOk] } }, { phase: "verify", answer: ACCEPT }]);
+		expect(await runSentimentJob(payload(run(9)), { resolveProvider: () => again.provider })).toMatchObject({
+			status: "awaiting-review",
+			reason: "verifier-rejected",
+		});
+		expect(again.script.calls).toEqual([]);
 	});
 });
