@@ -428,8 +428,9 @@ async function verifyCascade(client: Client): Promise<void> {
 /**
  * Amendment C dispatch controls as the database enforces them: the seeded
  * `dispatch` control row exists in a known state, unknown states and
- * over-budget or malformed permits are rejected, and the audit sequence is
- * unique per subject. No provider, no worker handler.
+ * over-budget or malformed permits are rejected, a resume permit is verify-only
+ * and bound to its manifest, the review reasons are the known set, and the
+ * audit sequence is unique per subject. No provider, no worker handler.
  */
 async function verifyDispatchControls(client: Client): Promise<void> {
 	const control = await client.query<{ state: string; epoch: number }>(
@@ -474,7 +475,39 @@ async function verifyDispatchControls(client: Client): Promise<void> {
 			'{"classify":1,"other":1}',
 			"0.05",
 		]);
+		const resume = `INSERT INTO sentiment_dispatch_permits (purpose, prompt_run_id, analysis_id, instance_id, input_hash, classifier_version, provider, model, phase_budget, estimated_cost_budget_usd, expires_at, issued_by, reason, correlation_id, contract_sha256) VALUES ('resume-verify', $1, $2, gen_random_uuid(), 'h', 'v', 'openrouter', 'm', $3::jsonb, 0.02, now() + interval '1 hour', 'verify', 'r', 'c', $4)`;
+		await expectRejected(client, "a resume permit with a classify budget", resume, [
+			RUN,
+			analysis.rows[0].id,
+			'{"classify":1,"repair":0,"verify":1}',
+			"a".repeat(64),
+		]);
+		await expectRejected(client, "a resume permit with a repair budget", resume, [
+			RUN,
+			analysis.rows[0].id,
+			'{"classify":0,"repair":1,"verify":1}',
+			"a".repeat(64),
+		]);
+		await expectRejected(client, "a resume permit without its manifest hash", resume, [
+			RUN,
+			analysis.rows[0].id,
+			'{"classify":0,"repair":0,"verify":1}',
+			null,
+		]);
 	}
+	await expectRejected(
+		client,
+		"an unknown review reason",
+		"INSERT INTO sentiment_resolution_cases (analysis_id, input_hash, status, review_reason) SELECT id, 'h', 'awaiting_review', 'bogus' FROM sentiment_analyses WHERE prompt_run_id = $1 LIMIT 1",
+		[RUN],
+	);
+	const reasons = await client.query<{ def: string }>(
+		"SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'sentiment_resolution_cases_review_reason_check'",
+	);
+	assert(
+		reasons.rows[0]?.def.includes("'verifier-rejected'") && reasons.rows[0]?.def.includes("'retry-exhausted'"),
+		"the review-reason CHECK names retry-exhausted and verifier-rejected",
+	);
 	await expectRejected(
 		client,
 		"a duplicate audit sequence",
