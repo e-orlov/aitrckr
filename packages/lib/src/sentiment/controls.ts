@@ -6,6 +6,7 @@ import {
 	sentimentControlEvents,
 	sentimentControls,
 	sentimentDispatchPermits,
+	sentimentProviderAttempts,
 } from "../db/schema";
 import type { Executor } from "./store";
 import { SENTIMENT_MODEL, SENTIMENT_PROVIDER_ID } from "./types";
@@ -206,20 +207,110 @@ export interface IssuePermitArgs extends ControlActor {
 
 const money = (value: number): string => value.toFixed(6);
 
+/** The states in which a permit row may still authorize a call (subject to its expiry by the database clock). */
+export const PERMIT_LIVE_STATES = ["issued", "active"] as const;
+
+/** The only phase budget a resume permit may carry at issue time. */
+export const RESUME_VERIFY_PHASE_BUDGET: Readonly<PhaseBudget> = Object.freeze({ classify: 0, repair: 0, verify: 1 });
+
+export const isResumeVerifyBudget = (budget: PhaseBudget): boolean =>
+	budget.classify === 0 && budget.repair === 0 && budget.verify === 1;
+
+/** Live state and unexpired by the given database clock: what "live" means everywhere a permit is read. */
+export function isPermitEffective(permit: { state: string; expiresAt: Date }, databaseNow: Date): boolean {
+	return (
+		(PERMIT_LIVE_STATES as readonly string[]).includes(permit.state) &&
+		permit.expiresAt.getTime() > databaseNow.getTime()
+	);
+}
+
 /**
- * Issue the one live permit of a lifecycle. Bound to the analysis, its
- * current instance and the exact input; the partial unique index refuses a
- * second live permit for the same instance. The estimated budget is a
- * planning figure bounded by {@link PERMIT_ESTIMATED_BUDGET_MAX_USD}.
+ * A live-state permit already occupies this lifecycle and cannot be replaced
+ * automatically: it is still valid (`permit-live`), it has consumed a phase
+ * (`permit-consumed`, whether or not it has since expired), or one of its
+ * attempts is still `sending` (`permit-unresolved-attempt`). Each is the
+ * operator's decision — revoke, reconcile — never the issuer's.
  */
-export async function issuePermit(args: IssuePermitArgs, executor: Executor = db): Promise<SentimentDispatchPermit> {
-	const who = requireActor(args);
+export class PermitConflictError extends Error {
+	constructor(
+		readonly code: "permit-live" | "permit-consumed" | "permit-unresolved-attempt",
+		readonly permitId: string,
+	) {
+		super(`cannot issue a permit: ${code} (${permitId})`);
+		this.name = "PermitConflictError";
+	}
+}
+
+/**
+ * Durably expire the unconsumed (`issued`) permits of a lifecycle whose
+ * `expires_at` has passed by the database clock, one audit event each. Runs
+ * inside the caller's transaction with the rows locked, so a concurrent issuer
+ * or consumer sees the transition. Permits that consumed a phase or carry an
+ * unresolved `sending` attempt are never touched here.
+ */
+export async function expireUnconsumedPermits(
+	tx: Executor,
+	args: { analysisId: string; instanceId: string },
+): Promise<{ expired: string[]; blocking: { id: string; code: PermitConflictError["code"] }[] }> {
+	const live = await tx
+		.select({
+			id: sentimentDispatchPermits.id,
+			state: sentimentDispatchPermits.state,
+			expired: sql<boolean>`${sentimentDispatchPermits.expiresAt} <= now()`,
+			sending: sql<boolean>`exists (select 1 from ${sentimentProviderAttempts} where ${sentimentProviderAttempts.permitId} = ${sentimentDispatchPermits.id} and ${sentimentProviderAttempts.outcome} = 'sending')`,
+		})
+		.from(sentimentDispatchPermits)
+		.where(
+			and(
+				eq(sentimentDispatchPermits.analysisId, args.analysisId),
+				eq(sentimentDispatchPermits.instanceId, args.instanceId),
+				inArray(sentimentDispatchPermits.state, [...PERMIT_LIVE_STATES]),
+			),
+		)
+		.orderBy(sentimentDispatchPermits.id)
+		.for("update");
+	const expired: string[] = [];
+	const blocking: { id: string; code: PermitConflictError["code"] }[] = [];
+	for (const permit of live) {
+		if (permit.sending) blocking.push({ id: permit.id, code: "permit-unresolved-attempt" });
+		else if (!permit.expired) blocking.push({ id: permit.id, code: "permit-live" });
+		else if (permit.state !== "issued") blocking.push({ id: permit.id, code: "permit-consumed" });
+		else {
+			await tx
+				.update(sentimentDispatchPermits)
+				.set({ state: "expired" })
+				.where(and(eq(sentimentDispatchPermits.id, permit.id), eq(sentimentDispatchPermits.state, "issued")));
+			await appendControlEvent(tx, {
+				subjectKind: "permit",
+				subjectKey: permit.id,
+				fromState: "issued",
+				toState: "expired",
+				evidence: { reason: "expires_at passed by the database clock before any phase was consumed" },
+				actor: "system:permit-expiry",
+				reason: "unconsumed permit expired",
+				correlationId: "amendment-c",
+			});
+			expired.push(permit.id);
+		}
+	}
+	return { expired, blocking };
+}
+
+function validatePermitShape(args: IssuePermitArgs): void {
 	if (!PERMIT_PURPOSES.includes(args.purpose)) throw new Error(`unknown permit purpose "${args.purpose}"`);
 	for (const phase of PERMIT_PHASES) {
 		const v = args.phaseBudget[phase];
 		if (v !== 0 && v !== 1) throw new Error(`phase budget for ${phase} must be 0 or 1`);
 	}
 	if (!Object.values(args.phaseBudget).some((v) => v === 1)) throw new Error("a permit must allow at least one phase");
+	if (args.purpose === "resume-verify") {
+		if (!isResumeVerifyBudget(args.phaseBudget)) {
+			throw new Error('a resume-verify permit must carry exactly {"classify":0,"repair":0,"verify":1}');
+		}
+		if (!args.contractSha256 || !/^[0-9a-f]{64}$/i.test(args.contractSha256)) {
+			throw new Error("a resume-verify permit must be bound to the sha256 of the frozen manifest it was issued from");
+		}
+	}
 	if (
 		!Number.isFinite(args.estimatedCostBudgetUsd) ||
 		args.estimatedCostBudgetUsd <= 0 ||
@@ -228,7 +319,24 @@ export async function issuePermit(args: IssuePermitArgs, executor: Executor = db
 		throw new Error(`estimated cost budget must be in (0, ${PERMIT_ESTIMATED_BUDGET_MAX_USD}] USD`);
 	}
 	if (!Number.isInteger(args.ttlSeconds) || args.ttlSeconds <= 0) throw new Error("ttl must be a positive integer");
+}
+
+/**
+ * Issue the one live permit of a lifecycle. Bound to the analysis, its
+ * current instance and the exact input; a resume permit is additionally
+ * verify-only and bound to its manifest. An expired, unconsumed permit of the
+ * same lifecycle is expired durably in the same transaction (one audit event)
+ * before the replacement is inserted; any other live-state permit refuses the
+ * issue with a typed {@link PermitConflictError}. The partial unique index
+ * remains the last guard against a concurrent issuer. The estimated budget is
+ * a planning figure bounded by {@link PERMIT_ESTIMATED_BUDGET_MAX_USD}.
+ */
+export async function issuePermit(args: IssuePermitArgs, executor: Executor = db): Promise<SentimentDispatchPermit> {
+	const who = requireActor(args);
+	validatePermitShape(args);
 	return executor.transaction(async (tx) => {
+		const stale = await expireUnconsumedPermits(tx, { analysisId: args.analysisId, instanceId: args.instanceId });
+		if (stale.blocking.length > 0) throw new PermitConflictError(stale.blocking[0].code, stale.blocking[0].id);
 		const [row] = await tx
 			.insert(sentimentDispatchPermits)
 			.values({
@@ -260,11 +368,24 @@ export async function issuePermit(args: IssuePermitArgs, executor: Executor = db
 				instanceId: args.instanceId,
 				phaseBudget: args.phaseBudget,
 				estimatedCostBudgetUsd: money(args.estimatedCostBudgetUsd),
+				contractSha256: args.contractSha256 ?? null,
+				replacedExpired: stale.expired,
 			},
 			...who,
 		});
 		return row;
 	});
+}
+
+/** One permit row by id (the boundary guard's re-authorization read). */
+export async function loadPermit(id: string, executor: Executor = db): Promise<SentimentDispatchPermit | null> {
+	const row = await executor.query.sentimentDispatchPermits.findFirst({ where: eq(sentimentDispatchPermits.id, id) });
+	return row ?? null;
+}
+
+/** Which phases a permit's purpose may ever authorize, independent of the remaining budget. */
+export function permitPurposeAllowsPhase(purpose: string, phase: PermitPhase): boolean {
+	return purpose === "resume-verify" ? phase === "verify" : purpose === "canary";
 }
 
 /** The live permit bound to exactly this instance and input, if any (expiry judged by the database clock). */
@@ -327,13 +448,10 @@ export async function consumePermitPhase(
 	if (row) return { consumed: true, permitId: row.id, reservedEstimateUsd: args.reserveUsd };
 	const live = await findLivePermit(args, tx);
 	if (!live) {
-		const any = await tx.query.sentimentDispatchPermits.findFirst({
-			where: and(
-				eq(sentimentDispatchPermits.analysisId, args.analysisId),
-				eq(sentimentDispatchPermits.instanceId, args.instanceId),
-				inArray(sentimentDispatchPermits.state, ["issued", "active"]),
-			),
-		});
+		// A live-state permit that only failed the clock predicate is expired durably here (this is a mutating path);
+		// a permit that already consumed a phase keeps its state for reconciliation and is merely reported.
+		const stale = await expireUnconsumedPermits(tx, { analysisId: args.analysisId, instanceId: args.instanceId });
+		const any = stale.expired.length > 0 || stale.blocking.some((b) => b.code !== "permit-live");
 		return { consumed: false, reason: any ? "expired" : "no-live-permit" };
 	}
 	const budget = live.phaseBudget as Partial<Record<string, number>>;
@@ -342,21 +460,41 @@ export async function consumePermitPhase(
 }
 
 /**
- * Settle the permit side of one attempt: the reservation is released and,
- * for a paid answer, the settled amount grows by what the provider charged.
- * When every phase is spent the permit becomes `exhausted`; a permit is never
+ * How one attempt ended, as far as the permit's planning ledger is concerned:
+ *  - `unpaid`: the request demonstrably cost nothing (local or structured refusal, guard abort) — the reservation is released;
+ *  - `paid`: the provider charged a known amount — the reservation is released and the amount settled;
+ *  - `paid-unknown-cost`: the provider answered but reported no cost — the reservation stays counted against the
+ *    budget and nothing is settled, so an unpriced call is never mistaken for a free one.
+ * An attempt whose outcome is unknown is not settled at all (reconciliation keeps its reservation).
+ */
+export type PermitSettlement =
+	| { kind: "unpaid" }
+	| { kind: "paid"; actualCostUsd: number }
+	| { kind: "paid-unknown-cost" };
+
+export function permitSettlementFor(paid: boolean, actualCostUsd: number | null): PermitSettlement {
+	if (!paid) return { kind: "unpaid" };
+	return actualCostUsd === null ? { kind: "paid-unknown-cost" } : { kind: "paid", actualCostUsd };
+}
+
+/**
+ * Settle the permit side of one attempt per {@link PermitSettlement}. When
+ * every phase is spent the permit becomes `exhausted`; a permit is never
  * refunded here — a dangling `sending` attempt keeps its reservation until an
  * operator reconciles it.
  */
 export async function settlePermitReservation(
 	tx: Executor,
-	args: { permitId: string; reservedEstimateUsd: number; actualCostUsd: number | null },
+	args: { permitId: string; reservedEstimateUsd: number; settlement: PermitSettlement },
 ): Promise<void> {
-	const actual = money(Math.max(0, args.actualCostUsd ?? 0));
+	const releases = args.settlement.kind !== "paid-unknown-cost";
+	const actual = money(args.settlement.kind === "paid" ? Math.max(0, args.settlement.actualCostUsd) : 0);
 	await tx
 		.update(sentimentDispatchPermits)
 		.set({
-			reservedEstimateUsd: sql`greatest(${sentimentDispatchPermits.reservedEstimateUsd} - ${money(args.reservedEstimateUsd)}::numeric, 0)`,
+			reservedEstimateUsd: releases
+				? sql`greatest(${sentimentDispatchPermits.reservedEstimateUsd} - ${money(args.reservedEstimateUsd)}::numeric, 0)`
+				: sentimentDispatchPermits.reservedEstimateUsd,
 			settledCostUsd: sql`${sentimentDispatchPermits.settledCostUsd} + ${actual}::numeric`,
 			state: sql`case when coalesce((${sentimentDispatchPermits.phaseBudget}->>'classify')::int,0) + coalesce((${sentimentDispatchPermits.phaseBudget}->>'repair')::int,0) + coalesce((${sentimentDispatchPermits.phaseBudget}->>'verify')::int,0) = 0 then 'exhausted' else ${sentimentDispatchPermits.state} end`,
 		})
@@ -397,21 +535,34 @@ export async function revokePermit(
 	});
 }
 
-/** Permits newest first (identifiers, budgets, amounts, states — never prompts or answers). */
+/** A permit row plus whether it is effective right now by the database clock (stored state and eligibility stay distinguishable). */
+export type ListedPermit = SentimentDispatchPermit & { effective: boolean };
+
+/**
+ * Permits newest first (identifiers, budgets, amounts, states — never prompts
+ * or answers). `live` selects only permits in a live state whose expiry has
+ * not passed by the database clock; a stale row that no mutating path has
+ * transitioned yet is therefore never reported as live. Read-only.
+ */
 export async function listPermits(
 	filter: { analysisId?: string; live?: boolean } = {},
 	executor: Executor = db,
-): Promise<SentimentDispatchPermit[]> {
+): Promise<ListedPermit[]> {
+	const effective = and(
+		inArray(sentimentDispatchPermits.state, [...PERMIT_LIVE_STATES]),
+		sql`${sentimentDispatchPermits.expiresAt} > now()`,
+	);
 	const conditions = [
 		filter.analysisId ? eq(sentimentDispatchPermits.analysisId, filter.analysisId) : undefined,
-		filter.live ? inArray(sentimentDispatchPermits.state, ["issued", "active"]) : undefined,
+		filter.live ? effective : undefined,
 	].filter((c): c is NonNullable<typeof c> => c !== undefined);
-	return executor
-		.select()
+	const rows = await executor
+		.select({ permit: sentimentDispatchPermits, effective: sql<boolean>`coalesce(${effective}, false)` })
 		.from(sentimentDispatchPermits)
 		.where(conditions.length > 0 ? and(...conditions) : undefined)
 		.orderBy(desc(sentimentDispatchPermits.issuedAt))
 		.limit(200);
+	return rows.map((r) => ({ ...r.permit, effective: r.effective }));
 }
 
 /** Events of one subject in sequence order. */

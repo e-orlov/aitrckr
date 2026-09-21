@@ -16,6 +16,7 @@ import {
 	openBreaker,
 	readBreaker,
 	settleProbe,
+	type ProbeOutcome,
 } from "./breaker";
 import {
 	assessCandidate,
@@ -33,7 +34,12 @@ import {
 	type DispatchState,
 	findLivePermit,
 	isHeld,
+	isPermitEffective,
+	loadPermit,
 	type PermitPhase,
+	type PermitPurpose,
+	permitPurposeAllowsPhase,
+	permitSettlementFor,
 	RESERVATION_ESTIMATES_USD,
 	readDispatchState,
 	settlePermitReservation,
@@ -225,6 +231,7 @@ export interface DispatchDeps {
 	openBreaker: typeof openBreaker;
 	settleProbe: typeof settleProbe;
 	loadAttemptDispatch: typeof loadAttemptDispatch;
+	loadPermit: typeof loadPermit;
 }
 
 const PRODUCTION_DISPATCH: DispatchDeps = {
@@ -238,6 +245,7 @@ const PRODUCTION_DISPATCH: DispatchDeps = {
 	openBreaker,
 	settleProbe,
 	loadAttemptDispatch,
+	loadPermit,
 };
 
 const dispatchDeps = (deps: SentimentJobDeps): DispatchDeps => ({ ...PRODUCTION_DISPATCH, ...deps.dispatch });
@@ -264,7 +272,17 @@ export interface DispatchContext {
 export class SentimentDispatchHeldError extends Error {
 	readonly requestSent = false as const;
 	constructor(
-		readonly code: "no-dispatch-context" | "fingerprint-mismatch" | "held-without-permit" | "attempt-not-sending",
+		readonly code:
+			| "no-dispatch-context"
+			| "fingerprint-mismatch"
+			| "held-without-permit"
+			| "attempt-not-sending"
+			| "attempt-evidence-mismatch"
+			| "permit-ineligible"
+			| "breaker-open"
+			| "probe-lost",
+		/** For `breaker-open`: when the scope may be probed again, so the case parks until then. */
+		readonly until: Date | null = null,
 	) {
 		super(`dispatch refused at the provider boundary: ${code}`);
 		this.name = "SentimentDispatchHeldError";
@@ -386,6 +404,8 @@ interface Workflow {
 	/** Set for exactly the duration of one authorized request; read by the guarded provider. */
 	dispatch: DispatchContext | null;
 	controls: DispatchDeps;
+	/** The purpose of the permit that let a parked case resume, when it did: a resume permit authorizes verification only. */
+	resumePermitPurpose: PermitPurpose | null;
 }
 
 type PaidPhase = PermitPhase;
@@ -460,7 +480,7 @@ async function settlePaidAnswer(
 			// The usage event is written with the first settlement only, so a replay never attributes twice.
 			if (settled === "settled") {
 				await recordUsage({ ...usage, ...attribution, succeeded: args.succeeded, actualCostUsd: args.costUsd }, tx);
-				await settleDispatch(w, dispatch, { accepted: true, actualCostUsd: args.costUsd }, tx);
+				await settleDispatch(w, dispatch, { paid: true, actualCostUsd: args.costUsd, probe: "accepted" }, tx);
 			}
 		}),
 	);
@@ -527,13 +547,18 @@ function heldOutcome(
 }
 
 /**
- * The provider every request of a lifecycle goes through. It re-checks, right
- * before the adapter's network call, that the request carries the
- * authorization the dispatch transaction granted: a context exists, the
- * document's shape and request profile equal the recorded ones, the attempt
- * row is still `sending` with the same permit, and a held dispatch is backed
- * by a permit. Any mismatch is refused without a request — that is a defect
- * of an earlier gate, surfaced loudly rather than dispatched.
+ * The provider every request of a lifecycle goes through — the linearization
+ * point of dispatch authorization. Immediately before the adapter's network
+ * call it re-reads, from the database, everything T1 decided on: the attempt
+ * still `sending` with exactly the recorded permit, scope and shape (which must
+ * also equal what is about to be sent); the hold (held ⇒ a permit is required);
+ * the permit itself — bound to this analysis, instance and input, in a live
+ * state, unexpired by the database clock and of a purpose that authorizes this
+ * phase; and the breaker of the exact scope — absent or closed, or half-open
+ * with this attempt owning the still-live probe lease. A breaker opened by a
+ * concurrent transaction after T1 is therefore refused here with no request;
+ * only a request already past this read is the documented in-flight residual.
+ * Any mismatch is refused without a request and surfaced as a gate breach.
  */
 function guardProvider(provider: Provider, w: Workflow): Provider {
 	const research = provider.runStructuredResearch?.bind(provider);
@@ -550,11 +575,43 @@ function guardProvider(provider: Provider, w: Workflow): Provider {
 				throw new SentimentDispatchHeldError("fingerprint-mismatch");
 			}
 			const attempt = await w.controls.loadAttemptDispatch(context.attemptId);
-			if (attempt?.outcome !== "sending" || (attempt.permitId ?? null) !== context.permitId) {
-				throw new SentimentDispatchHeldError("attempt-not-sending");
+			if (attempt?.outcome !== "sending") throw new SentimentDispatchHeldError("attempt-not-sending");
+			if (
+				(attempt.permitId ?? null) !== context.permitId ||
+				attempt.scopeKey !== scopeKey ||
+				attempt.schemaFp !== schemaFp
+			) {
+				throw new SentimentDispatchHeldError("attempt-evidence-mismatch");
 			}
-			if (isHeld(await w.controls.readDispatchState()) && context.permitId === null) {
-				throw new SentimentDispatchHeldError("held-without-permit");
+			const held = isHeld(await w.controls.readDispatchState());
+			if (held && context.permitId === null) throw new SentimentDispatchHeldError("held-without-permit");
+			if (context.permitId !== null) {
+				const permit = await w.controls.loadPermit(context.permitId);
+				const now = await w.controls.databaseNow();
+				if (
+					!permit ||
+					permit.analysisId !== w.claim.analysisId ||
+					permit.instanceId !== w.claim.instanceId ||
+					permit.inputHash !== w.inputHash ||
+					!isPermitEffective(permit, now) ||
+					!permitPurposeAllowsPhase(permit.purpose, context.phase)
+				) {
+					throw new SentimentDispatchHeldError("permit-ineligible");
+				}
+			}
+			const breaker = await w.controls.readBreaker(scopeKey);
+			if (breaker && breaker.state !== "closed") {
+				const now = await w.controls.databaseNow();
+				if (breaker.state === "open") {
+					throw new SentimentDispatchHeldError("breaker-open", breaker.openUntil);
+				}
+				const ownsLiveProbe =
+					context.probeGeneration !== null &&
+					breaker.probeAttemptId === context.attemptId &&
+					breaker.probeGeneration === context.probeGeneration &&
+					breaker.probeLeaseUntil !== null &&
+					breaker.probeLeaseUntil.getTime() > now.getTime();
+				if (!ownsLiveProbe) throw new SentimentDispatchHeldError("probe-lost", breaker.probeLeaseUntil);
 			}
 			return research(options);
 		},
@@ -669,22 +726,23 @@ async function recordBreakerOpen(w: Workflow, evidence: Parameters<typeof openBr
 
 /**
  * Settle the dispatch side of an attempt together with its ledger row: the
- * permit reservation is released (and the settled amount grows by what the
- * provider charged), and a probe lease is closed or re-opened. An unknown
- * outcome settles nothing — the reservation and the lease stand until the
- * attempt is reconciled or the lease expires.
+ * permit reservation per the settlement contract (released for a known-unpaid
+ * or priced answer, kept counted for a paid answer of unknown cost), and the
+ * probe lease closed, re-opened, released or left standing. An unknown outcome
+ * settles nothing — the reservation and the lease stand until the attempt is
+ * reconciled or the lease expires.
  */
 async function settleDispatch(
 	w: Workflow,
 	dispatch: DispatchContext,
-	result: { accepted: boolean; actualCostUsd: number | null; failureClass?: DispatchFailureClass },
+	result: { paid: boolean; actualCostUsd: number | null; probe: ProbeOutcome },
 	tx: Executor,
 ): Promise<void> {
 	if (dispatch.permitId && dispatch.reservedEstimateUsd !== null) {
 		await w.controls.settlePermitReservation(tx, {
 			permitId: dispatch.permitId,
 			reservedEstimateUsd: dispatch.reservedEstimateUsd,
-			actualCostUsd: result.actualCostUsd,
+			settlement: permitSettlementFor(result.paid, result.actualCostUsd),
 		});
 	}
 	if (dispatch.probeGeneration !== null) {
@@ -692,8 +750,7 @@ async function settleDispatch(
 			scopeKey: dispatch.scopeKey,
 			attemptId: dispatch.attemptId,
 			generation: dispatch.probeGeneration,
-			accepted: result.accepted,
-			failureClass: result.failureClass,
+			outcome: result.probe,
 		});
 	}
 }
@@ -717,14 +774,18 @@ async function requestFailure(
 	const safe = sanitizeSentimentError(error);
 	const finish = w.deps.finishProviderAttempt ?? finishProviderAttempt;
 	const transaction = w.deps.transaction ?? runInTransaction;
-	const closeUnpaid = (outcome: "provider-error" | "aborted", failureClass?: DispatchFailureClass) =>
+	const closeUnpaid = (outcome: "provider-error" | "aborted", probe: ProbeOutcome) =>
 		transaction(async (tx) => {
 			await finish(attempt.id, { outcome }, tx);
-			await settleDispatch(w, dispatch, { accepted: false, actualCostUsd: null, failureClass }, tx);
+			await settleDispatch(w, dispatch, { paid: false, actualCostUsd: null, probe }, tx);
 		});
 	if (error instanceof SentimentDispatchHeldError) {
+		// Nothing left: the attempt is a known-unpaid abort, its reservation is released and its probe lease freed.
+		await closeUnpaid("aborted", "released");
+		if (error.code === "breaker-open" || error.code === "probe-lost") {
+			return heldOutcome(error.code === "breaker-open" ? "breaker-open" : "probe-in-progress", error.until, error.code);
+		}
 		console.error(`[sentiment] gate-breach on analysis ${w.claim.analysisId} (${phase}): ${error.code}`);
-		await closeUnpaid("aborted");
 		return heldOutcome("dispatch-held", null, `gate-breach:${error.code}`);
 	}
 	if (safe.requestSent && safe.envelope?.generationId) {
@@ -759,8 +820,10 @@ async function requestFailure(
 		});
 	}
 	const routed = routeFailure(error, safe);
+	// Only a deterministic refusal re-opens a probing scope; a transient or configuration refusal leaves the lease standing.
+	const probe: ProbeOutcome = BREAKER_OPENING_CLASSES.has(failureClass) ? "refused" : "untouched";
 	if (routed.route === "retry") {
-		await closeUnpaid("provider-error", failureClass);
+		await closeUnpaid("provider-error", probe);
 		w.consecutiveFailures += 1;
 		if (w.consecutiveFailures >= w.policy.maxConsecutiveTransientFailures) {
 			return new HandOver("retry-exhausted", attempt.ordinal, safe);
@@ -774,7 +837,7 @@ async function requestFailure(
 	}
 	if (routed.route === "review") {
 		// The provider refused the request itself, or it never left for a local defect: the operator's, not the queue's.
-		await closeUnpaid("provider-error", failureClass);
+		await closeUnpaid("provider-error", probe);
 		return new HandOver("contract-defect", attempt.ordinal, safe);
 	}
 	// Unknown outcome: the row keeps `sending` (or `aborted`) as the reconciliation record; the permit reservation and
@@ -1181,6 +1244,9 @@ async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 			if (verdict.verdict === "accept") return await persistVerified(w, assessment);
 			w.verifierRejections += 1;
 			pending = verifierIssuesToTargets(verdict.issues);
+			// A resume permit authorizes verification only: a rejected verdict is the operator's decision (D14), never a
+			// repair or classify request and never a retry wait.
+			if (w.resumePermitPurpose === "resume-verify") throw new HandOver("verifier-rejected", w.paidCalls);
 		}
 	} catch (error) {
 		return leaveWorkflow(w, error, candidate, pending);
@@ -1412,7 +1478,7 @@ async function resumeParkedCase(
 	inputHash: string,
 	attempts: StoredAttempt[],
 	deps: SentimentJobDeps,
-): Promise<{ kase: StoredResolutionCase } | { outcome: SentimentJobOutcome }> {
+): Promise<{ kase: StoredResolutionCase; permitPurpose: PermitPurpose | null } | { outcome: SentimentJobOutcome }> {
 	const permit = await dispatchDeps(deps).findLivePermit({
 		analysisId: claim.analysisId,
 		instanceId: kase.instanceId,
@@ -1449,6 +1515,7 @@ async function resumeParkedCase(
 			automatedProviderCalls: charged.automatedProviderCalls,
 			totalActualCostUsd: charged.totalActualCostUsd.toFixed(6),
 		},
+		permitPurpose: permit ? (permit.purpose as PermitPurpose) : null,
 	};
 }
 
@@ -1476,10 +1543,12 @@ async function classifyAndPersist(
 		return { status: "already-completed" };
 	}
 	const attempts = await (deps.loadProviderAttempts ?? loadProviderAttempts)(claim.analysisId);
+	let resumePermitPurpose: PermitPurpose | null = null;
 	if (isParked(kase)) {
 		const resumed = await resumeParkedCase(kase, claim, inputHash, attempts, deps);
 		if ("outcome" in resumed) return resumed.outcome;
 		kase = resumed.kase;
+		resumePermitPurpose = resumed.permitPurpose;
 	}
 	const dangling = attempts.find((a) => a.outcome === "sending");
 	if (dangling) {
@@ -1545,6 +1614,7 @@ async function classifyAndPersist(
 		initial: { generationId: null },
 		dispatch: null,
 		controls,
+		resumePermitPurpose,
 	};
 	// Every request of this lifecycle passes the guard, whatever resolved the provider (production lock, canary wrapper, test double).
 	workflow.provider = guardProvider(provider, workflow);

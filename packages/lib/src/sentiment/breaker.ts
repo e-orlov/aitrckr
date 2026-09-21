@@ -133,7 +133,16 @@ export async function acquireProbe(
 			),
 		)
 		.returning({ generation: sentimentProviderBreakers.probeGeneration });
-	return row ? { generation: row.generation } : null;
+	if (!row) return null;
+	await appendControlEvent(tx, {
+		subjectKind: "breaker",
+		subjectKey: scopeKey,
+		fromState: null,
+		toState: "half_open",
+		evidence: { probe: "acquired", attemptId, generation: row.generation },
+		...SYSTEM_ACTOR,
+	});
+	return { generation: row.generation };
 }
 
 export interface BreakerOpenEvidence {
@@ -155,127 +164,158 @@ const SYSTEM_ACTOR: ControlActor = {
 };
 
 /**
- * Open the scope on a deterministic refusal (one strike, owner decision D4):
- * upsert the row as `open`, count the failure, set `open_until` by the
- * backoff, clear any probe lease and record the evidence. A local contract
- * refusal is a property of the document, so every known sibling scope that
- * carries the same `sfp1` schema is opened too.
+ * `open_until` for the strike that brings the row to `consecutive_failures`
+ * (already incremented): 15 min × 2ⁿ⁻¹ capped at 6 h, computed in SQL from the
+ * row's own value so the backoff always follows the committed count.
+ */
+const openUntilFromRow = sql`now() + least(make_interval(secs => ${BACKOFF_BASE_MS / 1000} * power(2, least(greatest(${sentimentProviderBreakers.consecutiveFailures} - 1, 0), 20))), make_interval(secs => ${BACKOFF_MAX_MS / 1000}))`;
+
+/**
+ * One strike against a scope row the caller has already locked: the count is
+ * incremented relative to the row's current value and the backoff derives from
+ * that result, so concurrent strikes serialize on the lock and none is lost.
+ */
+async function strikeLockedRow(
+	tx: Executor,
+	scopeKey: string,
+	evidence: Pick<BreakerOpenEvidence, "failureClass" | "phase" | "attemptId" | "httpStatus" | "errorType" | "rule">,
+	reason: string,
+): Promise<number> {
+	const [row] = await tx
+		.update(sentimentProviderBreakers)
+		.set({
+			state: "open",
+			openedAt: sql`now()`,
+			consecutiveFailures: sql`${sentimentProviderBreakers.consecutiveFailures} + 1`,
+			probeAttemptId: null,
+			probeLeaseUntil: null,
+			openedClass: evidence.failureClass,
+			openedPhase: evidence.phase,
+			lastAttemptId: evidence.attemptId,
+			lastHttpStatus: evidence.httpStatus,
+			lastErrorType: evidence.errorType,
+			lastRule: evidence.rule,
+			lastChangedBy: SYSTEM_ACTOR.actor,
+			lastReason: reason,
+			updatedAt: sql`now()`,
+		})
+		.where(eq(sentimentProviderBreakers.scopeKey, scopeKey))
+		.returning({ consecutiveFailures: sentimentProviderBreakers.consecutiveFailures });
+	// The backoff is a second statement so it reads the count the first one wrote to the row version.
+	await tx
+		.update(sentimentProviderBreakers)
+		.set({ openUntil: openUntilFromRow })
+		.where(eq(sentimentProviderBreakers.scopeKey, scopeKey));
+	return row.consecutiveFailures;
+}
+
+/**
+ * Open the scope on a deterministic refusal (one strike, owner decision D4).
+ * The row is seeded `closed` when absent (`ON CONFLICT DO NOTHING`); the scope
+ * and — for a local contract refusal, which is a property of the document —
+ * every known sibling scope carrying the same `sfp1` schema are then locked in
+ * one `SELECT … FOR UPDATE` in scope-key order and struck relative to their
+ * committed values. Under Read Committed a concurrent striker blocks on the
+ * row lock and, once it acquires it, sees the committed row version, so its
+ * increment lands on top of the first strike (PostgreSQL docs, Transaction
+ * Isolation → Read Committed). Every committed strike therefore raises
+ * `consecutive_failures` by one and sets `open_until` from the resulting
+ * count, with one audit event carrying that count.
  */
 export async function openBreaker(tx: Executor, evidence: BreakerOpenEvidence): Promise<void> {
-	const base = {
-		provider: evidence.profile.adapter,
-		model: evidence.profile.model,
-		schemaFp: evidence.schemaFp,
-		requestProfile: evidence.profile,
-		state: "open" as const,
-		openedAt: sql`now()`,
-		consecutiveFailures: 1,
-		openUntil: sql`now() + make_interval(secs => ${Math.round(breakerBackoffMs(1) / 1000)})`,
-		probeAttemptId: null,
-		probeLeaseUntil: null,
-		openedClass: evidence.failureClass,
-		openedPhase: evidence.phase,
-		lastAttemptId: evidence.attemptId,
-		lastHttpStatus: evidence.httpStatus,
-		lastErrorType: evidence.errorType,
-		lastRule: evidence.rule,
-		lastChangedBy: SYSTEM_ACTOR.actor,
-		lastReason: SYSTEM_ACTOR.reason,
-		updatedAt: sql`now()`,
-	};
-	const previous = await readBreaker(evidence.scopeKey, tx);
-	const failures = (previous?.consecutiveFailures ?? 0) + 1;
-	const [row] = await tx
+	await tx
 		.insert(sentimentProviderBreakers)
-		.values({ scopeKey: evidence.scopeKey, ...base })
-		.onConflictDoUpdate({
-			target: sentimentProviderBreakers.scopeKey,
-			set: {
-				...base,
-				consecutiveFailures: failures,
-				openUntil: sql`now() + make_interval(secs => ${Math.round(breakerBackoffMs(failures) / 1000)})`,
-			},
+		.values({
+			scopeKey: evidence.scopeKey,
+			provider: evidence.profile.adapter,
+			model: evidence.profile.model,
+			schemaFp: evidence.schemaFp,
+			requestProfile: evidence.profile,
+			state: "closed",
+			consecutiveFailures: 0,
+			lastChangedBy: SYSTEM_ACTOR.actor,
+			lastReason: "scope row created on its first observed refusal",
 		})
-		.returning({ consecutiveFailures: sentimentProviderBreakers.consecutiveFailures });
-	await appendControlEvent(tx, {
-		subjectKind: "breaker",
-		subjectKey: evidence.scopeKey,
-		fromState: previous?.state ?? null,
-		toState: "open",
-		evidence: {
-			failureClass: evidence.failureClass,
-			phase: evidence.phase,
-			attemptId: evidence.attemptId,
-			httpStatus: evidence.httpStatus,
-			errorType: evidence.errorType,
-			rule: evidence.rule,
-			consecutiveFailures: row.consecutiveFailures,
-		},
-		...SYSTEM_ACTOR,
-	});
-	if (evidence.failureClass !== "local-contract") return;
-	const siblings = await tx
+		.onConflictDoNothing({ target: sentimentProviderBreakers.scopeKey });
+	const siblingKeys =
+		evidence.failureClass === "local-contract"
+			? (
+					await tx
+						.select({ scopeKey: sentimentProviderBreakers.scopeKey })
+						.from(sentimentProviderBreakers)
+						.where(
+							and(
+								eq(sentimentProviderBreakers.schemaFp, evidence.schemaFp),
+								sql`${sentimentProviderBreakers.scopeKey} <> ${evidence.scopeKey}`,
+								inArray(sentimentProviderBreakers.state, ["closed", "half_open"]),
+							),
+						)
+				).map((r) => r.scopeKey)
+			: [];
+	const keys = [...new Set([evidence.scopeKey, ...siblingKeys])].sort();
+	const locked = await tx
 		.select({ scopeKey: sentimentProviderBreakers.scopeKey, state: sentimentProviderBreakers.state })
 		.from(sentimentProviderBreakers)
-		.where(
-			and(
-				eq(sentimentProviderBreakers.schemaFp, evidence.schemaFp),
-				sql`${sentimentProviderBreakers.scopeKey} <> ${evidence.scopeKey}`,
-				inArray(sentimentProviderBreakers.state, ["closed", "half_open"]),
-			),
+		.where(inArray(sentimentProviderBreakers.scopeKey, keys))
+		.orderBy(sentimentProviderBreakers.scopeKey)
+		.for("update");
+	for (const row of locked) {
+		const sibling = row.scopeKey !== evidence.scopeKey;
+		// A sibling that was struck open by someone else while we waited for its lock is not struck again here.
+		if (sibling && row.state === "open") continue;
+		const failures = await strikeLockedRow(
+			tx,
+			row.scopeKey,
+			sibling ? { ...evidence, httpStatus: null, errorType: null } : evidence,
+			sibling ? `sibling scope shares the refused schema shape ${evidence.schemaFp}` : SYSTEM_ACTOR.reason,
 		);
-	for (const sibling of siblings) {
-		await tx
-			.update(sentimentProviderBreakers)
-			.set({
-				state: "open",
-				openedAt: sql`now()`,
-				openUntil: sql`now() + make_interval(secs => ${Math.round(breakerBackoffMs(1) / 1000)})`,
-				consecutiveFailures: sql`${sentimentProviderBreakers.consecutiveFailures} + 1`,
-				probeAttemptId: null,
-				probeLeaseUntil: null,
-				openedClass: evidence.failureClass,
-				openedPhase: evidence.phase,
-				lastAttemptId: evidence.attemptId,
-				lastRule: evidence.rule,
-				lastChangedBy: SYSTEM_ACTOR.actor,
-				lastReason: `sibling scope shares the refused schema shape ${evidence.schemaFp}`,
-				updatedAt: sql`now()`,
-			})
-			.where(eq(sentimentProviderBreakers.scopeKey, sibling.scopeKey));
 		await appendControlEvent(tx, {
 			subjectKind: "breaker",
-			subjectKey: sibling.scopeKey,
-			fromState: sibling.state,
+			subjectKey: row.scopeKey,
+			fromState: row.state,
 			toState: "open",
-			evidence: { failureClass: evidence.failureClass, siblingOf: evidence.scopeKey, rule: evidence.rule },
+			evidence: sibling
+				? { failureClass: evidence.failureClass, siblingOf: evidence.scopeKey, rule: evidence.rule, consecutiveFailures: failures }
+				: {
+						failureClass: evidence.failureClass,
+						phase: evidence.phase,
+						attemptId: evidence.attemptId,
+						httpStatus: evidence.httpStatus,
+						errorType: evidence.errorType,
+						rule: evidence.rule,
+						consecutiveFailures: failures,
+					},
 			...SYSTEM_ACTOR,
 		});
 	}
 }
 
+/** How the probe request ended, as the breaker sees it. */
+export type ProbeOutcome =
+	/** The provider accepted the request (paid answer, accepted or rejected): the scope closes. */
+	| "accepted"
+	/** A deterministic refusal (class 1 or 2): the scope re-opens with a longer backoff. */
+	| "refused"
+	/** The request never left (boundary guard refused it): the lease is freed so the next request may probe. */
+	| "released"
+	/** Any other failure (transient, unknown): the lease stands until it expires; nothing is written. */
+	| "untouched";
+
 /**
- * The probe's outcome, fenced on the lease (attempt id and generation): a
- * request the provider accepted closes the scope; a deterministic refusal
- * re-opens it with a longer backoff. A lease taken over meanwhile makes both
- * writes no-ops.
+ * The probe's outcome, fenced on the lease (attempt id and generation). A
+ * lease taken over meanwhile makes every write a no-op (`fenced`).
  */
 export async function settleProbe(
 	tx: Executor,
-	args: {
-		scopeKey: string;
-		attemptId: string;
-		generation: number;
-		accepted: boolean;
-		failureClass?: DispatchFailureClass;
-	},
-): Promise<"closed" | "reopened" | "fenced"> {
+	args: { scopeKey: string; attemptId: string; generation: number; outcome: ProbeOutcome },
+): Promise<"closed" | "reopened" | "released" | "untouched" | "fenced"> {
 	const fence = and(
 		eq(sentimentProviderBreakers.scopeKey, args.scopeKey),
 		eq(sentimentProviderBreakers.probeAttemptId, args.attemptId),
 		eq(sentimentProviderBreakers.probeGeneration, args.generation),
 	);
-	if (args.accepted) {
+	if (args.outcome === "untouched") return "untouched";
+	if (args.outcome === "accepted") {
 		const [row] = await tx
 			.update(sentimentProviderBreakers)
 			.set({
@@ -302,32 +342,55 @@ export async function settleProbe(
 		});
 		return "closed";
 	}
-	const previous = await readBreaker(args.scopeKey, tx);
-	const failures = (previous?.consecutiveFailures ?? 0) + 1;
+	if (args.outcome === "released") {
+		const [row] = await tx
+			.update(sentimentProviderBreakers)
+			.set({
+				probeAttemptId: null,
+				probeLeaseUntil: null,
+				lastChangedBy: SYSTEM_ACTOR.actor,
+				lastReason: "half-open probe released before any request left",
+				updatedAt: sql`now()`,
+			})
+			.where(fence)
+			.returning({ scopeKey: sentimentProviderBreakers.scopeKey });
+		if (!row) return "fenced";
+		await appendControlEvent(tx, {
+			subjectKind: "breaker",
+			subjectKey: args.scopeKey,
+			fromState: "half_open",
+			toState: "half_open",
+			evidence: { attemptId: args.attemptId, generation: args.generation, probe: "released" },
+			...SYSTEM_ACTOR,
+		});
+		return "released";
+	}
 	const [row] = await tx
 		.update(sentimentProviderBreakers)
 		.set({
 			state: "open",
-			consecutiveFailures: failures,
+			consecutiveFailures: sql`${sentimentProviderBreakers.consecutiveFailures} + 1`,
 			openedAt: sql`now()`,
-			openUntil: sql`now() + make_interval(secs => ${Math.round(breakerBackoffMs(failures) / 1000)})`,
 			probeAttemptId: null,
 			probeLeaseUntil: null,
-			openedClass: args.failureClass ?? null,
 			lastAttemptId: args.attemptId,
 			lastChangedBy: SYSTEM_ACTOR.actor,
 			lastReason: "half-open probe refused deterministically",
 			updatedAt: sql`now()`,
 		})
 		.where(fence)
-		.returning({ scopeKey: sentimentProviderBreakers.scopeKey });
+		.returning({ consecutiveFailures: sentimentProviderBreakers.consecutiveFailures });
 	if (!row) return "fenced";
+	await tx
+		.update(sentimentProviderBreakers)
+		.set({ openUntil: openUntilFromRow })
+		.where(eq(sentimentProviderBreakers.scopeKey, args.scopeKey));
 	await appendControlEvent(tx, {
 		subjectKind: "breaker",
 		subjectKey: args.scopeKey,
 		fromState: "half_open",
 		toState: "open",
-		evidence: { attemptId: args.attemptId, generation: args.generation, consecutiveFailures: failures },
+		evidence: { attemptId: args.attemptId, generation: args.generation, consecutiveFailures: row.consecutiveFailures },
 		...SYSTEM_ACTOR,
 	});
 	return "reopened";

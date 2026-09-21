@@ -1,12 +1,22 @@
 import { createHash } from "node:crypto";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../db/db";
-import { sentimentAnalyses, sentimentResolutionCases } from "../db/schema";
+import { sentimentAnalyses, sentimentDispatchPermits, sentimentResolutionCases } from "../db/schema";
 import { prepareStructuredOutputSchema } from "../providers/schema-contract";
 import { segmentAnswer } from "./anchors";
 import { databaseNow, decideBreaker, readBreaker } from "./breaker";
 import { assessCandidate, sentimentInputHash } from "./classifier";
-import { type ControlActor, issuePermit, RESERVATION_ESTIMATES_USD, requireActor } from "./controls";
+import {
+	type ControlActor,
+	expireUnconsumedPermits,
+	isResumeVerifyBudget,
+	issuePermit,
+	PERMIT_LIVE_STATES,
+	type PhaseBudget,
+	RESERVATION_ESTIMATES_USD,
+	RESUME_VERIFY_PHASE_BUDGET,
+	requireActor,
+} from "./controls";
 import { type SentimentSender, sendSentimentJob } from "./enqueue";
 import { requestScopeKey, schemaShapeFingerprint, sentimentRequestProfile } from "./fingerprint";
 import { analyzeAnswerRanges } from "./ranges";
@@ -222,25 +232,131 @@ export function manifestSha256(manifestJson: string): string {
 	return createHash("sha256").update(manifestJson).digest("hex");
 }
 
+export type ResumeApplySkip =
+	| ResumeExclusion
+	/** The case row changed between the frozen manifest and the row lock (status, instance, input or stored candidate). */
+	| "case-changed"
+	/** A concurrent issuer won the partial unique index while this transaction ran. */
+	| "already-permitted"
+	/** The lifecycle's live permit already consumed a phase: reconciliation or revocation, never a replacement. */
+	| "permit-consumed"
+	/** The lifecycle's live permit carries an unresolved `sending` attempt: reconciliation only. */
+	| "permit-unresolved-attempt"
+	/** The lifecycle's live permit is not this manifest's verify-only permit (purpose, budget, input or manifest differ). */
+	| "permit-mismatch";
+
 export interface ResumeApplyResult {
-	applied: { analysisId: string; permitId: string; jobId: string | null }[];
-	skipped: { analysisId: string; reason: ResumeExclusion | "already-permitted" | "case-changed" }[];
+	applied: {
+		analysisId: string;
+		permitId: string;
+		jobId: string | null;
+		/** `issued`: a new permit; `reused`: the live permit of this manifest, its send retried; `replaced-expired`: an unconsumed expired permit was expired durably and replaced. */
+		permit: "issued" | "reused" | "replaced-expired";
+	}[];
+	skipped: { analysisId: string; reason: ResumeApplySkip }[];
+	/** Cases whose permit stands but whose singleton send failed; repeating the same manifest apply retries them. */
+	failed: { analysisId: string; permitId: string; error: string }[];
 	drift: string | null;
+}
+
+type PermitDecision =
+	| { skipped: ResumeApplySkip }
+	| { permitId: string; permit: ResumeApplyResult["applied"][number]["permit"] };
+
+/**
+ * Decide, under the case row lock, which permit authorizes this case's verify
+ * call: reuse the live permit when it is exactly this manifest's verify-only
+ * permit (same lifecycle, purpose, budget, input and manifest hash); expire an
+ * unconsumed, expired permit durably and issue a replacement; refuse — with a
+ * typed reason and no write — a permit that consumed a phase, carries an
+ * unresolved attempt or does not match. Nothing is ever refunded or retried
+ * blindly here.
+ */
+async function permitForCase(
+	tx: Executor,
+	item: ResumeEligible,
+	manifestSha256: string,
+	who: ControlActor,
+): Promise<PermitDecision> {
+	const live = await tx
+		.select()
+		.from(sentimentDispatchPermits)
+		.where(
+			and(
+				eq(sentimentDispatchPermits.analysisId, item.analysisId),
+				eq(sentimentDispatchPermits.instanceId, item.instanceId),
+				inArray(sentimentDispatchPermits.state, [...PERMIT_LIVE_STATES]),
+			),
+		)
+		.for("update");
+	const existing = live[0];
+	if (existing) {
+		const [clock] = await tx
+			.select({ expired: sql<boolean>`${sentimentDispatchPermits.expiresAt} <= now()` })
+			.from(sentimentDispatchPermits)
+			.where(eq(sentimentDispatchPermits.id, existing.id));
+		const budget = existing.phaseBudget as PhaseBudget;
+		const matches =
+			existing.purpose === "resume-verify" &&
+			existing.inputHash === item.inputHash &&
+			existing.contractSha256 === manifestSha256 &&
+			isResumeVerifyBudget(budget);
+		if (existing.state === "active") return { skipped: "permit-consumed" };
+		if (!clock.expired) {
+			return matches ? { permitId: existing.id, permit: "reused" } : { skipped: "permit-mismatch" };
+		}
+		const stale = await expireUnconsumedPermits(tx, { analysisId: item.analysisId, instanceId: item.instanceId });
+		const blocking = stale.blocking[0];
+		// `permit-live` cannot occur here (the row was expired by the clock read above); anything else is typed as is.
+		if (blocking) return { skipped: blocking.code === "permit-live" ? "permit-mismatch" : blocking.code };
+	}
+	try {
+		const issued = await issuePermit(
+			{
+				purpose: "resume-verify",
+				promptRunId: item.promptRunId,
+				analysisId: item.analysisId,
+				instanceId: item.instanceId,
+				inputHash: item.inputHash,
+				classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
+				phaseBudget: { ...RESUME_VERIFY_PHASE_BUDGET },
+				estimatedCostBudgetUsd: RESUME_VERIFY_ESTIMATED_BUDGET_USD,
+				ttlSeconds: RESUME_VERIFY_TTL_SECONDS,
+				contractSha256: manifestSha256,
+				...who,
+			},
+			tx,
+		);
+		return { permitId: issued.id, permit: existing ? "replaced-expired" : "issued" };
+	} catch (error) {
+		if (
+			(error as { code?: string; cause?: { code?: string } }).cause?.code === "23505" ||
+			(error as { code?: string }).code === "23505"
+		) {
+			return { skipped: "already-permitted" };
+		}
+		throw error;
+	}
 }
 
 /**
  * Apply one bounded batch from a frozen manifest: the selector is recomputed
  * and must match the manifest exactly (count, ordered ids, both digests);
- * each case is re-checked under a row lock, given a verify-only permit and
- * sent through the singleton-keyed send. Any mismatch refuses the whole batch
- * — it never broadens selection.
+ * each case is re-checked under a row lock, authorized by exactly one
+ * verify-only permit bound to the manifest (issued, reused or replacing an
+ * expired one) and sent through the singleton-keyed send. A send failure is
+ * reported per case and leaves the permit standing, so repeating the same
+ * manifest apply retries the send. Any drift refuses the whole batch — it
+ * never broadens selection.
  */
 export async function applyResumeForVerify(
-	args: { manifest: ResumeManifest; limit: number; sender: SentimentSender } & Partial<ControlActor>,
+	args: { manifest: ResumeManifest; manifestSha256: string; limit: number; sender: SentimentSender } & Partial<ControlActor>,
 	executor: Executor = db,
 ): Promise<ResumeApplyResult> {
 	const who = requireActor(args);
 	if (!Number.isInteger(args.limit) || args.limit <= 0) throw new Error("limit must be a positive integer");
+	if (!/^[0-9a-f]{64}$/i.test(args.manifestSha256)) throw new Error("manifest sha256 is required to bind the permits");
+	const manifestSha256 = args.manifestSha256.toLowerCase();
 	const current = await selectResumableForVerify(executor);
 	const drift =
 		current.count !== args.manifest.count
@@ -250,11 +366,11 @@ export async function applyResumeForVerify(
 				: current.attemptDigest !== args.manifest.attemptDigest
 					? "stored candidates changed"
 					: null;
-	if (drift) return { applied: [], skipped: [], drift };
-	const result: ResumeApplyResult = { applied: [], skipped: [], drift: null };
+	if (drift) return { applied: [], skipped: [], failed: [], drift };
+	const result: ResumeApplyResult = { applied: [], skipped: [], failed: [], drift: null };
 	for (const item of current.eligible.slice(0, args.limit)) {
-		const permit = await executor.transaction(async (tx) => {
-			// Lock the case row and re-check the invariants inside the transaction that issues the permit.
+		const decision = await executor.transaction(async (tx) => {
+			// Lock the case row and re-check the invariants inside the transaction that authorizes the permit.
 			const [locked] = await tx
 				.select({
 					status: sentimentResolutionCases.status,
@@ -277,38 +393,22 @@ export async function applyResumeForVerify(
 				item.inputHash,
 			);
 			if ("reason" in stored || stored.attempt.id !== item.latestAttemptId) return { skipped: "case-changed" as const };
-			try {
-				return await issuePermit(
-					{
-						purpose: "resume-verify",
-						promptRunId: item.promptRunId,
-						analysisId: item.analysisId,
-						instanceId: item.instanceId,
-						inputHash: item.inputHash,
-						classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
-						phaseBudget: { classify: 0, repair: 0, verify: 1 },
-						estimatedCostBudgetUsd: RESUME_VERIFY_ESTIMATED_BUDGET_USD,
-						ttlSeconds: RESUME_VERIFY_TTL_SECONDS,
-						...who,
-					},
-					tx,
-				);
-			} catch (error) {
-				if (
-					(error as { code?: string; cause?: { code?: string } }).cause?.code === "23505" ||
-					(error as { code?: string }).code === "23505"
-				) {
-					return { skipped: "already-permitted" as const };
-				}
-				throw error;
-			}
+			return permitForCase(tx, item, manifestSha256, who);
 		});
-		if ("skipped" in permit) {
-			result.skipped.push({ analysisId: item.analysisId, reason: permit.skipped });
+		if ("skipped" in decision) {
+			result.skipped.push({ analysisId: item.analysisId, reason: decision.skipped });
 			continue;
 		}
-		const jobId = await sendSentimentJob(args.sender, item.promptRunId);
-		result.applied.push({ analysisId: item.analysisId, permitId: permit.id, jobId });
+		try {
+			const jobId = await sendSentimentJob(args.sender, item.promptRunId);
+			result.applied.push({ analysisId: item.analysisId, permitId: decision.permitId, jobId, permit: decision.permit });
+		} catch (error) {
+			result.failed.push({
+				analysisId: item.analysisId,
+				permitId: decision.permitId,
+				error: error instanceof Error ? error.name : typeof error,
+			});
+		}
 	}
 	return result;
 }

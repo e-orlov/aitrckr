@@ -19,6 +19,7 @@ const phaseOf = (prompt: string) =>
 
 export interface FakePermit {
 	id: string;
+	purpose: "canary" | "resume-verify";
 	analysisId: string;
 	instanceId: string;
 	inputHash: string;
@@ -203,12 +204,26 @@ export function resolutionFakes(
 			p.state = "active";
 			return { consumed: true, permitId: p.id, reservedEstimateUsd: reserveUsd };
 		},
-		settlePermitReservation: async (_tx, { permitId, reservedEstimateUsd, actualCostUsd }) => {
+		settlePermitReservation: async (_tx, { permitId, reservedEstimateUsd, settlement }) => {
 			const p = permits.find((x) => x.id === permitId);
 			if (!p) return;
-			p.reservedEstimateUsd = Math.max(0, p.reservedEstimateUsd - reservedEstimateUsd);
-			p.settledCostUsd += Math.max(0, actualCostUsd ?? 0);
+			// Mirrors the store: an unpriced paid answer keeps its reservation counted; nothing is fabricated as $0.
+			if (settlement.kind !== "paid-unknown-cost") {
+				p.reservedEstimateUsd = Math.max(0, p.reservedEstimateUsd - reservedEstimateUsd);
+			}
+			if (settlement.kind === "paid") p.settledCostUsd += Math.max(0, settlement.actualCostUsd);
 			if (Object.values(p.phaseBudget).every((v) => v === 0)) p.state = "exhausted";
+		},
+		loadPermit: async (id) => {
+			const p = permits.find((x) => x.id === id);
+			return p
+				? ({
+						...p,
+						estimatedCostBudgetUsd: p.estimatedCostBudgetUsd.toFixed(6),
+						settledCostUsd: p.settledCostUsd.toFixed(6),
+						reservedEstimateUsd: p.reservedEstimateUsd.toFixed(6),
+					} as never)
+				: null;
 		},
 		readBreaker: async (scopeKey) => (breakers.get(scopeKey) as never) ?? null,
 		acquireProbe: async (_tx, scopeKey, attemptId) => {
@@ -258,10 +273,17 @@ export function resolutionFakes(
 				}
 			}
 		},
-		settleProbe: async (_tx, { scopeKey, attemptId, generation, accepted }) => {
+		settleProbe: async (_tx, { scopeKey, attemptId, generation, outcome }) => {
+			if (outcome === "untouched") return "untouched";
 			const b = breakers.get(scopeKey);
 			if (!b || b.probeAttemptId !== attemptId || b.probeGeneration !== generation) return "fenced";
-			if (accepted) {
+			if (outcome === "released") {
+				b.probeAttemptId = null;
+				b.probeLeaseUntil = null;
+				b.events.push("released");
+				return "released";
+			}
+			if (outcome === "accepted") {
 				Object.assign(b, {
 					state: "closed",
 					consecutiveFailures: 0,
@@ -321,8 +343,18 @@ export function resolutionFakes(
 			},
 		}) as unknown as Provider;
 	/** Issue an in-memory permit bound to one instance and input. */
-	const issuePermit = (permit: Omit<FakePermit, "state" | "settledCostUsd" | "reservedEstimateUsd">): FakePermit => {
-		const row: FakePermit = { ...permit, state: "issued", settledCostUsd: 0, reservedEstimateUsd: 0 };
+	const issuePermit = (
+		permit: Omit<FakePermit, "state" | "settledCostUsd" | "reservedEstimateUsd" | "purpose"> & {
+			purpose?: FakePermit["purpose"];
+		},
+	): FakePermit => {
+		const row: FakePermit = {
+			purpose: "canary",
+			...permit,
+			state: "issued",
+			settledCostUsd: 0,
+			reservedEstimateUsd: 0,
+		};
 		permits.push(row);
 		return row;
 	};
