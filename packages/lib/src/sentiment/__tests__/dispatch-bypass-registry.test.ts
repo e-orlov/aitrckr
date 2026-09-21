@@ -44,9 +44,19 @@ describe("dispatch controls cannot be bypassed by construction", () => {
 	});
 
 	it("classify-sentiment jobs are created only through sendSentimentJob (plus the loopback verification script)", () => {
-		expect(filesMatching(["apps", "packages"], /\.send\(\s*SENTIMENT_QUEUE\b|\.send\(\s*"classify-sentiment"/)).toEqual(
-			["apps/worker/scripts/verify-sentiment-db.ts", "packages/lib/src/sentiment/enqueue.ts"],
+		// Every pg-boss send flavour, positional or object form, plus direct job-table insertion.
+		const queueName = String.raw`(?:SENTIMENT_QUEUE\b|"classify-sentiment"|'classify-sentiment')`;
+		const positionalSend = new RegExp(
+			String.raw`\.(?:send|sendAfter|sendThrottled|sendDebounced|sendSingleton)\(\s*${queueName}`,
 		);
+		const objectSend = new RegExp(String.raw`\bname:\s*${queueName}`);
+		const rawInsert = /insert\s+into\s+pgboss\.job\b/i;
+		expect(filesMatching(["apps", "packages"], positionalSend)).toEqual([
+			"apps/worker/scripts/verify-sentiment-db.ts",
+			"packages/lib/src/sentiment/enqueue.ts",
+		]);
+		expect(filesMatching(["apps", "packages"], objectSend)).toEqual([]);
+		expect(filesMatching(["apps", "packages"], rawInsert)).toEqual([]);
 		expect(filesMatching(["apps", "packages"], /\bsendSentimentJob\(/)).toEqual([
 			"apps/worker/src/jobs/classify-sentiment.ts",
 			"packages/lib/src/sentiment/backfill.ts",
