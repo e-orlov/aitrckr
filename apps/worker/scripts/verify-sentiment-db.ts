@@ -425,6 +425,64 @@ async function verifyCascade(client: Client): Promise<void> {
 	);
 }
 
+/**
+ * Amendment C dispatch controls as the database enforces them: the seeded
+ * `dispatch` control row exists in a known state, unknown states and
+ * over-budget or malformed permits are rejected, and the audit sequence is
+ * unique per subject. No provider, no worker handler.
+ */
+async function verifyDispatchControls(client: Client): Promise<void> {
+	const control = await client.query<{ state: string; epoch: number }>(
+		"SELECT state, epoch FROM sentiment_controls WHERE key = 'dispatch'",
+	);
+	assert(control.rows.length === 1, "the dispatch control row is seeded");
+	assert(
+		["held", "open"].includes(control.rows[0].state),
+		`the dispatch control state is known (${control.rows[0].state})`,
+	);
+	const events = await client.query<{ n: number }>(
+		"SELECT count(*)::int AS n FROM sentiment_control_events WHERE subject_kind = 'control' AND subject_key = 'dispatch' AND seq = 1",
+	);
+	assert(events.rows[0].n === 1, "the dispatch control has its initial audit event");
+	await expectRejected(
+		client,
+		"an unknown dispatch state",
+		"UPDATE sentiment_controls SET state = 'maybe' WHERE key = 'dispatch'",
+		[],
+	);
+	const analysis = await client.query<{ id: string }>(
+		"SELECT id FROM sentiment_analyses WHERE prompt_run_id = $1 LIMIT 1",
+		[RUN],
+	);
+	if (analysis.rows[0]) {
+		const permit = `INSERT INTO sentiment_dispatch_permits (purpose, prompt_run_id, analysis_id, instance_id, input_hash, classifier_version, provider, model, phase_budget, estimated_cost_budget_usd, expires_at, issued_by, reason, correlation_id) VALUES ('canary', $1, $2, gen_random_uuid(), 'h', 'v', 'openrouter', 'm', $3::jsonb, $4, now() + interval '1 hour', 'verify', 'r', 'c')`;
+		await expectRejected(client, "a permit over the estimated budget bound", permit, [
+			RUN,
+			analysis.rows[0].id,
+			'{"classify":1,"repair":0,"verify":1}',
+			"0.11",
+		]);
+		await expectRejected(client, "a permit with a phase budget outside {0,1}", permit, [
+			RUN,
+			analysis.rows[0].id,
+			'{"classify":2,"repair":0,"verify":0}',
+			"0.05",
+		]);
+		await expectRejected(client, "a permit naming an unknown phase", permit, [
+			RUN,
+			analysis.rows[0].id,
+			'{"classify":1,"other":1}',
+			"0.05",
+		]);
+	}
+	await expectRejected(
+		client,
+		"a duplicate audit sequence",
+		"INSERT INTO sentiment_control_events (subject_kind, subject_key, seq, to_state, actor, reason, correlation_id) VALUES ('control', 'dispatch', 1, 'open', 'verify', 'r', 'c')",
+		[],
+	);
+}
+
 async function verifyQueueDedupe(client: Client, boss: PgBoss): Promise<void> {
 	await ensureSentimentQueue(boss);
 	const { rows } = await client.query<{ policy: string }>("SELECT policy FROM pgboss.queue WHERE name = $1", [
@@ -460,6 +518,7 @@ async function main(): Promise<void> {
 		await verifyIdempotentPersistence(client);
 		await boss.start();
 		await verifyQueueDedupe(client, boss);
+		await verifyDispatchControls(client);
 		await verifyCascade(client);
 	} finally {
 		await boss.stop({ graceful: false, timeout: 5000 }).catch(() => {});

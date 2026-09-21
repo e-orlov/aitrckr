@@ -550,7 +550,7 @@ function guardProvider(provider: Provider, w: Workflow): Provider {
 				throw new SentimentDispatchHeldError("fingerprint-mismatch");
 			}
 			const attempt = await w.controls.loadAttemptDispatch(context.attemptId);
-			if (!attempt || attempt.outcome !== "sending" || (attempt.permitId ?? null) !== context.permitId) {
+			if (attempt?.outcome !== "sending" || (attempt.permitId ?? null) !== context.permitId) {
 				throw new SentimentDispatchHeldError("attempt-not-sending");
 			}
 			if (isHeld(await w.controls.readDispatchState()) && context.permitId === null) {
@@ -1268,7 +1268,7 @@ export function resumableEvidence(
 	const latest = attempts
 		.filter((a) => a.instanceId === kase.instanceId && (a.phase === "classify" || a.phase === "repair"))
 		.at(-1);
-	if (!latest || latest.outcome !== "accepted" || latest.inputHash !== inputHash) return null;
+	if (latest?.outcome !== "accepted" || latest.inputHash !== inputHash) return null;
 	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
 	return parsed.success ? { attempt: latest, candidate: parsed.data } : null;
 }

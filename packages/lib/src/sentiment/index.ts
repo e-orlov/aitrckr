@@ -172,6 +172,7 @@ export {
 	isAttributable,
 	namesOnlyOthers,
 } from "./grounding";
+export { type HeldReleaseResult, type HeldWorkItem, listHeldWork, releaseHeldWork } from "./held-release";
 export {
 	type DispatchContext,
 	type DispatchDeps,
@@ -257,6 +258,20 @@ export {
 	verifierIssuesToTargets,
 	verifierResultSchemaFor,
 } from "./resolution";
+export {
+	applyResumeForVerify,
+	manifestSha256,
+	RESUME_DEFAULT_BATCH,
+	RESUME_MANIFEST_VERSION,
+	RESUME_VERIFY_ESTIMATED_BUDGET_USD,
+	RESUME_VERIFY_TTL_SECONDS,
+	type ResumeApplyResult,
+	type ResumeEligible,
+	type ResumeExclusion,
+	type ResumeManifest,
+	selectResumableForVerify,
+	selectStoredCandidate,
+} from "./resume";
 export {
 	assertProviderSchemaBudget,
 	dereferenceSchema,

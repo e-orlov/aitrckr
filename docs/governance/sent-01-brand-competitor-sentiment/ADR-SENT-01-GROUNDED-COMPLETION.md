@@ -99,6 +99,76 @@ Amendment B replaces the "terminal for the whole analysis … the input is not s
 
 Automated guarantees end at the provider double: the suites prove the workflow's routing, fencing, ledger, resume and read-path behavior on real Postgres with scripted answers. Still requiring production real-life acceptance under a later gate: the live OpenRouter refusal envelopes actually carrying `error.metadata.error_type` as assumed, the verifier's real accept/reject rate and its effect on paid-call volume, the operator review load of `awaiting_review` / `awaiting_reconciliation` cases, and the upgrade of the production database from its `main` journal state.
 
+## Amendment C — dispatch safety controls (recorded 2026-09-21; implemented in F2-PR-1)
+
+Amendment C adds the controls required before the corrected v5 runtime may run against the provider again: a durable dispatch hold, permits as its only bypass, a per-request-profile circuit breaker, and a retry path that never depends on the queue's retry loop or on a worker clock. It changes no product semantics of Amendments A and B: verified-only completion, instance fencing, the attempt ledger as billing truth and the review/reconciliation dispositions all stand.
+
+### C1. Dispatch hold
+
+- One control row (`sentiment_controls`, key `dispatch`) with state `held` or `open`, an epoch, and the actor, reason and correlation of its last transition. Migration `0024_sentiment_dispatch_controls` seeds it `held`; a fresh or upgraded database therefore dispatches nothing until an operator opens it.
+- Readers fail closed: an absent row, an unknown state or any read error is `held`.
+- Transitions are compare-and-swap on the current state (`transitionDispatch`), bump the epoch and append one `sentiment_control_events` row in the same transaction. Repeating a command finds the row already moved and is refused without writing.
+- Gates: the natural producer (`enqueueSentimentBestEffort`) reads the hold **after** `ensureAnalysis`, so the pending analysis row is the durable record of held work; maintenance rediscovery (`enqueueResumableSentimentRuns`) and historical backfill (`runSentimentEnqueue --enqueue`) are skipped or refused while held; the job core reads the hold after `ensureAnalysis` and before `claimAnalysis` and completes as `held` without claiming; every request passes the dispatch transaction (C3) and the guarded provider (C4).
+- `open` changes gating only. Held work is released by the explicit, bounded, audited `release-held` command from the rows the gates left behind: (A) a current-version analysis `pending` with zero attempts, (B) a current-detector mentions receipt for a run with no analysis row of any version. Historical runs are never selected — every mention-bearing historical run already carries an analysis row — and `backfill:sentiment --enqueue` remains the only historical path.
+
+### C2. Permits
+
+- `sentiment_dispatch_permits`: one live permit per `(analysis_id, instance_id)` (partial unique index), bound to the exact `input_hash`, with purpose `canary` or `resume-verify`, a per-phase budget in `{0,1}` for classify, repair and verify, a database-clock expiry, and an `estimated_cost_budget_usd` (≤ 0.10) against which planning reservations are tracked.
+- A permit is consumed per phase inside the dispatch transaction, before the `sending` attempt row exists. A consumed phase is never returned automatically; a permit with a dangling `sending` attempt cannot buy another call — recovery is the evidence-based reconciliation of that attempt, never a refund by the job.
+- Under `open` dispatch permits are not consulted; under `held` no request is possible without a matching valid permit.
+
+### C3. Dispatch transaction T1
+
+Order before every provider request: (1) the local strict-schema guard — a refusal opens the breaker and writes no attempt; (2) read the hold; (3) compute the `rp1:` request-profile scope and read its breaker; (4) in one transaction: acquire the half-open probe lease when the scope is probing, consume the permitted phase when held (enforcing the phase budget, expiry, instance/input binding and `settled + reserved + R_next ≤ estimated_cost_budget_usd`), and create the `sending` attempt carrying `permit_id`, `scope_key`, `schema_fp` and `reserved_estimate_usd`. Anything refused rolls the transaction back, leaves no row, and parks the case (`retry_wait`, no due time or the breaker's `open_until`) without a request.
+
+### C4. Guarded provider and fingerprints
+
+- The workflow wraps whatever resolved the provider (production lock, canary wrapper, test double) once per lifecycle. Immediately before the adapter's network call the wrapper requires the explicit dispatch context set by T1, recomputes `sfp1:` and `rp1:` from the document and options it is about to send and requires equality, requires the attempt to be `sending` with the same permit, and requires a permit under a held dispatch. Any mismatch closes the attempt as `aborted`, parks the case and logs `gate-breach`; nothing is sent.
+- `sfp1:` normalizes only the two run-specific `$defs` (`anchorId`, `entityKey`) to a template marker; verdicts, issue codes, aspect enums, constraints, closure, references and nesting remain part of the shape; keys and `required`/`enum` order are canonicalized. `rp1:` hashes adapter, endpoint, model, tool mode, strict-output mode and the `sfp1:` shape. Failure class and phase are evidence, not key components.
+
+### C5. Breaker
+
+- One row per `rp1:` scope (`sentiment_provider_breakers`); an absent row is `closed`. Opens on one strike for a local `StructuredOutputSchemaError` (no request, no attempt row; sibling scopes sharing the schema shape are opened too) and for a structured, output-less HTTP 400. Never opens on 429, 5xx, timeouts or transport ambiguity, paid answers the contract could not shape, or refusals that carry output.
+- Backoff 15 min × 2ⁿ⁻¹ capped at 6 h. One conditional `UPDATE` grants the single half-open probe to one attempt with a 900 s lease and a bumped generation; Read Committed re-evaluation keeps concurrent workers out. An accepted probe closes the scope; a deterministic refusal re-opens it with a longer backoff; an expired lease may be taken over. Operators may reset an open scope to `half_open` only and may open a scope for containment; there is no force-close.
+
+### C6. Retry-wait
+
+- An allow-listed transient refusal parks the case (`retry_wait`, due time from the database clock) and the job completes with `retry-wait`; the queue does not retry it. A case not due within the inline wait completes as `deferred`, never called early. The maintenance inventory rediscovers due `retry_wait` cases (including cases parked by the hold or the breaker) through the `(status, next_attempt_at)` index, at most 25 per tick, through the singleton-keyed send. Five consecutive transient refusals hand the case to review as `retry-exhausted`.
+- A paid answer without a generation id settles as a paid, rejected attempt (never as unsent) and hands the case over.
+
+### C7. Verifier-only resume
+
+- Cases parked for review resume only under a `resume-verify` permit with a `{verify: 1}` budget, a two-hour TTL and a 0.02 estimated budget, issued from a manifest produced by a read-only selector: current instance, recomputed matching input hash, latest accepted classify-or-repair candidate of that instance, zero unresolved assessment, every prior verify attempt unpaid, no verifier version or adjudication, the verifier document accepted by the guard and its scope not blocked. Apply recomputes the selection and refuses on any drift (count, ordered ids, candidate attempt ids); the default batch is 10.
+
+### C8. Terminology for money
+
+`estimated_cost_budget_usd`, `reserved_estimate_usd`, `settled_cost_usd` and the reservation constants (classify 0.05, repair 0.02, verify 0.02; resume 0.02 per case) are planning estimates — never hard dollar ceilings. The enforceable pre-dispatch limits are the permitted phases, the call count, the request token and tool limits, the expiry, the fencing and the single-worker concurrency; actual provider cost is known only after settlement. `52 × 0.02 = 1.04` is an aggregate planning estimate.
+
+### C9. Owner decisions (approved 2026-09-21)
+
+D3 automatic hold on breaker storms disabled in the first release · D4 output-less structured HTTP 400 is a one-strike breaker event · D5 no force-close · D6 breaker backoff 15 min × 2ⁿ capped at 6 h · D7 rediscovery maximum 25 per tick · D12 resume verification reservation 0.02 per case · D16 no deliberately invalid provider request · D17 old/new worker overlap is the later hard deploy gate `G-OVERLAP` · D18 `retry_wait` recovery is required before natural OPEN · D19 reservation estimates classify 0.05 / repair 0.02 / verify 0.02, re-derived after the first 20 verified lifecycles · D20 five consecutive transient failures before `retry-exhausted` · resume TTL two hours, default batch 10 · breaker reset only to `half_open`. Alert policy approved for PR-2 (not implemented here): D8 urgent `refusals-across-shapes` at two or more distinct request-profile scopes with class-2 refusals in 24 h, six-hour cooldown; D9 informational `awaiting-review-growth` when new unacknowledged ids ≥ 5, or — only when the baseline is greater than zero — ≥ `ceil(0.25 × baseline_count)` within 24 h, 24-hour cooldown (with a zero baseline only the absolute threshold applies); D10 informational `held-backlog-growth` at 20 held items or oldest age 48 h, 24-hour cooldown; D11 breaker/probe cooldown one hour per scope, first-contract-defect and cross-shape refusals six hours, growth signals 24 hours.
+
+### C10. `G-OVERLAP` and the watchdog limitation
+
+- The corrected runtime and `g51663818` must never process the shared `classify-sentiment` queue at the same time: each skips the other's payload version and completes the job, so a permit-authorized job fetched by an old worker would be consumed without work. Before the new worker starts: the watchdog scheduled task is disabled, zero old worker containers exist and the queue has no `active` sentiment job; before any permit or release: exactly one worker of the new image; on rollback the new worker is stopped fully before the old one starts. This is a hard deployment gate, not code.
+- A watchdog running on the same VM cannot independently report its own death; Task Scheduler state and heartbeat-file inspection are operator evidence, not independent notification. A second observer outside the failure domain is not part of this local-only design unless separately authorized.
+
+### C11. Boundaries
+
+PR-2 owns alert evaluation, baselines and the maintenance heartbeat (the `sentiment_alert_state` table is created here, empty). PR-3 owns the Windows watchdog and status integration. The fixed-300-ms wait in `sentiment-v5-late-settlement.integration.test.ts` is corrected in a separate test-harness PR. This amendment and its PR are not deploy authorization: release build, rehearsal, canary, resume of parked production cases, natural OPEN and historical backfill each require their own GO.
+
+### C12. Traceability
+
+| Decision | Automated evidence |
+|---|---|
+| C1 fail-closed read, CAS, audit, gate order | `packages/lib/src/sentiment/__tests__/dispatch-controls.test.ts`, `dispatch-job.test.ts`, `dispatch-bypass-registry.test.ts`, `apps/web/src/server/__tests__/sentiment-dispatch-controls.integration.test.ts` (IT-SNT-C-001…003), `apps/worker/scripts/verify-sentiment-db.ts` |
+| C1 held-work selection and release | `sentiment-resume-verify.integration.test.ts` (IT-SNT-C-006) |
+| C2/C3 permits, T1, reservations, single consumer | `dispatch-job.test.ts`, `sentiment-dispatch-controls.integration.test.ts` (IT-SNT-C-003) |
+| C4 fingerprints and guard | `dispatch-fingerprint.test.ts`, `dispatch-job.test.ts` (guarded provider) |
+| C5 breaker classes, open, single probe, reset | `dispatch-controls.test.ts`, `dispatch-job.test.ts`, `sentiment-dispatch-controls.integration.test.ts` (IT-SNT-C-004) |
+| C6 retry-wait, due gate, rediscovery, exhaustion, paid-without-generation | `dispatch-job.test.ts`, `v5-provider-routing.test.ts`, `job.test.ts`, `sentiment-dispatch-controls.integration.test.ts` (IT-SNT-C-005) |
+| C7 resume selector, manifest, apply, verify-only | `resume-selector.test.ts`, `sentiment-resume-verify.integration.test.ts` (IT-SNT-C-007) |
+
 ## Consequences
 
 - Runs that v4 rejected for an aspect-only defect complete under v5 with the aspect dropped; runs with an overall defect remain terminal.

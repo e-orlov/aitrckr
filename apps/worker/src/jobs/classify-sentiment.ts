@@ -8,9 +8,10 @@ import boss from "../boss";
  * provider call, atomic persistence, usage attribution) live in
  * runSentimentJob; a thrown error (already reduced to a safe summary) propagates
  * so pg-boss applies the queue's bounded retry policy without ever writing a
- * partial observation. An answer the classifier rejected is a completed job:
- * the analysis is failed for exactly that input and retrying could only buy
- * the same answer again. The job's abort signal reaches the provider request.
+ * partial observation. Held, deferred and transiently refused runs are
+ * completed jobs: their work stays durable and the maintenance inventory
+ * re-sends them when dispatch allows and they are due. The job's abort signal
+ * reaches the provider request.
  * Logs carry ids, states, codes and the bounded diagnostic only — never
  * answer text.
  */
@@ -56,6 +57,21 @@ export async function classifySentimentJob(jobs: Job<SentimentJobData>[]): Promi
 				break;
 			case "awaiting-reconciliation":
 				console.warn(`[classify-sentiment] run ${runId}: awaiting reconciliation of attempt ${outcome.attemptOrdinal}`);
+				break;
+			case "held":
+				console.log(
+					`[classify-sentiment] run ${runId}: held (${outcome.reason}); no request, the work stays durable${outcome.nextAttemptAt ? ` until ${outcome.nextAttemptAt.toISOString()}` : ""}`,
+				);
+				break;
+			case "deferred":
+				console.log(
+					`[classify-sentiment] run ${runId}: not due until ${outcome.nextAttemptAt.toISOString()}; the inventory re-sends it`,
+				);
+				break;
+			case "retry-wait":
+				console.warn(
+					`[classify-sentiment] run ${runId}: transient refusal ${outcome.consecutiveFailures}, waiting until ${outcome.nextAttemptAt.toISOString()}`,
+				);
 				break;
 			case "terminal-validation-failure":
 				console.warn(
