@@ -735,7 +735,7 @@ export const sentimentResolutionCases = pgTable(
 		costCheck: check("sentiment_resolution_cases_cost_check", sql`${table.totalActualCostUsd} >= 0`),
 		reviewReasonCheck: check(
 			"sentiment_resolution_cases_review_reason_check",
-			sql`${table.reviewReason} IS NULL OR ${table.reviewReason} IN ('call-limit', 'cost-limit', 'contract-defect', 'unknown-provider-outcome', 'initial-classification-limit', 'retry-exhausted')`,
+			sql`${table.reviewReason} IS NULL OR ${table.reviewReason} IN ('call-limit', 'cost-limit', 'contract-defect', 'unknown-provider-outcome', 'initial-classification-limit', 'retry-exhausted', 'verifier-rejected')`,
 		),
 	}),
 ).enableRLS();
@@ -928,6 +928,12 @@ export const sentimentDispatchPermits = pgTable(
 		phaseBudgetCheck: check(
 			"sentiment_dispatch_permits_phase_budget_check",
 			sql`jsonb_typeof(${table.phaseBudget}) = 'object' AND (${table.phaseBudget} - 'classify' - 'repair' - 'verify') = '{}'::jsonb AND coalesce((${table.phaseBudget}->>'classify')::int, 0) IN (0, 1) AND coalesce((${table.phaseBudget}->>'repair')::int, 0) IN (0, 1) AND coalesce((${table.phaseBudget}->>'verify')::int, 0) IN (0, 1)`,
+		),
+		// A resume permit can never carry a classify or repair budget (the verify budget drops to 0 once consumed) and
+		// is always bound to the frozen manifest it was issued from.
+		resumeVerifyCheck: check(
+			"sentiment_dispatch_permits_resume_verify_check",
+			sql`${table.purpose} <> 'resume-verify' OR (coalesce((${table.phaseBudget}->>'classify')::int, 0) = 0 AND coalesce((${table.phaseBudget}->>'repair')::int, 0) = 0 AND ${table.contractSha256} IS NOT NULL)`,
 		),
 	}),
 ).enableRLS();

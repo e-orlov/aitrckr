@@ -1,5 +1,5 @@
 {
-  "id": "97f1d1a4-d043-48d9-82ab-211e6b0ecaab",
+  "id": "349bcc0f-4ad8-4d4a-9c81-9885e3c5585c",
   "prevId": "56405c40-7a76-4a59-8d87-cda152063125",
   "version": "7",
   "dialect": "postgresql",
@@ -2269,6 +2269,10 @@
         "sentiment_dispatch_permits_phase_budget_check": {
           "name": "sentiment_dispatch_permits_phase_budget_check",
           "value": "jsonb_typeof(\"sentiment_dispatch_permits\".\"phase_budget\") = 'object' AND (\"sentiment_dispatch_permits\".\"phase_budget\" - 'classify' - 'repair' - 'verify') = '{}'::jsonb AND coalesce((\"sentiment_dispatch_permits\".\"phase_budget\"->>'classify')::int, 0) IN (0, 1) AND coalesce((\"sentiment_dispatch_permits\".\"phase_budget\"->>'repair')::int, 0) IN (0, 1) AND coalesce((\"sentiment_dispatch_permits\".\"phase_budget\"->>'verify')::int, 0) IN (0, 1)"
+        },
+        "sentiment_dispatch_permits_resume_verify_check": {
+          "name": "sentiment_dispatch_permits_resume_verify_check",
+          "value": "\"sentiment_dispatch_permits\".\"purpose\" <> 'resume-verify' OR (coalesce((\"sentiment_dispatch_permits\".\"phase_budget\"->>'classify')::int, 0) = 0 AND coalesce((\"sentiment_dispatch_permits\".\"phase_budget\"->>'repair')::int, 0) = 0 AND \"sentiment_dispatch_permits\".\"contract_sha256\" IS NOT NULL)"
         }
       },
       "isRLSEnabled": true
@@ -3177,7 +3181,7 @@
         },
         "sentiment_resolution_cases_review_reason_check": {
           "name": "sentiment_resolution_cases_review_reason_check",
-          "value": "\"sentiment_resolution_cases\".\"review_reason\" IS NULL OR \"sentiment_resolution_cases\".\"review_reason\" IN ('call-limit', 'cost-limit', 'contract-defect', 'unknown-provider-outcome', 'initial-classification-limit', 'retry-exhausted')"
+          "value": "\"sentiment_resolution_cases\".\"review_reason\" IS NULL OR \"sentiment_resolution_cases\".\"review_reason\" IN ('call-limit', 'cost-limit', 'contract-defect', 'unknown-provider-outcome', 'initial-classification-limit', 'retry-exhausted', 'verifier-rejected')"
         }
       },
       "isRLSEnabled": true

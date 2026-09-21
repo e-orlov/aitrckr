@@ -54,6 +54,7 @@ export const REVIEW_REASONS = [
 	"unknown-provider-outcome",
 	"initial-classification-limit",
 	"retry-exhausted",
+	"verifier-rejected",
 ] as const;
 export type ReviewReason = (typeof REVIEW_REASONS)[number];
 
