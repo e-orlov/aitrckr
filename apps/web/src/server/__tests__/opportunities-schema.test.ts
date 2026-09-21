@@ -1,8 +1,10 @@
 import { prepareStructuredOutputSchema, structuredOutputSchemaViolations } from "@workspace/lib/providers";
 import { describe, expect, it, vi } from "vitest";
 
-// `createServerFn` is a Vite-transformed builder; the schema module only needs
-// it to exist so the production `opportunitiesSchema` symbol can be imported.
+// Only the production `opportunitiesSchema` symbol is needed. The module also
+// declares server functions and imports the auth/database layer, which needs
+// a configured environment at load time; those are stood in so the import
+// succeeds without one.
 vi.mock("@tanstack/react-start", () => {
 	const builder = {
 		validator: () => builder,
@@ -10,6 +12,15 @@ vi.mock("@tanstack/react-start", () => {
 	};
 	return { createServerFn: () => builder };
 });
+vi.mock("@/lib/auth/helpers", () => ({
+	requireAuthSession: async () => {
+		throw new Error("not used");
+	},
+	requireBrandAccess: async () => {
+		throw new Error("not used");
+	},
+}));
+vi.mock("@workspace/lib/db/db", () => ({ db: {} }));
 
 import { opportunitiesSchema } from "@/server/opportunities";
 
