@@ -12,6 +12,16 @@
  *          --phases classify,repair,verify --estimated-budget 0.10 --ttl-seconds N [--contract-sha256 H] …
  *          | permit revoke <permit-id> …
  *   release-held --limit N [--dry-run] …
+ *   alert list [--json] | alert ack <row-key> --expected <digest> --actor A --reason R --correlation C
+ *
+ * `status --json` is the versioned contract (`contractVersion`) the host
+ * watchdog consumes (F2-PR-3): dispatch, breakers, permits, held work, the
+ * maintenance heartbeat with its age by the database clock, and every alert
+ * row with active/cooling/acknowledged classification. `alert ack` is
+ * compare-and-set: `--expected` must equal the row's current `observedDigest`
+ * (printed by `status`/`alert list`), so evidence that arrived after the
+ * operator looked is never acknowledged blind; it writes only the alert row
+ * and its audit event.
  *
  * Resume permits are never minted here: `resume:sentiment verify --apply` is
  * the only path, because it verifies the frozen manifest and the invariant
@@ -23,21 +33,22 @@
  * are planning figures, never a hard dollar ceiling. The enforceable limits
  * are the phases, the call count, the request token/tool limits, the expiry
  * and the fencing. Exit codes: 0 ok · 1 error · 2 usage · 3 refused ·
- * 10 (status only) dispatch is held.
+ * status only: 10 dispatch is held · 20 an urgent alert is active ·
+ * 30 the maintenance heartbeat is missing or stale · 40 the status could not
+ * be produced (precedence 40 > 30 > 20 > 10 > 0).
  */
 import { parseArgs } from "node:util";
 import {
+	acknowledgeSentimentAlert,
 	analyzeAnswerRanges,
+	buildSentimentStatusReport,
 	candidatesFromMentions,
 	ensureAnalysis,
 	ensureResolutionCase,
 	ensureSentimentQueue,
-	isHeld,
 	issuePermit,
-	listBlockingBreakers,
+	listAlertStates,
 	listBreakers,
-	listControlEvents,
-	listHeldWork,
 	listPermits,
 	loadDetectableEntities,
 	loadMentions,
@@ -53,7 +64,9 @@ import {
 	resetBreaker,
 	revokePermit,
 	SENTIMENT_CLASSIFIER_VERSION,
+	STATUS_EXIT,
 	sentimentInputHash,
+	statusExitCode,
 	transitionDispatch,
 } from "@workspace/lib/sentiment";
 import boss from "../src/boss";
@@ -96,35 +109,34 @@ const positiveInt = (raw: string | undefined, flag: string): number => {
 class UsageError extends Error {}
 
 async function status(): Promise<number> {
-	const dispatch = await readDispatchState();
-	const blocking = await listBlockingBreakers();
-	// Effective permits only: live state and unexpired by the database clock.
-	const live = await listPermits({ live: true });
-	const held = await listHeldWork(10_000);
-	const events = await listControlEvents("control", "dispatch");
-	out({
-		dispatch,
-		lastTransition: events.at(-1)
-			? {
-					seq: events.at(-1)?.seq,
-					toState: events.at(-1)?.toState,
-					actor: events.at(-1)?.actor,
-					at: events.at(-1)?.createdAt,
-				}
-			: null,
-		breakers: {
-			blocking: blocking.map((b) => ({
-				scopeKey: b.scopeKey,
-				state: b.state,
-				openUntil: b.openUntil,
-				openedClass: b.openedClass,
-			})),
-		},
-		permits: { live: live.length, liveIds: live.map((p) => p.id) },
-		heldWork: { pendingAnalyses: held.counts.a, receiptsWithoutAnalysis: held.counts.b },
-		note: "estimated budgets and reservations are planning figures, not hard dollar ceilings",
-	});
-	return isHeld(dispatch) ? 10 : EXIT.ok;
+	let report: Awaited<ReturnType<typeof buildSentimentStatusReport>>;
+	try {
+		report = await buildSentimentStatusReport();
+	} catch (error) {
+		out({
+			contractVersion: 1,
+			status: "failed",
+			error: error instanceof Error ? error.name : "status-failed",
+			note: "the status report could not be produced; the database may be unreachable",
+		});
+		return STATUS_EXIT.failed;
+	}
+	out(report);
+	return statusExitCode(report);
+}
+
+async function alert(): Promise<number> {
+	const [, sub, rowKey] = positionals;
+	if (sub === "list" || sub === undefined) {
+		out(await listAlertStates());
+		return EXIT.ok;
+	}
+	if (sub !== "ack") throw new UsageError("alert subcommand must be list or ack");
+	if (!rowKey) throw new UsageError("alert ack needs the alert row key (signal or signal|scope)");
+	if (!values.expected) throw new UsageError("alert ack needs --expected <observedDigest> (compare-and-set)");
+	const result = await acknowledgeSentimentAlert({ rowKey, expectedDigest: values.expected, ...who() });
+	out(result);
+	return result.acknowledged ? EXIT.ok : EXIT.refused;
 }
 
 async function move(to: "held" | "open"): Promise<number> {
@@ -264,8 +276,10 @@ async function main(): Promise<number> {
 			return permit();
 		case "release-held":
 			return releaseHeld();
+		case "alert":
+			return alert();
 		default:
-			throw new UsageError("command must be status, hold, open, breaker, permit or release-held");
+			throw new UsageError("command must be status, hold, open, breaker, permit, release-held or alert");
 	}
 }
 

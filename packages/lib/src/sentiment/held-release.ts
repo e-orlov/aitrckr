@@ -34,12 +34,13 @@ export interface HeldWorkItem {
 export async function listHeldWork(
 	limit: number,
 	executor: Executor = db,
-): Promise<{ items: HeldWorkItem[]; counts: { a: number; b: number } }> {
+): Promise<{ items: HeldWorkItem[]; counts: { a: number; b: number }; oldestAt: Date | null }> {
 	const a = await executor
 		.select({
 			promptRunId: sentimentAnalyses.promptRunId,
 			brandId: sentimentAnalyses.brandId,
 			id: sentimentAnalyses.id,
+			since: sentimentAnalyses.createdAt,
 		})
 		.from(sentimentAnalyses)
 		.where(
@@ -51,7 +52,11 @@ export async function listHeldWork(
 		)
 		.orderBy(sentimentAnalyses.createdAt, sentimentAnalyses.id);
 	const b = await executor
-		.select({ promptRunId: sentimentDetections.promptRunId, brandId: sentimentDetections.brandId })
+		.select({
+			promptRunId: sentimentDetections.promptRunId,
+			brandId: sentimentDetections.brandId,
+			since: sentimentDetections.detectedAt,
+		})
 		.from(sentimentDetections)
 		.where(
 			and(
@@ -75,7 +80,11 @@ export async function listHeldWork(
 		})),
 		...b.map((row) => ({ promptRunId: row.promptRunId, brandId: row.brandId, analysisId: null, source: "B" as const })),
 	];
-	return { items: items.slice(0, limit), counts: { a: a.length, b: b.length } };
+	const oldestAt = [...a, ...b].reduce<Date | null>(
+		(oldest, row) => (oldest === null || row.since.getTime() < oldest.getTime() ? row.since : oldest),
+		null,
+	);
+	return { items: items.slice(0, limit), counts: { a: a.length, b: b.length }, oldestAt };
 }
 
 export interface HeldReleaseResult {

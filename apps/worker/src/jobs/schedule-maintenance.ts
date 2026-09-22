@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as Sentry from "@sentry/node";
 import { getDeployment } from "@workspace/deployment";
 import { getDefaultDelayHours } from "@workspace/lib/constants";
@@ -13,7 +14,12 @@ import {
 	resolveBrandPromptRunPlans,
 	targetKey,
 } from "@workspace/lib/run-policy";
-import { enqueueResumableSentimentRuns } from "@workspace/lib/sentiment";
+import {
+	enqueueResumableSentimentRuns,
+	evaluateSentimentAlerts,
+	runMaintenanceTick,
+	type SentimentAlertRecord,
+} from "@workspace/lib/sentiment";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Job } from "pg-boss";
 import boss from "../boss";
@@ -27,6 +33,9 @@ export interface ScheduleMaintenanceData {
 const OVERDUE_ALERT_THROTTLE_MS = 30 * 60 * 1000;
 let lastOverdueAlertMs = 0;
 
+/** One id per worker process, so the heartbeat row names the process that wrote it. */
+const WORKER_BOOT_ID = randomUUID();
+
 /**
  * Maintenance job that ensures all enabled prompts have scheduled jobs.
  * This is a self-healing mechanism that catches any prompts that fell through
@@ -35,19 +44,36 @@ let lastOverdueAlertMs = 0;
  * org was unentitled (canceled → resubscribed) or a brand had no platform
  * picks. The decision logic itself is pure (computeMaintenanceDecisions);
  * this job only gathers state and executes the decisions.
+ *
+ * The tick then wakes resumable sentiment cases and evaluates the dispatch
+ * alerts (Amendment D), and writes the durable maintenance heartbeat last —
+ * only when every stage succeeded, so the heartbeat's age is honest evidence
+ * for the host watchdog. A prompt-schedule failure still fails the job (retry);
+ * a sentiment stage failure is logged and reported and withholds the heartbeat.
  */
 export async function scheduleMaintenanceJob(jobs: Job<ScheduleMaintenanceData>[]): Promise<void> {
 	for (const job of jobs) {
 		const source = job.data?.source || "scheduled";
 		console.log(`[schedule-maintenance] Starting maintenance check (source: ${source})`);
-
-		try {
-			await runMaintenanceCheck();
-		} catch (error) {
-			console.error("[schedule-maintenance] Maintenance check failed:", error);
-			throw error; // Will trigger retry
-		}
-		await wakeResumableSentimentRuns();
+		await runMaintenanceTick({
+			heartbeat: { workerBootId: WORKER_BOOT_ID, source, alerts: null },
+			stages: [
+				{
+					name: "prompt-schedule",
+					onError: "throw",
+					run: async () => {
+						try {
+							await runMaintenanceCheck();
+						} catch (error) {
+							console.error("[schedule-maintenance] Maintenance check failed:", error);
+							throw error; // Will trigger retry
+						}
+					},
+				},
+				{ name: "sentiment-wakeup", onError: "record", run: wakeResumableSentimentRuns },
+				{ name: "sentiment-alerts", onError: "record", run: evaluateDispatchAlerts },
+			],
+		});
 	}
 }
 
@@ -57,7 +83,7 @@ export async function scheduleMaintenanceJob(jobs: Job<ScheduleMaintenanceData>[
  * may have lost its immediate enqueue (exclusive-queue refusal, process gone),
  * so every schedule tick rediscovers them from the database. Isolated from the
  * prompt schedule: a failure here is logged and reported, never a retry of the
- * whole maintenance job.
+ * whole maintenance job — but it does withhold this tick's heartbeat.
  */
 async function wakeResumableSentimentRuns(): Promise<void> {
 	try {
@@ -70,7 +96,60 @@ async function wakeResumableSentimentRuns(): Promise<void> {
 	} catch (error) {
 		console.error("[schedule-maintenance] Resumable sentiment wake-up failed:", error);
 		Sentry.captureException(error);
+		throw error;
 	}
+}
+
+/**
+ * The ten evaluator-owned dispatch alert signals. Every raised alert is one
+ * structured log line plus, when Sentry is configured, one message grouped by
+ * a stable fingerprint (signal and scope) at the approved severity level:
+ * urgent pages, informational is a ticket. The audit row is written by the
+ * evaluator before this sink runs and never claims delivery.
+ */
+async function evaluateDispatchAlerts(): Promise<void> {
+	try {
+		const result = await evaluateSentimentAlerts({ notify: notifyAlert });
+		const baseline = [
+			result.baseline.captured.length > 0 ? `baseline captured for ${result.baseline.captured.join(", ")}` : null,
+			result.baseline.missing.length > 0
+				? `baseline missing for ${result.baseline.missing.join(", ")} (captured at the first tick under a held dispatch)`
+				: null,
+		].filter(Boolean);
+		console.log(
+			`[schedule-maintenance] Sentiment alerts: ${result.evaluatedSignals.length} signals evaluated, ${result.observations} observations, ${result.raised.length} raised, ${result.suppressed} suppressed, ${result.active} active${baseline.length > 0 ? `; ${baseline.join("; ")}` : ""}`,
+		);
+	} catch (error) {
+		console.error("[schedule-maintenance] Sentiment alert evaluation failed:", error);
+		Sentry.captureException(error);
+		throw error;
+	}
+}
+
+function notifyAlert(record: SentimentAlertRecord): void {
+	console.warn(`[sentiment-alert] ${JSON.stringify(record)}`);
+	Sentry.withScope((scope) => {
+		const level = record.severity === "urgent" ? "error" : "info";
+		scope.setLevel(level);
+		scope.setTag("sentiment-alert", record.signal);
+		scope.setTag("sentiment-alert-severity", record.severity);
+		scope.setTag("sentiment-alert-runbook", record.runbook);
+		scope.setFingerprint(["sentiment-alert", record.signal, record.scope ?? "global"]);
+		scope.setContext("sentiment-alert", {
+			rowKey: record.rowKey,
+			reason: record.reason,
+			observed: record.observed,
+			threshold: record.threshold,
+			window: record.window,
+			digest: record.digest,
+			approximate: record.approximate,
+			cooldownUntil: record.cooldownUntil,
+		});
+		Sentry.captureMessage(
+			`Sentiment alert ${record.signal}${record.scope ? ` [${record.scope}]` : ""}: ${record.reason ?? "condition observed"} (runbook ${record.runbook})`,
+			level,
+		);
+	});
 }
 
 type EnabledBrand = Awaited<ReturnType<typeof db.query.brands.findMany>>[number];
