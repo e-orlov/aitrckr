@@ -280,7 +280,8 @@ describe("emission contract", () => {
 	};
 	it("groups by signal and scope only, so repeated ticks and changing digests fold into one issue", () => {
 		expect(sentimentAlertFingerprint(record)).toEqual(["sentiment-alert", "breaker-open", "rp1:abc"]);
-		expect(sentimentAlertFingerprint({ ...record, digest: "other" })).toEqual(sentimentAlertFingerprint(record));
+		const changed: SentimentAlertRecord = { ...record, digest: "other" };
+		expect(sentimentAlertFingerprint(changed)).toEqual(sentimentAlertFingerprint(record));
 		expect(sentimentAlertFingerprint({ ...record, scope: null })).toEqual([
 			"sentiment-alert",
 			"breaker-open",
