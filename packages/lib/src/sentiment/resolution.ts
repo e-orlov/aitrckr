@@ -53,6 +53,8 @@ export const REVIEW_REASONS = [
 	"contract-defect",
 	"unknown-provider-outcome",
 	"initial-classification-limit",
+	"retry-exhausted",
+	"verifier-rejected",
 ] as const;
 export type ReviewReason = (typeof REVIEW_REASONS)[number];
 
@@ -66,6 +68,8 @@ export interface ResolutionPolicy {
 	/** Bounded backoff after a transient provider error. */
 	backoffBaseMs: number;
 	backoffMaxMs: number;
+	/** Consecutive unpaid transient refusals before the case is handed to review as `retry-exhausted` (D20). */
+	maxConsecutiveTransientFailures: number;
 }
 
 /**
@@ -79,6 +83,7 @@ export const RESOLUTION_POLICY: Readonly<ResolutionPolicy> = Object.freeze({
 	maxInitialClassifications: 1,
 	backoffBaseMs: 60_000,
 	backoffMaxMs: 15 * 60_000,
+	maxConsecutiveTransientFailures: 5,
 });
 
 /** Delay before the next automatic attempt after the n-th consecutive transient failure. */

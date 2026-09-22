@@ -379,10 +379,15 @@ describe("A2B1-5 the inventory selects only safely resumable cases", () => {
 				}),
 			},
 		]);
-		await expect(
-			runSentimentJob(payload(run(6)), { resolveProvider: () => refused.provider, resolutionPolicy: fast }),
-		).rejects.toBeDefined();
+		expect(
+			await runSentimentJob(payload(run(6)), { resolveProvider: () => refused.provider, resolutionPolicy: fast }),
+		).toMatchObject({ status: "retry-wait" });
 		expect(await caseOf(run(6))).toMatchObject({ status: "retry_wait" });
+		// Amendment C rediscovers retry_wait cases only when due by the database clock: park this one in the future.
+		await client.query(
+			"UPDATE sentiment_resolution_cases SET next_attempt_at = now() + interval '1 hour' WHERE analysis_id = (SELECT id FROM sentiment_analyses WHERE prompt_run_id = $1 AND classifier_version = $2)",
+			[run(6), SENTIMENT_CLASSIFIER_VERSION],
+		);
 		// (c)(d)(e) settled late answers whose evidence is spoiled afterwards.
 		for (const [i, spoil] of [
 			[7, "instance_id = '00000000-0000-4000-8000-000000000000'"],

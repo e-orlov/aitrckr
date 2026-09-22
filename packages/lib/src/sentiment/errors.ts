@@ -19,7 +19,7 @@ export interface SafeSentimentError {
 	/** Stable internal code: a validation code, `provider`, `aborted`, `provider-unconfigured`, `claim-lost`, `persistence`, `canary-contract`, `canary-input-drift` or `unknown`. */
 	code: string;
 	/** Which class of failure produced it (for diagnosis without payloads). */
-	kind: "validation" | "provider" | "aborted" | "configuration" | "claim" | "store" | "contract" | "unknown";
+	kind: "validation" | "provider" | "aborted" | "configuration" | "claim" | "store" | "contract" | "hold" | "unknown";
 	provider: string;
 	model: string;
 	/** HTTP status the provider answered with, when the error carried one. */
@@ -85,6 +85,10 @@ export function sanitizeSentimentError(error: unknown, stage: "provider" | "pers
 	}
 	if (error instanceof Error && error.name === "SentimentProviderError") {
 		return { ...base, code: "provider-unconfigured", kind: "configuration", httpStatus: null };
+	}
+	if (error instanceof Error && error.name === "SentimentDispatchHeldError") {
+		// The boundary guard refused to dispatch: nothing left, nothing was charged.
+		return { ...base, code: "dispatch-held", kind: "hold", httpStatus: null, requestSent: false };
 	}
 	if (error instanceof Error && error.name === "StructuredOutputSchemaError") {
 		// The provider boundary refused the request schema locally: nothing left, nothing was charged.

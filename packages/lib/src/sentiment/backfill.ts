@@ -3,6 +3,7 @@ import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../db/db";
 import { promptRunEntityMentions, promptRuns, sentimentAnalyses, sentimentDetections } from "../db/schema";
 import { sentimentInputHash } from "./classifier";
+import { isHeld, readDispatchState } from "./controls";
 import { type DetectableEntity, detectEntityMentions, entityTerms } from "./detector";
 import { type SentimentSender, sendSentimentJob } from "./enqueue";
 import {
@@ -425,6 +426,11 @@ export async function runSentimentEnqueue(args: {
 		throw new Error("--enqueue requires a positive integer --limit");
 	}
 	if (args.enqueue && !args.sender) throw new Error("enqueue requires a queue sender");
+	if (args.enqueue && isHeld(await readDispatchState())) {
+		throw new Error(
+			"sentiment dispatch is held; historical backfill enqueue is refused until an operator opens dispatch",
+		);
+	}
 	const counts: SentimentEnqueueInventory = {
 		scanned: 0,
 		completed: 0,

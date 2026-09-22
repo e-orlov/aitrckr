@@ -26,6 +26,22 @@ export {
 	type SentimentEnqueueResult,
 } from "./backfill";
 export {
+	acquireProbe,
+	BREAKER_OPENING_CLASSES,
+	BREAKER_PROBE_LEASE_SECONDS,
+	breakerBackoffMs,
+	classifyDispatchFailure,
+	type DispatchFailureClass,
+	databaseNow,
+	decideBreaker,
+	listBlockingBreakers,
+	listBreakers,
+	openBreakerManually,
+	type ProbeOutcome,
+	readBreaker,
+	resetBreaker,
+} from "./breaker";
+export {
 	acceptCanaryRunId,
 	evaluateSentimentCanary,
 	inspectSentimentCanaryRun,
@@ -80,6 +96,43 @@ export {
 	validateSentimentResultDetailed,
 } from "./classifier";
 export {
+	type ControlActor,
+	consumePermitPhase,
+	DISPATCH_CONTROL_KEY,
+	type DispatchControlState,
+	type DispatchState,
+	expireUnconsumedPermits,
+	findLivePermit,
+	type IssuePermitArgs,
+	isHeld,
+	isPermitEffective,
+	isResumeVerifyBudget,
+	issuePermit,
+	type ListedPermit,
+	listControlEvents,
+	listPermits,
+	loadPermit,
+	lockedLifecyclePermits,
+	PERMIT_ESTIMATED_BUDGET_MAX_USD,
+	PERMIT_LIVE_STATES,
+	PERMIT_PHASES,
+	PERMIT_PURPOSES,
+	PermitConflictError,
+	type PermitPhase,
+	type PermitPurpose,
+	type PermitSettlement,
+	type PhaseBudget,
+	permitPurposeAllowsPhase,
+	permitSettlementFor,
+	RESERVATION_ESTIMATES_USD,
+	RESUME_VERIFY_PHASE_BUDGET,
+	readDispatchState,
+	requireActor,
+	revokePermit,
+	settlePermitReservation,
+	transitionDispatch,
+} from "./controls";
+export {
 	brandEntity,
 	competitorEntity,
 	containsBoundedTerm,
@@ -118,6 +171,14 @@ export {
 } from "./errors";
 export type { PaidResponseEnvelope } from "./errors-validation";
 export {
+	REQUEST_PROFILE_VERSION,
+	type RequestProfile,
+	requestScopeKey,
+	SCHEMA_FINGERPRINT_VERSION,
+	schemaShapeFingerprint,
+	sentimentRequestProfile,
+} from "./fingerprint";
+export {
 	type AnchorContext,
 	type AnchorGrounding,
 	type GroundingMap,
@@ -125,13 +186,19 @@ export {
 	isAttributable,
 	namesOnlyOthers,
 } from "./grounding";
+export { type HeldReleaseResult, type HeldWorkItem, listHeldWork, releaseHeldWork } from "./held-release";
 export {
+	type DispatchContext,
+	type DispatchDeps,
 	enqueueResumableSentimentRuns,
 	listResumableSentimentRuns,
+	permitAllowsVerify,
+	RESUME_BATCH_MAX,
 	type ResumableEnqueueResult,
 	type ResumableSentimentRun,
 	resumableEvidence,
 	runSentimentJob,
+	SentimentDispatchHeldError,
 	type SentimentJobDeps,
 	type SentimentJobOptions,
 	type SentimentJobOutcome,
@@ -205,6 +272,21 @@ export {
 	verifierIssuesToTargets,
 	verifierResultSchemaFor,
 } from "./resolution";
+export {
+	applyResumeForVerify,
+	manifestSha256,
+	RESUME_DEFAULT_BATCH,
+	RESUME_MANIFEST_VERSION,
+	RESUME_VERIFY_ESTIMATED_BUDGET_USD,
+	RESUME_VERIFY_TTL_SECONDS,
+	type ResumeApplyResult,
+	type ResumeApplySkip,
+	type ResumeEligible,
+	type ResumeExclusion,
+	type ResumeManifest,
+	selectResumableForVerify,
+	selectStoredCandidate,
+} from "./resume";
 export {
 	assertProviderSchemaBudget,
 	dereferenceSchema,

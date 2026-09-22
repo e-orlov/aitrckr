@@ -1,5 +1,7 @@
 import type { Provider } from "../../providers/types";
-import type { SentimentJobDeps } from "../job";
+import { breakerBackoffMs } from "../breaker";
+import type { DispatchState, PermitPhase } from "../controls";
+import type { DispatchDeps, SentimentJobDeps } from "../job";
 import { SENTIMENT_MODEL } from "../types";
 
 /**
@@ -15,8 +17,47 @@ const phaseOf = (prompt: string) =>
 			? "repair"
 			: "classify";
 
-export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnswer?: unknown } = {}) {
+export interface FakePermit {
+	id: string;
+	purpose: "canary" | "resume-verify";
+	analysisId: string;
+	instanceId: string;
+	inputHash: string;
+	phaseBudget: Record<PermitPhase, 0 | 1>;
+	estimatedCostBudgetUsd: number;
+	settledCostUsd: number;
+	reservedEstimateUsd: number;
+	state: "issued" | "active" | "exhausted" | "expired" | "revoked";
+	expiresAt: Date;
+}
+
+export interface FakeBreaker {
+	scopeKey: string;
+	state: "closed" | "open" | "half_open";
+	openUntil: Date | null;
+	probeAttemptId: string | null;
+	probeGeneration: number;
+	probeLeaseUntil: Date | null;
+	consecutiveFailures: number;
+	openedClass: string | null;
+	schemaFp: string;
+	events: string[];
+}
+
+export function resolutionFakes(
+	options: {
+		verifierVerdict?: unknown;
+		repairAnswer?: unknown;
+		/** Dispatch control state the fakes report; open unless a test holds it. */
+		dispatch?: DispatchState;
+		now?: () => Date;
+	} = {},
+) {
 	const cases = new Map<string, Record<string, unknown>>();
+	const now = options.now ?? (() => new Date());
+	const control = { state: options.dispatch ?? ({ state: "open", epoch: 1, readable: true } as DispatchState) };
+	const permits: FakePermit[] = [];
+	const breakers = new Map<string, FakeBreaker>();
 	const attempts: {
 		id: string;
 		analysisId: string;
@@ -28,6 +69,9 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 		actualCostUsd: string | null;
 		candidate: unknown;
 		inputHash: string;
+		permitId: string | null;
+		scopeKey: string | null;
+		schemaFp: string | null;
 		startedAt: Date;
 	}[] = [];
 	const calls: { phase: string; prompt: string }[] = [];
@@ -81,10 +125,10 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 			row.totalActualCostUsd = paid.reduce((sum, a) => sum + Number(a.actualCostUsd ?? 0), 0).toFixed(6);
 			return { automatedProviderCalls: row.automatedProviderCalls, totalActualCostUsd: Number(row.totalActualCostUsd) };
 		},
-		openProviderAttempt: async ({ analysisId, phase, inputHash, claim }) => {
+		openProviderAttempt: async ({ analysisId, phase, inputHash, claim, id, permitId, scopeKey, schemaFp }) => {
 			const ordinal = attempts.filter((a) => a.analysisId === analysisId).length + 1;
 			const row = {
-				id: `att-${analysisId}-${ordinal}`,
+				id: id ?? `att-${analysisId}-${ordinal}`,
 				analysisId,
 				instanceId: claim.instanceId,
 				ordinal,
@@ -94,6 +138,9 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 				actualCostUsd: null,
 				candidate: null,
 				inputHash,
+				permitId: permitId ?? null,
+				scopeKey: scopeKey ?? null,
+				schemaFp: schemaFp ?? null,
 				startedAt: new Date(),
 			};
 			attempts.push(row);
@@ -126,6 +173,145 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 					finishedAt: null,
 				})) as never,
 	};
+	const dispatch: DispatchDeps = {
+		readDispatchState: async () => control.state,
+		databaseNow: async () => now(),
+		findLivePermit: async ({ analysisId, instanceId, inputHash }) =>
+			(permits.find(
+				(p) =>
+					p.analysisId === analysisId &&
+					p.instanceId === instanceId &&
+					p.inputHash === inputHash &&
+					(p.state === "issued" || p.state === "active") &&
+					p.expiresAt.getTime() > now().getTime(),
+			) as never) ?? null,
+		consumePermitPhase: async (_tx, { analysisId, instanceId, inputHash, phase, reserveUsd }) => {
+			const p = permits.find(
+				(x) =>
+					x.analysisId === analysisId &&
+					x.instanceId === instanceId &&
+					x.inputHash === inputHash &&
+					(x.state === "issued" || x.state === "active"),
+			);
+			if (!p) return { consumed: false, reason: "no-live-permit" };
+			if (p.expiresAt.getTime() <= now().getTime()) return { consumed: false, reason: "expired" };
+			if (p.phaseBudget[phase] !== 1) return { consumed: false, reason: "phase-exhausted" };
+			if (p.settledCostUsd + p.reservedEstimateUsd + reserveUsd > p.estimatedCostBudgetUsd + 1e-9) {
+				return { consumed: false, reason: "estimate-budget-exhausted" };
+			}
+			p.phaseBudget[phase] = 0;
+			p.reservedEstimateUsd += reserveUsd;
+			p.state = "active";
+			return { consumed: true, permitId: p.id, reservedEstimateUsd: reserveUsd };
+		},
+		settlePermitReservation: async (_tx, { permitId, reservedEstimateUsd, settlement }) => {
+			const p = permits.find((x) => x.id === permitId);
+			if (!p) return;
+			// Mirrors the store: an unpriced paid answer keeps its reservation counted; nothing is fabricated as $0.
+			if (settlement.kind !== "paid-unknown-cost") {
+				p.reservedEstimateUsd = Math.max(0, p.reservedEstimateUsd - reservedEstimateUsd);
+			}
+			if (settlement.kind === "paid") p.settledCostUsd += Math.max(0, settlement.actualCostUsd);
+			if (Object.values(p.phaseBudget).every((v) => v === 0)) p.state = "exhausted";
+		},
+		loadPermit: async (id) => {
+			const p = permits.find((x) => x.id === id);
+			return p
+				? ({
+						...p,
+						estimatedCostBudgetUsd: p.estimatedCostBudgetUsd.toFixed(6),
+						settledCostUsd: p.settledCostUsd.toFixed(6),
+						reservedEstimateUsd: p.reservedEstimateUsd.toFixed(6),
+					} as never)
+				: null;
+		},
+		readBreaker: async (scopeKey) => (breakers.get(scopeKey) as never) ?? null,
+		acquireProbe: async (_tx, scopeKey, attemptId) => {
+			const b = breakers.get(scopeKey);
+			if (!b) return null;
+			const t = now().getTime();
+			const claimable =
+				(b.state === "open" && b.openUntil !== null && b.openUntil.getTime() <= t) ||
+				(b.state === "half_open" && (b.probeAttemptId === null || (b.probeLeaseUntil?.getTime() ?? 0) < t));
+			if (!claimable) return null;
+			b.state = "half_open";
+			b.probeAttemptId = attemptId;
+			b.probeGeneration += 1;
+			b.probeLeaseUntil = new Date(t + 900_000);
+			b.events.push("probe");
+			return { generation: b.probeGeneration };
+		},
+		openBreaker: async (_tx, evidence) => {
+			const open = (key: string, schemaFp: string) => {
+				const b = breakers.get(key) ?? {
+					scopeKey: key,
+					state: "closed" as const,
+					openUntil: null,
+					probeAttemptId: null,
+					probeGeneration: 0,
+					probeLeaseUntil: null,
+					consecutiveFailures: 0,
+					openedClass: null,
+					schemaFp,
+					events: [] as string[],
+				};
+				b.consecutiveFailures += 1;
+				b.state = "open";
+				b.openUntil = new Date(now().getTime() + breakerBackoffMs(b.consecutiveFailures));
+				b.probeAttemptId = null;
+				b.probeLeaseUntil = null;
+				b.openedClass = evidence.failureClass;
+				b.events.push(`open:${evidence.failureClass}`);
+				breakers.set(key, b);
+			};
+			open(evidence.scopeKey, evidence.schemaFp);
+			if (evidence.failureClass === "local-contract") {
+				for (const b of [...breakers.values()]) {
+					if (b.scopeKey !== evidence.scopeKey && b.schemaFp === evidence.schemaFp && b.state !== "open") {
+						open(b.scopeKey, b.schemaFp);
+					}
+				}
+			}
+		},
+		settleProbe: async (_tx, { scopeKey, attemptId, generation, outcome }) => {
+			if (outcome === "untouched") return "untouched";
+			const b = breakers.get(scopeKey);
+			if (!b || b.probeAttemptId !== attemptId || b.probeGeneration !== generation) return "fenced";
+			if (outcome === "released") {
+				b.probeAttemptId = null;
+				b.probeLeaseUntil = null;
+				b.events.push("released");
+				return "released";
+			}
+			if (outcome === "accepted") {
+				Object.assign(b, {
+					state: "closed",
+					consecutiveFailures: 0,
+					openUntil: null,
+					probeAttemptId: null,
+					probeLeaseUntil: null,
+				});
+				b.events.push("closed");
+				return "closed";
+			}
+			b.consecutiveFailures += 1;
+			Object.assign(b, {
+				state: "open",
+				openUntil: new Date(now().getTime() + breakerBackoffMs(b.consecutiveFailures)),
+				probeAttemptId: null,
+				probeLeaseUntil: null,
+			});
+			b.events.push("reopened");
+			return "reopened";
+		},
+		loadAttemptDispatch: async (id) => {
+			const row = attempts.find((a) => a.id === id);
+			return row
+				? { outcome: row.outcome as never, permitId: row.permitId, scopeKey: row.scopeKey, schemaFp: row.schemaFp }
+				: null;
+		},
+	};
+	deps.dispatch = dispatch;
 	/** Answers the verifier (accept by default) and, when given, repairs; classification calls are the test's own. */
 	const phasesProvider = (classify?: Provider): Provider =>
 		({
@@ -156,5 +342,24 @@ export function resolutionFakes(options: { verifierVerdict?: unknown; repairAnsw
 				};
 			},
 		}) as unknown as Provider;
-	return { deps, cases, attempts, calls, phasesProvider };
+	/** Issue an in-memory permit bound to one instance and input. */
+	const issuePermit = (
+		permit: Omit<FakePermit, "state" | "settledCostUsd" | "reservedEstimateUsd" | "purpose"> & {
+			purpose?: FakePermit["purpose"];
+		},
+	): FakePermit => {
+		const row: FakePermit = {
+			purpose: "canary",
+			...permit,
+			state: "issued",
+			settledCostUsd: 0,
+			reservedEstimateUsd: 0,
+		};
+		permits.push(row);
+		return row;
+	};
+	const setDispatch = (state: DispatchState) => {
+		control.state = state;
+	};
+	return { deps, cases, attempts, calls, phasesProvider, permits, breakers, issuePermit, setDispatch };
 }

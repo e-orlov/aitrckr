@@ -515,9 +515,9 @@ describe("S8 transient provider error → bounded backoff → completed", () => 
 			{ phase: "classify", answer: { entities: [brandOk()] } },
 			{ phase: "verify", answer: ACCEPT },
 		]);
-		await expect(
-			runSentimentJob(payload(run(8)), { resolveProvider: () => provider, resolutionPolicy: fast }),
-		).rejects.toMatchObject({ kind: "provider", httpStatus: 503 });
+		expect(
+			await runSentimentJob(payload(run(8)), { resolveProvider: () => provider, resolutionPolicy: fast }),
+		).toMatchObject({ status: "retry-wait", consecutiveFailures: 1 });
 		let c = await caseOf(run(8));
 		expect(c).toMatchObject({ status: "retry_wait", automated_provider_calls: 0 });
 		expect(c.next_attempt_at).not.toBeNull();

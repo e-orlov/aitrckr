@@ -761,8 +761,23 @@ export async function loadProviderAttempts(analysisId: string, executor: Executo
  * The ordinal runs over every instance of the analysis, so rows of a
  * superseded instance and of the current one never collide.
  */
+export interface AttemptDispatchEvidence {
+	/** Client-generated id so the same id can fence a breaker probe lease in the same transaction. */
+	id?: string;
+	permitId?: string | null;
+	scopeKey?: string | null;
+	schemaFp?: string | null;
+	/** Planning estimate reserved against the permit for this call; not a price. */
+	reservedEstimateUsd?: number | null;
+}
+
 export async function openProviderAttempt(
-	args: { analysisId: string; phase: AttemptPhase; inputHash: string; claim: ResolutionOwner },
+	args: {
+		analysisId: string;
+		phase: AttemptPhase;
+		inputHash: string;
+		claim: ResolutionOwner;
+	} & AttemptDispatchEvidence,
 	executor: Executor = db,
 ): Promise<{ id: string; ordinal: number }> {
 	const owned = await executor
@@ -777,6 +792,7 @@ export async function openProviderAttempt(
 	const [row] = await executor
 		.insert(sentimentProviderAttempts)
 		.values({
+			...(args.id ? { id: args.id } : {}),
 			analysisId: args.analysisId,
 			instanceId: args.claim.instanceId,
 			ordinal: next,
@@ -785,9 +801,30 @@ export async function openProviderAttempt(
 			model: SENTIMENT_MODEL,
 			inputHash: args.inputHash,
 			outcome: "sending",
+			permitId: args.permitId ?? null,
+			scopeKey: args.scopeKey ?? null,
+			schemaFp: args.schemaFp ?? null,
+			reservedEstimateUsd: costColumn(args.reservedEstimateUsd),
 		})
 		.returning({ id: sentimentProviderAttempts.id, ordinal: sentimentProviderAttempts.ordinal });
 	return row;
+}
+
+/** The dispatch evidence of one attempt as the boundary guard re-checks it. */
+export async function loadAttemptDispatch(
+	id: string,
+	executor: Executor = db,
+): Promise<{
+	outcome: AttemptOutcome;
+	permitId: string | null;
+	scopeKey: string | null;
+	schemaFp: string | null;
+} | null> {
+	const row = await executor.query.sentimentProviderAttempts.findFirst({
+		where: eq(sentimentProviderAttempts.id, id),
+		columns: { outcome: true, permitId: true, scopeKey: true, schemaFp: true },
+	});
+	return row ? { ...row, outcome: row.outcome as AttemptOutcome } : null;
 }
 
 /** A settlement that disagrees with the terminal evidence an attempt already holds; the first evidence stands. */
@@ -889,6 +926,35 @@ export async function listUnresolvedCases(executor: Executor = db): Promise<Unre
 		unresolvedTargets: (row.unresolvedTargets as UnresolvedTarget[]) ?? [],
 		totalActualCostUsd: Number(row.totalActualCostUsd),
 	}));
+}
+
+/**
+ * Parked cases that are due by the database clock (or carry no due time),
+ * oldest due first, bounded: the maintenance inventory's rediscovery of
+ * `retry_wait` work, including cases parked by the dispatch hold or the
+ * breaker. Uses the `(status, next_attempt_at)` index.
+ */
+export async function listDueRetryWaitCases(
+	limit: number,
+	executor: Executor = db,
+): Promise<{ analysisId: string; promptRunId: string; nextAttemptAt: Date | null }[]> {
+	return executor
+		.select({
+			analysisId: sentimentResolutionCases.analysisId,
+			promptRunId: sentimentAnalyses.promptRunId,
+			nextAttemptAt: sentimentResolutionCases.nextAttemptAt,
+		})
+		.from(sentimentResolutionCases)
+		.innerJoin(sentimentAnalyses, eq(sentimentAnalyses.id, sentimentResolutionCases.analysisId))
+		.where(
+			and(
+				eq(sentimentResolutionCases.status, "retry_wait"),
+				eq(sentimentAnalyses.status, "pending_resolution"),
+				or(isNull(sentimentResolutionCases.nextAttemptAt), sql`${sentimentResolutionCases.nextAttemptAt} <= now()`),
+			),
+		)
+		.orderBy(sql`${sentimentResolutionCases.nextAttemptAt} nulls first`, sentimentResolutionCases.analysisId)
+		.limit(limit);
 }
 
 /**

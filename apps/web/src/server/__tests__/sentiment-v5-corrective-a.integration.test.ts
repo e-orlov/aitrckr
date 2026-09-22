@@ -494,9 +494,9 @@ describe("F a proven non-billable rejection is retried with bounded backoff", ()
 			{ phase: "classify", answer: { entities: [brandOk] } },
 			{ phase: "verify", answer: ACCEPT },
 		]);
-		await expect(
-			runSentimentJob(payload(run(9)), { resolveProvider: () => provider, resolutionPolicy: fast }),
-		).rejects.toMatchObject({ kind: "provider", httpStatus: 429 });
+		expect(
+			await runSentimentJob(payload(run(9)), { resolveProvider: () => provider, resolutionPolicy: fast }),
+		).toMatchObject({ status: "retry-wait", consecutiveFailures: 1 });
 		expect(await caseOf(run(9))).toMatchObject({ status: "retry_wait", automated_provider_calls: 0 });
 		expect((await analysisOf(run(9))).status).toBe("pending_resolution");
 		expect((await attemptsOf(run(9))).map((a) => `${a.phase}:${a.outcome}`)).toEqual(["classify:provider-error"]);

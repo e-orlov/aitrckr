@@ -695,8 +695,10 @@ describe("canary verdict after the one call", () => {
 		expect(deps.claimAnalysis).toHaveBeenCalledTimes(1);
 		expect(marks).toEqual([expect.objectContaining({ status: "pending_resolution", errorCode: "provider" })]);
 		expect(usage).toEqual([]);
-		expect(report.outcome).toEqual({ status: "error", name: "SentimentJobError", code: "provider", httpStatus: 503 });
-		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error", detail: "503" }] });
+		// Amendment C: the typed 503 parks the run as retry-wait instead of throwing; the canary still reports one
+		// provider failure and one attempt, and nothing is retried or re-sent.
+		expect(report.outcome).toEqual({ status: "retry-wait" });
+		expect(report.verdict).toEqual({ status: "reject", reasons: [{ code: "provider-error" }] });
 		expect(JSON.stringify(report)).not.toMatch(/sk-or-|Authorization|upstream unavailable/);
 	});
 
