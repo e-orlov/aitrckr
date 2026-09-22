@@ -122,6 +122,60 @@ export interface SentimentAlertRecord {
 
 export type AlertSink = (record: SentimentAlertRecord) => void | Promise<void>;
 
+/** Stable grouping identity for an external sink: the signal and its scope, never the digest, evidence or time. */
+export function sentimentAlertFingerprint(record: Pick<SentimentAlertRecord, "signal" | "scope">): string[] {
+	return ["sentiment-alert", record.signal, record.scope ?? "global"];
+}
+
+/** Approved severity policy for an external sink: urgent pages (error), informational is a ticket (info). */
+export function sentimentAlertLevel(severity: AlertSeverity): "error" | "info" {
+	return severity === "urgent" ? "error" : "info";
+}
+
+const RECORD_KEYS = [
+	"v",
+	"kind",
+	"signal",
+	"scope",
+	"rowKey",
+	"severity",
+	"reason",
+	"observed",
+	"threshold",
+	"window",
+	"runbook",
+	"digest",
+	"evidence",
+	"approximate",
+	"evaluatedAt",
+	"alertedAt",
+	"cooldownUntil",
+	"note",
+] as const;
+const FORBIDDEN_EVIDENCE_KEYS =
+	/prompt|answer|candidate|schema|apiKey|api_key|authorization|token|secret|password|body/i;
+
+/**
+ * A record is emittable only if it carries exactly the contract keys and its
+ * evidence names nothing that could hold a prompt, an answer, a candidate, a
+ * schema document or a credential. Thrown, never logged, on violation.
+ */
+export function assertEmittableAlertRecord(record: SentimentAlertRecord): void {
+	for (const key of Object.keys(record)) {
+		if (!(RECORD_KEYS as readonly string[]).includes(key))
+			throw new Error(`alert record carries an unknown key "${key}"`);
+	}
+	const walk = (value: unknown, path: string): void => {
+		if (value === null || typeof value !== "object") return;
+		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+			if (FORBIDDEN_EVIDENCE_KEYS.test(k)) throw new Error(`alert evidence must not carry "${path}${k}"`);
+			if (typeof v === "string" && v.length > 512) throw new Error(`alert evidence value "${path}${k}" is not bounded`);
+			walk(v, `${path}${k}.`);
+		}
+	};
+	walk(record.evidence, "evidence.");
+}
+
 export const logAlertSink: AlertSink = (record) => {
 	console.warn(`[sentiment-alert] ${JSON.stringify(record)}`);
 };
@@ -1033,7 +1087,8 @@ async function observeGrowthSignals(
 		}
 		const cases = await observeCases(executor, where);
 		let effectiveBase = base;
-		if (held && base.mode === "count-delta" && cases.count <= AWAITING_REVIEW_EXACT_ID_LIMIT) {
+		const degraded = base.mode === "count-delta" || watermarkOf(state)?.mode === "count-delta";
+		if (held && degraded && cases.count <= AWAITING_REVIEW_EXACT_ID_LIMIT) {
 			effectiveBase = await rebuildExactBaseline(executor, rowKey, cases.ids, now);
 			baseline.rebuilt.push(rowKey);
 		}
@@ -1095,6 +1150,7 @@ export async function evaluateSentimentAlerts(deps: AlertEvaluationDeps = {}): P
 		if (!persisted.record) continue;
 		tally.raised.push(persisted.record);
 		try {
+			assertEmittableAlertRecord(persisted.record);
 			await notify(persisted.record);
 		} catch (error) {
 			tally.notifyFailures += 1;

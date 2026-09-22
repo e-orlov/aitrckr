@@ -19,6 +19,8 @@ import {
 	evaluateSentimentAlerts,
 	runMaintenanceTick,
 	type SentimentAlertRecord,
+	sentimentAlertFingerprint,
+	sentimentAlertLevel,
 } from "@workspace/lib/sentiment";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Job } from "pg-boss";
@@ -129,12 +131,12 @@ async function evaluateDispatchAlerts(): Promise<void> {
 function notifyAlert(record: SentimentAlertRecord): void {
 	console.warn(`[sentiment-alert] ${JSON.stringify(record)}`);
 	Sentry.withScope((scope) => {
-		const level = record.severity === "urgent" ? "error" : "info";
+		const level = sentimentAlertLevel(record.severity);
 		scope.setLevel(level);
 		scope.setTag("sentiment-alert", record.signal);
 		scope.setTag("sentiment-alert-severity", record.severity);
 		scope.setTag("sentiment-alert-runbook", record.runbook);
-		scope.setFingerprint(["sentiment-alert", record.signal, record.scope ?? "global"]);
+		scope.setFingerprint(sentimentAlertFingerprint(record));
 		scope.setContext("sentiment-alert", {
 			rowKey: record.rowKey,
 			reason: record.reason,

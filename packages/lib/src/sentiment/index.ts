@@ -36,6 +36,7 @@ export {
 	type AlertStateSummary,
 	type AlertWatermark,
 	acknowledgeSentimentAlert,
+	assertEmittableAlertRecord,
 	awaitingReviewThreshold,
 	captureAlertBaselines,
 	decideAwaitingReviewGrowth,
@@ -56,6 +57,8 @@ export {
 	readMaintenanceHeartbeat,
 	reserveBlockedPhases,
 	type SentimentAlertRecord,
+	sentimentAlertFingerprint,
+	sentimentAlertLevel,
 	writeMaintenanceHeartbeat,
 } from "./alerts";
 export {
