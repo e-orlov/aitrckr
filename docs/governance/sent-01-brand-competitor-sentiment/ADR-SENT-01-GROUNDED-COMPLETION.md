@@ -161,7 +161,7 @@ D3 automatic hold on breaker storms disabled in the first release · D4 output-l
 
 ### C11. Boundaries
 
-PR-2 owns alert evaluation, baselines and the maintenance heartbeat (the `sentiment_alert_state` table is created here, empty). PR-3 owns the Windows watchdog and status integration. The fixed-300-ms waits in `sentiment-v5-late-settlement.integration.test.ts` were replaced by a bounded poll in this PR once the real-Postgres matrix became a required CI gate (`Scheduling Policy Verification` runs every `apps/web` integration file, `verify-sentiment-db.ts` and a loopback-only network-guard reconciliation). This amendment and its PR are not deploy authorization: release build, rehearsal, canary, resume of parked production cases, natural OPEN and historical backfill each require their own GO.
+PR-2 owns alert evaluation, baselines and the maintenance heartbeat (the `sentiment_alert_state` table is created here, empty; the evaluator itself is Amendment D). PR-3 owns the Windows watchdog and status integration. The fixed-300-ms waits in `sentiment-v5-late-settlement.integration.test.ts` were replaced by a bounded poll in this PR once the real-Postgres matrix became a required CI gate (`Scheduling Policy Verification` runs every `apps/web` integration file, `verify-sentiment-db.ts` and a loopback-only network-guard reconciliation). This amendment and its PR are not deploy authorization: release build, rehearsal, canary, resume of parked production cases, natural OPEN and historical backfill each require their own GO.
 
 ### C12. Traceability
 
@@ -182,6 +182,60 @@ PR-2 owns alert evaluation, baselines and the maintenance heartbeat (the `sentim
 | C7 verifier rejection to human review | `sentiment-resume-verify.integration.test.ts` (IT-SNT-C-009) |
 | canary entry point under a held dispatch | `sentiment-dispatch-controls.integration.test.ts` (IT-SNT-C-015) |
 | CI executes the matrix and the DB verifier | `.github/workflows/e2e.yaml` job `Scheduling Policy Verification`, `e2e/sentiment-ci/reconcile.cjs` |
+
+## Amendment D — alert evaluator, baselines and maintenance heartbeat (recorded 2026-09-22; implemented in F2-PR-2)
+
+Amendment D resolves the Phase-0 signal-inventory conflict between the F2D design (nine signals) and the F2DR review (two additions) by owner decision: **eleven logical signals exist; the maintenance evaluator owns and evaluates exactly ten; the host watchdog (F2-PR-3) owns `alert-delivery-failure`.** The registry `packages/lib/src/sentiment/alert-registry.ts` is the single contract; a silent addition, removal, rename or owner change fails `alert-registry.test.ts`.
+
+### D1. Inventory and ownership
+
+| # | signal | owner | severity | scope | condition | cooldown |
+|---|---|---|---|---|---|---|
+| 1 | `first-contract-defect` | maintenance-evaluator | urgent | global | a `awaiting_review/contract-defect` case id outside the captured baseline and the acknowledged set (0 → ≥ 1) | 6 h |
+| 2 | `breaker-open` | maintenance-evaluator | urgent | request-profile scope | the scope's breaker row is `open` | 1 h per scope |
+| 3 | `probe-failed-or-expired` | maintenance-evaluator | urgent | request-profile scope | a half-open probe was refused (`half_open → open` audit event) or its lease passed without an outcome | 1 h per scope |
+| 4 | `refusals-across-shapes` | maintenance-evaluator | urgent | global | direct (non-sibling) class-2 breaker openings in ≥ 2 distinct scopes within 24 h (D8) | 6 h |
+| 5 | `provider-refusal-config` | maintenance-evaluator | urgent | provider · model · HTTP status | the latest `provider-error` attempt of a parked analysis whose sanitized message carries HTTP 401, 402 or 403, within 24 h; evidence is ids and counts only | 6 h |
+| 6 | `awaiting-review-growth` | maintenance-evaluator | informational | global (+ `baseline-count-fallback` scope) | new unacknowledged `awaiting_review` ids ≥ 5, or — only when the baseline count is > 0 — ≥ `ceil(0.25 × baseline_count)` (D9); with a zero baseline only the absolute threshold applies | 24 h |
+| 7 | `held-backlog-growth` | maintenance-evaluator | informational | global | under HELD, the release selector A ∪ B holds ≥ 20 items or its oldest item is ≥ 48 h old (D10) | 24 h |
+| 8 | `permit-exhausted` | maintenance-evaluator | informational (urgent for an unverified canary) | permit + reason | Q2 mapping below | per permit and reason (24 h; re-arms on a new reason) |
+| 9 | `reserve-exceeded` | maintenance-evaluator | informational | permit | a live unexpired permit has a phase with budget 1 whose `settled + reserved + R_next ≤ estimated budget` cannot hold; the alert states that reservations are planning estimates, not price ceilings | once per unchanged blocking state (24 h; re-arms on material change) |
+| 10 | `gate-breach` | maintenance-evaluator | urgent | occurrence (analysis) | an analysis parked with `error_code = gate-breach:*` (the boundary guard refused a request an earlier gate should have stopped) | per occurrence (re-arms on a new code) |
+| 11 | `alert-delivery-failure` | host-watchdog | urgent | host | heartbeat stale / status not executable — **not evaluated in PR-2**, marked `not-evaluated-here` in the status contract, never emitted by the worker | — |
+
+**D3 stands:** no signal transitions dispatch, a breaker or a permit; the evaluator reads and writes only `sentiment_alert_state` and `sentiment_control_events(subject_kind='alert')`.
+
+### D2. `permit-exhausted` on the migration-0024 model (Q2)
+
+The obsolete `max_calls` / `max_cost_usd` / `consumed_calls` fields are not used. A permit fires only while its lifecycle still expects automatic work (analysis not completed/no_mentions/failed and unverified, case absent or in `open`, `repairing`, `verifying`, `retry_wait`) and either (a) its state is `exhausted` or every `phase_budget` value is 0 → reason `phase-budget-exhausted`, or (b) a permit that became `active` has passed `expires_at` by the database clock → reason `active-expired-unresolved`. Excluded: verified or terminal lifecycles, an unused `issued` permit that expired, a lifecycle already parked for review or reconciliation (those populations have their own signals), a reservation-predicate refusal (exclusively `reserve-exceeded`) and revoked permits.
+
+### D3. Baselines, watermarks, acknowledgement (R9 as implemented)
+
+- **Capture.** On a maintenance tick under HELD, one transaction derives the id sets of `awaiting_review` (row `awaiting-review-growth`) and `awaiting_review/contract-defect` (row `first-contract-defect`) and writes them only where no baseline exists (`INSERT … ON CONFLICT DO UPDATE … WHERE baseline IS NULL`), audited as `baseline-captured`. A fresh installation captures `count 0, ids []`; concurrent first ticks converge on one baseline. No literal count exists anywhere. Under OPEN without a baseline the growth signals are reported as `baseline missing` and skipped, never invented.
+- **Detection** is clock-free set arithmetic: new = current − baseline − acknowledged. Windows apply only to the event-based signals (24 h for D8 and configuration refusals) and are evaluated by the database clock (`now()`).
+- **Acknowledgement** (`alert ack <rowKey> --expected <digest>`) is compare-and-set against the row's current `observedDigest`, requires actor/reason/correlation, is idempotent (`already-acknowledged`), merges the observed new ids into `ackedIds` (exact mode) or advances `watermarkCount` (count-delta mode), and appends one `acknowledged` audit event. It never deletes or rewrites attempts, cases, costs or provider evidence.
+- **Q4 degradation.** Above 5,000 open ids the growth row switches to `mode = count-delta` (`baseline_count`, `watermark_count`, `precision_degraded = true`, no id arrays), applies the D9 thresholds to the count delta with every field labelled approximate, and raises one informational notice on entry under the separate row `awaiting-review-growth|baseline-count-fallback` (own cooldown, so the notice can neither consume nor be suppressed by the ordinary growth cooldown). When the population is ≤ 5,000 again, the next HELD tick rebuilds the exact id baseline transactionally and audits the transition `count-delta → exact`. This is a scoped condition of `awaiting-review-growth`, not a twelfth signal.
+
+### D4. Emission and cooldown
+
+Every raised alert is one structured log record (`[sentiment-alert] {…}`, contract keys only, evidence names screened against prompt/answer/candidate/schema/credential fields and bounded), one append-only `sentiment_control_events` row (`subject_kind='alert'`, `to_state='raised'`, whose reason states that delivery is not asserted), the persisted `evaluated_at`, `last_alerted_at` and `cooldown_until` on the row, and — when Sentry is configured — one message grouped by the stable fingerprint `["sentiment-alert", signal, scope|"global"]` at `error` (urgent) or `info` (informational). A firing signal within its cooldown is persisted but silent; acknowledged evidence is silent until it changes; permit-bound and per-occurrence signals re-arm immediately on a material change. Everything lives in the row, so a worker restart resets nothing.
+
+### D5. Maintenance heartbeat and status contract
+
+`scheduleMaintenanceJob` runs its stages in order — `prompt-schedule` (a failure still fails the job for retry), `sentiment-wakeup`, `sentiment-alerts` — and writes the heartbeat row `maintenance_heartbeat` (`evaluated_at = now()` by the database clock; `worker_boot_id`, source, per-stage timings and the alert tally in the watermark) **last and only when every stage succeeded**; a partial or failed tick leaves the previous heartbeat unchanged. `control:sentiment status --json` is the versioned (`contractVersion: 1`), deterministic report the host watchdog consumes: dispatch, breakers, live permits, held work with its oldest item, the heartbeat with its age and staleness (> 15 min), the registry split (11 / 10 / 1), the signals evaluated here, the host-owned signal marked `not-evaluated-here`, and every alert row classified active / cooling / acknowledged. Exit codes: `0` healthy, `10` held and nothing worse, `20` an urgent alert is active, `30` heartbeat missing or stale, `40` status failed (precedence 40 > 30 > 20 > 10 > 0); `1`/`2`/`3` keep their CLI-wide meanings. Runbooks: `alert-runbooks.md`.
+
+### D6. Traceability
+
+| Decision | Automated evidence |
+|---|---|
+| D1 inventory 11 / 10 / 1, owner split, host signal never evaluated or named by the evaluator | `alert-registry.test.ts`; `sentiment-alerts.integration.test.ts` (IT-SNT-D-007 status contract) |
+| D1 thresholds just below / at the boundary (D8, D9 zero and non-zero baseline, D10) | `alerts.test.ts` |
+| D2 Q2 permit-exhausted cases and the reserve-exceeded predicate | `alerts.test.ts`; `sentiment-alerts.integration.test.ts` (IT-SNT-D-005) |
+| D3 fresh empty baseline, existing-id capture, eight concurrent ticks, CAS acknowledgement, untouched incident rows | `sentiment-alerts.integration.test.ts` (IT-SNT-D-001, D-002) |
+| D3 Q4 both directions across 5,000, separate fallback scope, count acknowledgement, exact rebuild audited | `sentiment-alerts.integration.test.ts` (IT-SNT-D-008) |
+| D4 cooldown / acknowledgement / re-arm decisions, stable fingerprint, redaction allow-list | `alerts.test.ts` |
+| D4 per-scope breaker and probe signals, cross-shape refusals, configuration refusals, gate breaches, no duplicate notification in cooldown, no dispatch transition, no provider call (fetch spy) | `sentiment-alerts.integration.test.ts` (IT-SNT-D-002…006) |
+| D5 heartbeat written last, withheld on a failing final stage, exit-code selection | `maintenance-heartbeat.test.ts`; `alerts.test.ts`; `sentiment-alerts.integration.test.ts` (IT-SNT-D-007) |
 
 ## Consequences
 
