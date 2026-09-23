@@ -274,9 +274,11 @@ export {
 } from "./resolution";
 export {
 	applyResumeForVerify,
+	CALL_LIMIT_RESUMABLE_PATH,
 	manifestSha256,
 	RESUME_DEFAULT_BATCH,
 	RESUME_MANIFEST_VERSION,
+	RESUME_REVIEW_REASONS,
 	RESUME_VERIFY_ESTIMATED_BUDGET_USD,
 	RESUME_VERIFY_TTL_SECONDS,
 	type ResumeApplyResult,
@@ -284,7 +286,10 @@ export {
 	type ResumeEligible,
 	type ResumeExclusion,
 	type ResumeManifest,
+	type ResumeReviewReason,
+	selectCallLimitCandidate,
 	selectResumableForVerify,
+	selectResumeCandidate,
 	selectStoredCandidate,
 } from "./resume";
 export {
