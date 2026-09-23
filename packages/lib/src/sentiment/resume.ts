@@ -20,7 +20,7 @@ import {
 import { type SentimentSender, sendSentimentJob } from "./enqueue";
 import { requestScopeKey, schemaShapeFingerprint, sentimentRequestProfile } from "./fingerprint";
 import { analyzeAnswerRanges } from "./ranges";
-import { verifierResultSchemaFor } from "./resolution";
+import { RESOLUTION_POLICY, type ReviewReason, verifierResultSchemaFor } from "./resolution";
 import {
 	candidatesFromMentions,
 	type Executor,
@@ -47,7 +47,19 @@ import {
 export const RESUME_VERIFY_ESTIMATED_BUDGET_USD = 0.02;
 export const RESUME_VERIFY_TTL_SECONDS = 2 * 60 * 60;
 export const RESUME_DEFAULT_BATCH = 10;
-export const RESUME_MANIFEST_VERSION = 1;
+export const RESUME_MANIFEST_VERSION = 2;
+
+/** The parked review states a verify-only resume may address; each has its own evidence invariant. */
+export const RESUME_REVIEW_REASONS = ["contract-defect", "call-limit"] as const;
+export type ResumeReviewReason = (typeof RESUME_REVIEW_REASONS)[number];
+/** The only automatic path that parks an unverified repair under `call-limit`: the fifth paid call was that repair. */
+export const CALL_LIMIT_RESUMABLE_PATH: readonly string[] = Object.freeze([
+	"classify",
+	"verify",
+	"repair",
+	"verify",
+	"repair",
+]);
 
 export type ResumeExclusion =
 	| "no-accepted-candidate"
@@ -60,7 +72,13 @@ export type ResumeExclusion =
 	| "contract-defect"
 	| "verifier-schema-refused"
 	| "breaker-blocked"
-	| "run-unreadable";
+	| "run-unreadable"
+	/** call-limit: the instance's answered attempts are not exactly the policy's paid-call budget. */
+	| "wrong-call-count"
+	/** call-limit: the instance's paid phases are not the exact parked-repair path. */
+	| "wrong-path"
+	/** call-limit: an attempt of the instance follows the parked repair. */
+	| "later-attempt";
 
 export interface ResumeEligible {
 	analysisId: string;
@@ -73,6 +91,8 @@ export interface ResumeEligible {
 
 export interface ResumeManifest {
 	version: number;
+	/** The review state this manifest resumes; re-checked under the row lock at apply. */
+	reviewReason: ResumeReviewReason;
 	classifierVersion: string;
 	generatedAt: string;
 	eligible: ResumeEligible[];
@@ -87,8 +107,8 @@ export interface ResumeManifest {
 
 const digestOf = (values: string[]) => createHash("sha256").update(values.join("\n")).digest("hex");
 
-/** Predicates 1–4 in SQL: the parked review case of a current-version analysis whose instance holds an accepted candidate and only unpaid verifier attempts. */
-async function candidateCases(executor: Executor) {
+/** Predicates 1–4 in SQL: the parked review case (of the requested reason) of a current-version, unverified analysis. */
+async function candidateCases(executor: Executor, reviewReason: ResumeReviewReason) {
 	return executor
 		.select({
 			analysisId: sentimentResolutionCases.analysisId,
@@ -107,7 +127,7 @@ async function candidateCases(executor: Executor) {
 				isNull(sentimentAnalyses.verifiedAt),
 				isNull(sentimentAnalyses.verifierVersion),
 				eq(sentimentResolutionCases.status, "awaiting_review"),
-				eq(sentimentResolutionCases.reviewReason, "contract-defect"),
+				eq(sentimentResolutionCases.reviewReason, reviewReason),
 				isNull(sentimentResolutionCases.nextAttemptAt),
 			),
 		)
@@ -147,6 +167,50 @@ export function selectStoredCandidate(
 	return { attempt: latest, candidate: parsed.data };
 }
 
+/**
+ * The call-limit invariant: within the instance, exactly `maxPaidCalls` answered attempts whose paid phases are exactly
+ * classify → verify → repair → verify → repair, all accepted, nothing after the parked repair, no unknown outcome
+ * anywhere, and the parked repair carries a parseable candidate built for the frozen input. Anything else — a
+ * deterministic-target parity path, a later attempt, a different count — is excluded with a typed reason.
+ */
+export function selectCallLimitCandidate(
+	attempts: Attempt[],
+	instanceId: string,
+	inputHash: string,
+	maxPaidCalls: number = RESOLUTION_POLICY.maxPaidCalls,
+): { attempt: Attempt; candidate: SentimentClassificationResult } | { reason: ResumeExclusion } {
+	if (attempts.some((a) => a.outcome === "sending" || a.outcome === "aborted"))
+		return { reason: "sending-or-unknown-attempt" };
+	const own = attempts.filter((a) => a.instanceId === instanceId).sort((a, b) => a.ordinal - b.ordinal);
+	const answered = own.filter((a) => a.generationId !== null || a.actualCostUsd !== null);
+	if (answered.length !== maxPaidCalls) return { reason: "wrong-call-count" };
+	if (
+		answered.length !== CALL_LIMIT_RESUMABLE_PATH.length ||
+		answered.some((a, i) => a.phase !== CALL_LIMIT_RESUMABLE_PATH[i] || a.outcome !== "accepted")
+	) {
+		return { reason: "wrong-path" };
+	}
+	const latest = answered.at(-1);
+	if (!latest) return { reason: "no-accepted-candidate" };
+	if (own.at(-1)?.id !== latest.id) return { reason: "later-attempt" };
+	if (latest.candidate === null || latest.inputHash !== inputHash) return { reason: "no-accepted-candidate" };
+	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
+	if (!parsed.success) return { reason: "candidate-malformed" };
+	return { attempt: latest, candidate: parsed.data };
+}
+
+/** The stored-candidate invariant of one review reason; the contract-defect rule is unchanged. */
+export function selectResumeCandidate(
+	reviewReason: ResumeReviewReason,
+	attempts: Attempt[],
+	instanceId: string,
+	inputHash: string,
+): ReturnType<typeof selectStoredCandidate> {
+	return reviewReason === "call-limit"
+		? selectCallLimitCandidate(attempts, instanceId, inputHash)
+		: selectStoredCandidate(attempts, instanceId, inputHash);
+}
+
 /** Predicates 6–8 against the live run: same input, zero unresolved, a verifier document the guard and breaker accept. */
 async function assessLiveInput(
 	row: { promptRunId: string; instanceId: string; inputHash: string },
@@ -184,11 +248,16 @@ async function assessLiveInput(
 }
 
 /** Read-only selection by invariant; mutates nothing. */
-export async function selectResumableForVerify(executor: Executor = db): Promise<ResumeManifest> {
+export async function selectResumableForVerify(
+	executor: Executor = db,
+	options: { reviewReason?: ResumeReviewReason } = {},
+): Promise<ResumeManifest> {
+	const reviewReason = options.reviewReason ?? "contract-defect";
 	const eligible: ResumeEligible[] = [];
 	const excluded: ResumeManifest["excluded"] = [];
-	for (const row of await candidateCases(executor)) {
-		const stored = selectStoredCandidate(
+	for (const row of await candidateCases(executor, reviewReason)) {
+		const stored = selectResumeCandidate(
+			reviewReason,
 			await loadProviderAttempts(row.analysisId, executor),
 			row.instanceId,
 			row.inputHash,
@@ -213,6 +282,7 @@ export async function selectResumableForVerify(executor: Executor = db): Promise
 	}
 	return {
 		version: RESUME_MANIFEST_VERSION,
+		reviewReason,
 		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 		generatedAt: (await databaseNow(executor)).toISOString(),
 		eligible,
@@ -362,7 +432,10 @@ export async function applyResumeForVerify(
 	if (!Number.isInteger(args.limit) || args.limit <= 0) throw new Error("limit must be a positive integer");
 	if (!/^[0-9a-f]{64}$/i.test(args.manifestSha256)) throw new Error("manifest sha256 is required to bind the permits");
 	const manifestSha256 = args.manifestSha256.toLowerCase();
-	const current = await selectResumableForVerify(executor);
+	const reviewReason = args.manifest.reviewReason;
+	if (!(RESUME_REVIEW_REASONS as readonly string[]).includes(reviewReason))
+		throw new Error(`manifest reviewReason must be one of ${RESUME_REVIEW_REASONS.join(", ")}`);
+	const current = await selectResumableForVerify(executor, { reviewReason });
 	const drift =
 		current.count !== args.manifest.count
 			? `count ${args.manifest.count} → ${current.count}`
@@ -379,6 +452,7 @@ export async function applyResumeForVerify(
 			const [locked] = await tx
 				.select({
 					status: sentimentResolutionCases.status,
+					reviewReason: sentimentResolutionCases.reviewReason,
 					instanceId: sentimentResolutionCases.instanceId,
 					inputHash: sentimentResolutionCases.inputHash,
 				})
@@ -387,12 +461,14 @@ export async function applyResumeForVerify(
 				.for("update");
 			if (
 				locked?.status !== "awaiting_review" ||
+				(locked.reviewReason as ReviewReason | null) !== reviewReason ||
 				locked.instanceId !== item.instanceId ||
 				locked.inputHash !== item.inputHash
 			) {
 				return { skipped: "case-changed" as const };
 			}
-			const stored = selectStoredCandidate(
+			const stored = selectResumeCandidate(
+				reviewReason,
 				await loadProviderAttempts(item.analysisId, tx),
 				item.instanceId,
 				item.inputHash,

@@ -642,6 +642,7 @@ async function authorizeDispatch(
 	w: Workflow,
 	phase: PaidPhase,
 	request: { schema: z.ZodType; webSearch: boolean },
+	options: { requirePermit?: boolean } = {},
 ): Promise<DispatchContext & { ordinal: number }> {
 	let document: Record<string, unknown>;
 	try {
@@ -683,7 +684,8 @@ async function authorizeDispatch(
 		}
 		let permitId: string | null = null;
 		let reservedEstimateUsd: number | null = null;
-		if (held) {
+		// A call beyond the automatic budget is only ever authorized by consuming a permit phase, open or held.
+		if (held || options.requirePermit) {
 			const consumed = await w.controls.consumePermitPhase(tx, {
 				analysisId: w.claim.analysisId,
 				instanceId: w.claim.instanceId,
@@ -874,7 +876,10 @@ async function paidCall<T>(
 	request: () => Promise<PaidAnswer<T>>,
 	usable: (value: T) => boolean,
 ): Promise<T> {
-	if (w.paidCalls >= w.policy.maxPaidCalls) throw new HandOver("call-limit");
+	// Beyond the automatic budget only a verify-only resume permit may authorize a call, and only a verification:
+	// the permit's phase budget (verify 1, classify 0, repair 0) is consumed below, so it authorizes exactly one.
+	const overCap = w.paidCalls >= w.policy.maxPaidCalls;
+	if (overCap && !(phase === "verify" && w.resumePermitPurpose === "resume-verify")) throw new HandOver("call-limit");
 	if (w.costUsd >= w.policy.maxCostUsd) throw new HandOver("cost-limit");
 	if (w.options.signal?.aborted) {
 		// The job was cancelled (shutdown, expiry, canary deadline) before the request left: a transient local
@@ -884,7 +889,7 @@ async function paidCall<T>(
 		await park(w.claim, safe, w.deps);
 		throw new SentimentJobError({ ...safe, requestSent: false });
 	}
-	const dispatch = await authorizeDispatch(w, phase, requestShape);
+	const dispatch = await authorizeDispatch(w, phase, requestShape, { requirePermit: overCap });
 	const attempt = { id: dispatch.attemptId, ordinal: dispatch.ordinal };
 	let answer: PaidAnswer<T>;
 	w.dispatch = dispatch;
@@ -1245,6 +1250,12 @@ async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 				w.claim,
 			);
 			if (targets.length > 0) {
+				// A repair asked for by the verifier is only worth paying for if its re-verification also fits the budget;
+				// otherwise the candidate the verifier actually rejected is parked with the verifier's issues. Deterministic
+				// targets found before any verdict keep their own exit (the call budget check inside the request).
+				if (pending.length > 0 && w.paidCalls + 2 > w.policy.maxPaidCalls) {
+					throw new HandOver("verifier-rejected", w.paidCalls);
+				}
 				candidate = await repair(w, candidate, targets);
 				pending = [];
 				continue;
@@ -1336,7 +1347,9 @@ export function resumableEvidence(
 	const reconcilable = kase.status === "awaiting_reconciliation" && kase.reviewReason === "unknown-provider-outcome";
 	// Amendment C: a case parked for review may resume at verification only under an explicit verify-only permit.
 	const permitted =
-		options.verifyPermit === true && kase.status === "awaiting_review" && kase.reviewReason === "contract-defect";
+		options.verifyPermit === true &&
+		kase.status === "awaiting_review" &&
+		(kase.reviewReason === "contract-defect" || kase.reviewReason === "call-limit");
 	if (!reconcilable && !permitted) return null;
 	if (kase.inputHash !== inputHash) return null;
 	if (attempts.some((a) => a.outcome === "sending")) return null;
@@ -1387,7 +1400,8 @@ export async function listResumableSentimentRuns(limit = RESUME_BATCH_MAX): Prom
 	const parked = (await listUnresolvedCases()).filter(
 		(row) =>
 			(row.status === "awaiting_reconciliation" && row.reviewReason === "unknown-provider-outcome") ||
-			(row.status === "awaiting_review" && row.reviewReason === "contract-defect"),
+			(row.status === "awaiting_review" &&
+				(row.reviewReason === "contract-defect" || row.reviewReason === "call-limit")),
 	);
 	for (const row of parked) {
 		if (resumable.length >= limit) break;

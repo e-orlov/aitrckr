@@ -1,7 +1,7 @@
 /**
  * Verifier-only resumption of sentiment cases parked for review (Amendment C).
  *
- *   verify --dry-run --out <manifest.json>
+ *   verify --dry-run --out <manifest.json> [--review-reason contract-defect|call-limit]
  *       Selects by invariant, writes the manifest (ordered ids, count, digests,
  *       projected verify calls and the reservation planning estimate) and
  *       prints its sha256. Mutates nothing.
@@ -26,7 +26,9 @@ import {
 	manifestSha256,
 	RESUME_DEFAULT_BATCH,
 	RESUME_MANIFEST_VERSION,
+	RESUME_REVIEW_REASONS,
 	type ResumeManifest,
+	type ResumeReviewReason,
 	selectResumableForVerify,
 } from "@workspace/lib/sentiment";
 import boss from "../src/boss";
@@ -42,6 +44,7 @@ const { values, positionals } = parseArgs({
 		out: { type: "string" },
 		manifest: { type: "string" },
 		"manifest-sha256": { type: "string" },
+		"review-reason": { type: "string" },
 		limit: { type: "string" },
 		actor: { type: "string" },
 		reason: { type: "string" },
@@ -51,11 +54,15 @@ const { values, positionals } = parseArgs({
 
 async function dryRun(): Promise<number> {
 	if (!values.out) throw new UsageError("--dry-run needs --out <manifest.json>");
-	const manifest = await selectResumableForVerify();
+	const reviewReason = values["review-reason"] ?? "contract-defect";
+	if (!(RESUME_REVIEW_REASONS as readonly string[]).includes(reviewReason))
+		throw new UsageError(`--review-reason must be one of ${RESUME_REVIEW_REASONS.join(", ")}`);
+	const manifest = await selectResumableForVerify(undefined, { reviewReason: reviewReason as ResumeReviewReason });
 	const json = JSON.stringify(manifest, null, 2);
 	await writeFile(values.out, json, "utf8");
 	console.log(
 		JSON.stringify({
+			reviewReason: manifest.reviewReason,
 			count: manifest.count,
 			excluded: manifest.excluded.length,
 			digest: manifest.digest,
