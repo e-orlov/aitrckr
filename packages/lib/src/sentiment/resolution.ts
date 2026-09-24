@@ -3,7 +3,7 @@ import { type EvidenceAnchor, segmentAnswer } from "./anchors";
 
 export { assessCandidate, type CandidateAssessment, type UnresolvedTarget } from "./classifier";
 
-import type { UnresolvedTarget } from "./classifier";
+import type { CandidateAssessment, FilteredClaim, UnresolvedTarget } from "./classifier";
 import {
 	aspectTaxonomyText,
 	renderAnchoredAnswer,
@@ -107,6 +107,30 @@ const entityListText = (candidates: SentimentCandidate[], only?: Set<string>) =>
 		})
 		.join("\n");
 
+/** What the model must change for one refusal reason; the reason code alone was not acted on in production. */
+export function repairGuidance(reason: string): string {
+	switch (reason) {
+		case "evidence-entity-unbound":
+		case "entity-ungrounded":
+		case "aspect-ungrounded":
+			return 'the cited segment does not name this candidate (by name or alias) and does not continue a sentence, list or table row that names it; drop it and cite only segments that do. If no remaining segment evaluates the candidate, return category "neutral", score 50, citing the segment that names it, and no aspects';
+		case "verifier:unsupported-evaluation":
+			return 'the cited segment is descriptive (a bare name, list of examples, ranking, count, statistic or a recommendation to compare), not an evaluation; do not cite it as positive or negative evidence. If no evaluative segment about this candidate remains, the target is "neutral" (score 50) — for an aspect, omit the aspect';
+		case "verifier:polarity-mismatch":
+			return "the polarity you assigned to the cited segment is wrong for this target; re-read the segment, assign its actual polarity for this candidate, and derive the category from the corrected polarities";
+		case "verifier:aspect-misrouted":
+			return 'the statement is filed under the wrong key: deductible/premiums/value → price; scope, limits, waiting periods → coverage; claims handling, advice, reachability → service; "other" only for an explicit evaluation fitting no key. A price or coverage statement is not by itself an overall verdict; move it to its aspect';
+		case "verifier:entity-misattribution":
+			return "the cited segment is about another candidate, a generic tip or a heading; cite only segments about this candidate";
+		case "verifier:category-mismatch":
+			return "the category does not follow from the cited polarities (only positive → positive; only negative → negative; descriptive only → neutral; both → mixed with both lists); fix the category or the citations";
+		case "verifier:mixed-semantics":
+			return '"mixed" needs at least one genuinely positive and one genuinely negative statement about this target; otherwise choose the category the citations support';
+		default:
+			return "return a corrected item that satisfies the rules below";
+	}
+}
+
 /**
  * Phase C prompt: the same rules as the classification, restricted to the
  * unresolved entities, with the safe diagnostics of the rejected claims. No
@@ -123,7 +147,7 @@ export function buildRepairPrompt(args: {
 	const diagnostics = args.targets
 		.map(
 			(t) =>
-				`- key "${t.entityKey}"${t.aspectKey ? ` aspect "${t.aspectKey}"` : " overall"}: ${t.reason}${t.anchorId ? ` (cited segment ${t.anchorId})` : ""}`,
+				`- key "${t.entityKey}"${t.aspectKey ? ` aspect "${t.aspectKey}"` : " overall"}: ${t.reason}${t.anchorId ? ` (cited segment ${t.anchorId})` : ""} — ${repairGuidance(t.reason)}`,
 		)
 		.join("\n");
 	return `You are repairing part of an earlier structured judgement of how an AI assistant's stored answer portrays specific insurance companies. A previous attempt returned results for the REPAIR TARGETS below that the deterministic checks could not accept; the reasons are listed. Return one complete, corrected item for every repair target key — exactly those keys, no other key — judged only from the text of the ANSWER. Do not use any external information.
@@ -218,6 +242,46 @@ export function verifierResultSchemaFor(anchorIds: readonly string[], entityKeys
 }
 
 /** Every verifier issue routes its entity to repair; an aspect issue is a repair of the entity, never a placeholder. */
+/**
+ * ADR Amendment E — verifier-filtered acceptance: when every issue of a reject
+ * verdict names an aspect claim that the candidate actually carries, the
+ * verifier has objected to nothing else; those aspect claims are dropped and
+ * recorded as filtered claims, and the remaining candidate is the verified
+ * result. Returns null when any issue is overall-level or names a claim the
+ * candidate does not carry — then the verdict stays a rejection.
+ */
+export function dropVerifierRejectedAspects(
+	assessment: CandidateAssessment,
+	issues: readonly VerifierIssue[],
+	anchorIdOf: (span: { start: number; end: number }) => string,
+): CandidateAssessment | null {
+	if (issues.length === 0) return null;
+	const objected = new Set<string>();
+	for (const issue of issues) {
+		if (issue.target === "overall") return null;
+		const entity = assessment.entities.find((e) => e.key === issue.entityKey);
+		if (!entity || !entity.aspects.some((a) => a.key === issue.target)) return null;
+		objected.add(`${issue.entityKey}\u0000${issue.target}`);
+	}
+	const filteredClaims: FilteredClaim[] = [...assessment.filteredClaims];
+	const entities = assessment.entities.map((entity) => {
+		const kept = entity.aspects.filter((aspect) => !objected.has(`${entity.key}\u0000${aspect.key}`));
+		for (const aspect of entity.aspects) {
+			if (kept.includes(aspect)) continue;
+			const issue = issues.find((i) => i.entityKey === entity.key && i.target === aspect.key);
+			if (!issue) continue;
+			filteredClaims.push({
+				entityKey: entity.key,
+				aspectKey: aspect.key,
+				code: `verifier:${issue.code}`,
+				anchorIds: [...new Set(aspect.evidence.map((e) => anchorIdOf(e)))],
+			});
+		}
+		return { ...entity, aspects: kept };
+	});
+	return { ...assessment, entities, filteredClaims };
+}
+
 export function verifierIssuesToTargets(issues: readonly VerifierIssue[]): UnresolvedTarget[] {
 	return issues.map((issue) => ({
 		entityKey: issue.entityKey,

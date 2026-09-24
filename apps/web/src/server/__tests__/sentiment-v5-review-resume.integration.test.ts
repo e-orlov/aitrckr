@@ -248,12 +248,12 @@ describe("IT-SNT-RR-001 coverage reads a parked review case as review, never as 
 });
 
 describe("IT-SNT-RR-002 selection of verifier-rejected cases by invariant", () => {
-	it("selects the pair-rule product, excludes deterministic call-limit targets, a later refused verify and a sending attempt; other selectors ignore it", async () => {
+	it("selects the pair-rule product, excludes deterministic call-limit targets, a later answered attempt and a sending attempt; other selectors ignore it", async () => {
 		const rr = await caseOf(run(1));
 		const laterVerify = await parkVerifierRejected(run(4));
 		await client.query(
 			`INSERT INTO sentiment_provider_attempts (id, analysis_id, instance_id, ordinal, phase, provider, model, generation_id, input_hash, outcome, actual_cost_usd, started_at, finished_at, candidate)
-			 VALUES (gen_random_uuid(), $1, $2, 5, 'verify', 'openrouter', $3, NULL, $4, 'provider-error', NULL, now(), now(), NULL)`,
+			 VALUES (gen_random_uuid(), $1, $2, 5, 'repair', 'openrouter', $3, 'gen-later', $4, 'accepted', 0.005, now(), now(), NULL)`,
 			[laterVerify.analysis_id, laterVerify.instance_id, SENTIMENT_MODEL, laterVerify.input_hash],
 		);
 		const sending = await parkVerifierRejected(run(5));

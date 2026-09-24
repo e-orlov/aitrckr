@@ -62,6 +62,7 @@ import {
 	backoffMs,
 	buildRepairPrompt,
 	buildVerifierPrompt,
+	dropVerifierRejectedAspects,
 	mergeRepairedEntities,
 	RESOLUTION_POLICY,
 	type ResolutionPolicy,
@@ -344,8 +345,10 @@ const SETTLE_RETRY_MS = 250;
  */
 const AUTOMATIC_RETRY_ALLOW_LIST: ReadonlySet<string> = new Set(["429:rate_limit_exceeded", "503:provider_overloaded"]);
 
-/** Deterministic refusals of the request itself (request, authentication, permission, credit, configuration): the operator's, never repeated. */
-const REVIEW_STATUSES: ReadonlySet<number> = new Set([400, 401, 402, 403, 404, 409, 422]);
+/** Deterministic refusals of the request itself (request, authentication, permission, configuration): the operator's, never repeated. */
+const REVIEW_STATUSES: ReadonlySet<number> = new Set([400, 401, 403, 404, 409, 422]);
+/** Refusals of the account rather than the request (402 insufficient credits): transient once the account is topped up. */
+const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([402]);
 
 type FailureRoute = { route: "retry"; retryAfterMs: number | null } | { route: "review" } | { route: "reconcile" };
 
@@ -365,6 +368,7 @@ function routeFailure(error: unknown, safe: SafeSentimentError): FailureRoute {
 	if (AUTOMATIC_RETRY_ALLOW_LIST.has(`${error.httpStatus}:${error.errorType}`)) {
 		return { route: "retry", retryAfterMs: error.retryAfterMs };
 	}
+	if (TRANSIENT_STATUSES.has(error.httpStatus)) return { route: "retry", retryAfterMs: error.retryAfterMs };
 	if (REVIEW_STATUSES.has(error.httpStatus)) return { route: "review" };
 	return { route: "reconcile" };
 }
@@ -1002,6 +1006,12 @@ const assess = (w: Workflow, candidate: SentimentClassificationResult): Candidat
  * claims are gone), cited by anchor id. This is what the verifier judges and
  * what a verified analysis persists.
  */
+/** Anchor id of an evidence span by its exact offsets; `s0000` for a span no anchor covers. */
+function anchorIdOf(w: Workflow): (span: { start: number; end: number }) => string {
+	const idOf = new Map(w.anchors.map((a) => [`${a.start}:${a.end}`, a.id]));
+	return (span) => idOf.get(`${span.start}:${span.end}`) ?? "s0000";
+}
+
 function assessedCandidate(w: Workflow, assessment: CandidateAssessment): SentimentClassificationResult {
 	const idOf = new Map(w.anchors.map((a) => [`${a.start}:${a.end}`, a.id]));
 	const refs = (evidence: { start: number; end: number; polarity: "positive" | "negative" | "neutral" }[]) =>
@@ -1276,6 +1286,10 @@ async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 			const verdict = await verify(w, assessedCandidate(w, assessment));
 			if (verdict.verdict === "accept") return await persistVerified(w, assessment);
 			w.verifierRejections += 1;
+			// Aspect claims are independent findings: when the verifier objects only to specific aspect claims, those claims
+			// are dropped and recorded, and the verdicts it did not object to are persisted (ADR Amendment E).
+			const filtered = dropVerifierRejectedAspects(assessment, verdict.issues, anchorIdOf(w));
+			if (filtered) return await persistVerified(w, filtered);
 			pending = verifierIssuesToTargets(verdict.issues);
 			// A resume permit authorizes verification only: a rejected verdict is the operator's decision (D14), never a
 			// repair or classify request and never a retry wait.
@@ -1361,18 +1375,29 @@ export function resumableEvidence(
 	const reconcilable = kase.status === "awaiting_reconciliation" && kase.reviewReason === "unknown-provider-outcome";
 	// Amendment C: a case parked for review may resume at verification only under an explicit verify-only permit; a
 	// verifier-rejected case resumes only under a permit that carries the repair+verify pair its budget could not afford.
+	const pair = options.repairPermit === true && options.verifyPermit === true;
 	const permitted =
 		kase.status === "awaiting_review" &&
 		((options.verifyPermit === true &&
 			(kase.reviewReason === "contract-defect" || kase.reviewReason === "call-limit")) ||
-			(options.repairPermit === true && options.verifyPermit === true && kase.reviewReason === "verifier-rejected"));
+			(pair && (kase.reviewReason === "verifier-rejected" || kase.reviewReason === "contract-defect")));
 	if (!reconcilable && !permitted) return null;
 	if (kase.inputHash !== inputHash) return null;
 	if (attempts.some((a) => a.outcome === "sending")) return null;
+	// A refusal that never answered (unpaid provider error) carries no candidate and is not the evidence.
 	const latest = attempts
-		.filter((a) => a.instanceId === kase.instanceId && (a.phase === "classify" || a.phase === "repair"))
+		.filter(
+			(a) =>
+				a.instanceId === kase.instanceId &&
+				(a.phase === "classify" || a.phase === "repair") &&
+				a.outcome !== "provider-error",
+		)
 		.at(-1);
-	if (latest?.outcome !== "accepted" || latest.inputHash !== inputHash) return null;
+	// Under a repair permit a call-limit case resumes from its latest candidate even when that repair was refused by
+	// the deterministic checks: re-assessing it is exactly what the permitted repair is for.
+	const acceptable =
+		latest?.outcome === "accepted" || (pair && kase.reviewReason === "call-limit" && latest?.outcome === "rejected");
+	if (!latest || !acceptable || latest.inputHash !== inputHash) return null;
 	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
 	return parsed.success ? { attempt: latest, candidate: parsed.data } : null;
 }

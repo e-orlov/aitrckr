@@ -163,13 +163,22 @@ describe("verifier-rejected repair-resume: the stored-candidate invariant", () =
 		expect(selectVerifierRejectedCandidate(exactPath(), INSTANCE, HASH, verifierTargets)).toEqual({
 			reason: "no-rejecting-verify",
 		});
+		// A refusal that never answered after the rejecting verify is not evidence and spends nothing: still eligible.
+		const unpaidAfter = [
+			...attempts,
+			attempt({
+				phase: "repair",
+				outcome: "provider-error",
+				generationId: null,
+				actualCostUsd: null,
+				candidate: null,
+				permitId: "permit-x",
+			}),
+		];
+		expect("attempt" in selectVerifierRejectedCandidate(unpaidAfter, INSTANCE, HASH, verifierTargets)).toBe(true);
+		// A paid later attempt that is not a verify does exclude.
 		expect(
-			selectVerifierRejectedCandidate(
-				[...attempts, attempt({ phase: "verify", outcome: "provider-error", generationId: null, actualCostUsd: null })],
-				INSTANCE,
-				HASH,
-				verifierTargets,
-			),
+			selectVerifierRejectedCandidate([...attempts, attempt({ phase: "repair" })], INSTANCE, HASH, verifierTargets),
 		).toEqual({ reason: "no-rejecting-verify" });
 		expect(
 			selectVerifierRejectedCandidate(

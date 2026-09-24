@@ -12,6 +12,7 @@ import { type GroundingMap, groundAnchors, isAttributable, namesOnlyOthers } fro
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import { type AnalyzableText, analyzableText, analyzeAnswerRanges } from "./ranges";
+import type { VerifierIssueCode } from "./resolution";
 import { schemaBudgetViolations } from "./schema-budget";
 import { normalizeText } from "./text";
 import {
@@ -58,10 +59,14 @@ export interface ValidatedEntitySentiment {
  * that entity (classifier v5). Dropped from the result and recorded for the
  * operator: identifiers and the allow-listed code only — never text.
  */
+/** An aspect claim the independent verifier objected to; the claim is dropped, the entity's overall verdict stands. */
+export type VerifierFilteredClaimCode = `verifier:${VerifierIssueCode}`;
+export type FilteredClaimCode = AspectLocalValidationCode | VerifierFilteredClaimCode;
+
 export interface FilteredClaim {
 	entityKey: string;
 	aspectKey: SentimentAspectKey;
-	code: AspectLocalValidationCode;
+	code: FilteredClaimCode;
 	/** The anchor ids the claim cited, in citation order, de-duplicated. */
 	anchorIds: string[];
 }
