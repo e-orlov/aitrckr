@@ -911,7 +911,7 @@ export const sentimentDispatchPermits = pgTable(
 		analysisIdx: index("sentiment_dispatch_permits_analysis_idx").on(table.analysisId, table.state),
 		purposeCheck: check(
 			"sentiment_dispatch_permits_purpose_check",
-			sql`${table.purpose} IN ('canary', 'resume-verify')`,
+			sql`${table.purpose} IN ('canary', 'resume-verify', 'resume-repair')`,
 		),
 		stateCheck: check(
 			"sentiment_dispatch_permits_state_check",
@@ -934,6 +934,12 @@ export const sentimentDispatchPermits = pgTable(
 		resumeVerifyCheck: check(
 			"sentiment_dispatch_permits_resume_verify_check",
 			sql`${table.purpose} <> 'resume-verify' OR (coalesce((${table.phaseBudget}->>'classify')::int, 0) = 0 AND coalesce((${table.phaseBudget}->>'repair')::int, 0) = 0 AND ${table.contractSha256} IS NOT NULL)`,
+		),
+		// A repair-resume permit carries exactly one repair and one verify (the pair the automatic budget could not
+		// afford), never a classify, and is bound to its manifest like the verify-only one.
+		resumeRepairCheck: check(
+			"sentiment_dispatch_permits_resume_repair_check",
+			sql`${table.purpose} <> 'resume-repair' OR (coalesce((${table.phaseBudget}->>'classify')::int, 0) = 0 AND ${table.contractSha256} IS NOT NULL)`,
 		),
 	}),
 ).enableRLS();

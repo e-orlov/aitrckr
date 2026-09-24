@@ -1,7 +1,7 @@
 /**
  * Verifier-only resumption of sentiment cases parked for review (Amendment C).
  *
- *   verify --dry-run --out <manifest.json> [--review-reason contract-defect|call-limit]
+ *   verify --dry-run --out <manifest.json> [--review-reason contract-defect|call-limit|verifier-rejected]
  *       Selects by invariant, writes the manifest (ordered ids, count, digests,
  *       projected verify calls and the reservation planning estimate) and
  *       prints its sha256. Mutates nothing.

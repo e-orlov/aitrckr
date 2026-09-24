@@ -111,7 +111,8 @@ export interface SentimentOverviewResponse {
 		responsesWithMentions: number;
 		/** Responses whose receipt says the stored output had no extractable answer text. */
 		responsesUnextractable: number;
-		analyses: { completed: number; pending: number; failed: number; noMentions: number };
+		/** `review`: runs whose resolution case is parked for a human — terminal until adjudicated, not in progress. */
+		analyses: { completed: number; pending: number; review: number; failed: number; noMentions: number };
 	};
 	entities: SentimentEntityRow[];
 	/** Entity keys drawn on the radial and the trend; own brand first. */
@@ -353,10 +354,11 @@ async function coverageStats(scope: ScopeSql) {
 	const byReceipt = new Map(receipts.map((row) => [row.status, row.value]));
 	const withMentions = byReceipt.get("mentions") ?? 0;
 	const unextractable = byReceipt.get("unextractable") ?? 0;
-	const analyses = { completed: 0, pending: 0, failed: 0, noMentions: 0 };
+	const analyses = { completed: 0, pending: 0, review: 0, failed: 0, noMentions: 0 };
 	for (const row of statuses) {
 		const status = row.status as SentimentRunCoverageStatus;
 		if (status === "completed") analyses.completed += 1;
+		else if (status === "review") analyses.review += 1;
 		else if (status === "failed") analyses.failed += 1;
 		else if (status === "no_mentions") analyses.noMentions += 1;
 		else analyses.pending += 1;

@@ -241,7 +241,7 @@ describe("IT-SNT-006 sentiment overview loader", () => {
 			responsesDetected: 10,
 			responsesWithMentions: 10,
 			responsesUnextractable: 0,
-			analyses: { completed: 7, pending: 0, failed: 1, noMentions: 0 },
+			analyses: { completed: 7, pending: 0, review: 0, failed: 1, noMentions: 0 },
 		});
 		expect(overview.aspectLabel).toBeNull();
 		expect(overview.bucket).toBe("day");

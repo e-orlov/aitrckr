@@ -81,7 +81,7 @@ const base = (over: Partial<SentimentOverviewResponse>): SentimentOverviewRespon
 		responsesDetected: 10,
 		responsesWithMentions: 8,
 		responsesUnextractable: 0,
-		analyses: { completed: 8, pending: 0, failed: 0, noMentions: 2 },
+		analyses: { completed: 8, pending: 0, review: 0, failed: 0, noMentions: 2 },
 	},
 	entities: [],
 	chartRoster: ["brand"],
@@ -177,7 +177,7 @@ export function mockSentimentOverview(): SentimentOverviewResponse {
 			responsesDetected: 10,
 			responsesWithMentions: 9,
 			responsesUnextractable: 0,
-			analyses: { completed: 8, pending: 1, failed: 0, noMentions: 1 },
+			analyses: { completed: 8, pending: 1, review: 0, failed: 0, noMentions: 1 },
 		},
 		series: series(roster, {
 			brand: [72, 70, null, 74, 78, 80, 76, null, 82, 79, 77, 80, 84, 81, 79, 78, 80, 83, 85, 82],
@@ -243,7 +243,7 @@ export function mockSentimentPriceAspect(): SentimentOverviewResponse {
 			responsesDetected: 10,
 			responsesWithMentions: 9,
 			responsesUnextractable: 0,
-			analyses: { completed: 9, pending: 0, failed: 0, noMentions: 1 },
+			analyses: { completed: 9, pending: 0, review: 0, failed: 0, noMentions: 1 },
 		},
 		series: series(roster, {
 			brand: [
@@ -336,7 +336,7 @@ export function mockSentimentBrandOnly(): SentimentOverviewResponse {
 			responsesDetected: 6,
 			responsesWithMentions: 6,
 			responsesUnextractable: 0,
-			analyses: { completed: 6, pending: 0, failed: 0, noMentions: 0 },
+			analyses: { completed: 6, pending: 0, review: 0, failed: 0, noMentions: 0 },
 		},
 		series: series(["brand"], {
 			brand: [85, 88, null, 90, 86, 84, 88, 90, 91, 87, 86, 88, 89, 90, 88, 87, 85, 88, 90, 89],
@@ -357,7 +357,7 @@ export function mockSentimentPending(): SentimentOverviewResponse {
 			responsesDetected: 7,
 			responsesWithMentions: 7,
 			responsesUnextractable: 0,
-			analyses: { completed: 0, pending: 5, failed: 2, noMentions: 0 },
+			analyses: { completed: 0, pending: 5, review: 0, failed: 2, noMentions: 0 },
 		},
 		series: series(["brand", "a"], {}),
 	});
@@ -371,7 +371,7 @@ export function mockSentimentEmpty(): SentimentOverviewResponse {
 			responsesDetected: 0,
 			responsesWithMentions: 0,
 			responsesUnextractable: 0,
-			analyses: { completed: 0, pending: 0, failed: 0, noMentions: 0 },
+			analyses: { completed: 0, pending: 0, review: 0, failed: 0, noMentions: 0 },
 		},
 	});
 }
@@ -423,7 +423,7 @@ export function mockSentimentSparse(): SentimentOverviewResponse {
 			responsesDetected: 41,
 			responsesWithMentions: 15,
 			responsesUnextractable: 2,
-			analyses: { completed: 15, pending: 0, failed: 0, noMentions: 24 },
+			analyses: { completed: 15, pending: 0, review: 0, failed: 0, noMentions: 24 },
 		},
 		series: months.map((bucketStart, i) => ({
 			bucketStart,

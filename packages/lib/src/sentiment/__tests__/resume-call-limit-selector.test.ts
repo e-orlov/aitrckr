@@ -4,6 +4,7 @@ import {
 	selectCallLimitCandidate,
 	selectResumeCandidate,
 	selectStoredCandidate,
+	selectVerifierRejectedCandidate,
 } from "../resume";
 
 const INSTANCE = "inst-current";
@@ -126,5 +127,67 @@ describe("call-limit verify-only resume: the stored-candidate invariant", () => 
 		expect(selectResumeCandidate("contract-defect", exactPath(), INSTANCE, HASH)).toEqual({
 			reason: "paid-or-accepted-verify",
 		});
+	});
+});
+
+describe("verifier-rejected repair-resume: the stored-candidate invariant", () => {
+	const verifierTargets = [
+		{
+			entityKey: "brand",
+			reason: "verifier:polarity-mismatch",
+			aspectKey: null,
+			anchorId: "s0001",
+			source: "verifier",
+		},
+	];
+	const rejectedPath = () => [
+		attempt({ phase: "classify" }),
+		attempt({ phase: "verify", candidate: null }),
+		attempt({ phase: "repair" }),
+		attempt({ phase: "verify", candidate: null }),
+	];
+
+	it("accepts the pair-rule product and reuses the candidate the verifier judged (the latest repair)", () => {
+		const attempts = rejectedPath();
+		const picked = selectVerifierRejectedCandidate(attempts, INSTANCE, HASH, verifierTargets);
+		expect("attempt" in picked && picked.attempt.id).toBe(attempts[2].id);
+		expect(selectResumeCandidate("verifier-rejected", attempts, INSTANCE, HASH, verifierTargets)).toEqual(picked);
+	});
+
+	it("excludes deterministic or missing targets, a path not ending in an accepted verify, a later attempt and unknown outcomes", () => {
+		const attempts = rejectedPath();
+		expect(selectVerifierRejectedCandidate(attempts, INSTANCE, HASH, [])).toEqual({ reason: "targets-not-verifier" });
+		expect(
+			selectVerifierRejectedCandidate(attempts, INSTANCE, HASH, [{ ...verifierTargets[0], source: "deterministic" }]),
+		).toEqual({ reason: "targets-not-verifier" });
+		expect(selectVerifierRejectedCandidate(exactPath(), INSTANCE, HASH, verifierTargets)).toEqual({
+			reason: "no-rejecting-verify",
+		});
+		expect(
+			selectVerifierRejectedCandidate(
+				[...attempts, attempt({ phase: "verify", outcome: "provider-error", generationId: null, actualCostUsd: null })],
+				INSTANCE,
+				HASH,
+				verifierTargets,
+			),
+		).toEqual({ reason: "no-rejecting-verify" });
+		expect(
+			selectVerifierRejectedCandidate(
+				[...attempts, attempt({ phase: "repair", outcome: "sending", generationId: null, actualCostUsd: null })],
+				INSTANCE,
+				HASH,
+				verifierTargets,
+			),
+		).toEqual({ reason: "sending-or-unknown-attempt" });
+		const drifted = rejectedPath();
+		drifted[2] = { ...drifted[2], inputHash: "x".repeat(64) };
+		expect(selectVerifierRejectedCandidate(drifted, INSTANCE, HASH, verifierTargets)).toEqual({
+			reason: "no-accepted-candidate",
+		});
+	});
+
+	it("the verify-only selectors still refuse a case with paid verifies", () => {
+		expect(selectStoredCandidate(rejectedPath(), INSTANCE, HASH)).toEqual({ reason: "paid-or-accepted-verify" });
+		expect(selectCallLimitCandidate(rejectedPath(), INSTANCE, HASH)).toEqual({ reason: "wrong-call-count" });
 	});
 });

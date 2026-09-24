@@ -170,7 +170,7 @@ export async function transitionDispatch(
 // Permits
 // ---------------------------------------------------------------------------
 
-export const PERMIT_PURPOSES = ["canary", "resume-verify"] as const;
+export const PERMIT_PURPOSES = ["canary", "resume-verify", "resume-repair"] as const;
 export type PermitPurpose = (typeof PERMIT_PURPOSES)[number];
 export const PERMIT_PHASES = ["classify", "repair", "verify"] as const;
 export type PermitPhase = (typeof PERMIT_PHASES)[number];
@@ -215,6 +215,12 @@ export const RESUME_VERIFY_PHASE_BUDGET: Readonly<PhaseBudget> = Object.freeze({
 
 export const isResumeVerifyBudget = (budget: PhaseBudget): boolean =>
 	budget.classify === 0 && budget.repair === 0 && budget.verify === 1;
+
+/** The only phase budget a repair-resume permit may carry at issue time: the repair+verify pair, no classify. */
+export const RESUME_REPAIR_PHASE_BUDGET: Readonly<PhaseBudget> = Object.freeze({ classify: 0, repair: 1, verify: 1 });
+
+export const isResumeRepairBudget = (budget: PhaseBudget): boolean =>
+	budget.classify === 0 && budget.repair === 1 && budget.verify === 1;
 
 /** Live state and unexpired by the given database clock: what "live" means everywhere a permit is read. */
 export function isPermitEffective(permit: { state: string; expiresAt: Date }, databaseNow: Date): boolean {
@@ -317,13 +323,17 @@ function validatePermitShape(args: IssuePermitArgs): void {
 		if (v !== 0 && v !== 1) throw new Error(`phase budget for ${phase} must be 0 or 1`);
 	}
 	if (!Object.values(args.phaseBudget).some((v) => v === 1)) throw new Error("a permit must allow at least one phase");
-	if (args.purpose === "resume-verify") {
-		if (!isResumeVerifyBudget(args.phaseBudget)) {
-			throw new Error('a resume-verify permit must carry exactly {"classify":0,"repair":0,"verify":1}');
-		}
-		if (!args.contractSha256 || !/^[0-9a-f]{64}$/i.test(args.contractSha256)) {
-			throw new Error("a resume-verify permit must be bound to the sha256 of the frozen manifest it was issued from");
-		}
+	if (args.purpose === "resume-verify" && !isResumeVerifyBudget(args.phaseBudget)) {
+		throw new Error('a resume-verify permit must carry exactly {"classify":0,"repair":0,"verify":1}');
+	}
+	if (args.purpose === "resume-repair" && !isResumeRepairBudget(args.phaseBudget)) {
+		throw new Error('a resume-repair permit must carry exactly {"classify":0,"repair":1,"verify":1}');
+	}
+	if (
+		(args.purpose === "resume-verify" || args.purpose === "resume-repair") &&
+		(!args.contractSha256 || !/^[0-9a-f]{64}$/i.test(args.contractSha256))
+	) {
+		throw new Error(`a ${args.purpose} permit must be bound to the sha256 of the frozen manifest it was issued from`);
 	}
 	if (
 		!Number.isFinite(args.estimatedCostBudgetUsd) ||
@@ -399,7 +409,9 @@ export async function loadPermit(id: string, executor: Executor = db): Promise<S
 
 /** Which phases a permit's purpose may ever authorize, independent of the remaining budget. */
 export function permitPurposeAllowsPhase(purpose: string, phase: PermitPhase): boolean {
-	return purpose === "resume-verify" ? phase === "verify" : purpose === "canary";
+	if (purpose === "resume-verify") return phase === "verify";
+	if (purpose === "resume-repair") return phase === "repair" || phase === "verify";
+	return purpose === "canary";
 }
 
 /** The live permit bound to exactly this instance and input, if any (expiry judged by the database clock). */

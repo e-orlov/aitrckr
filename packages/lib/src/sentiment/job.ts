@@ -406,6 +406,8 @@ interface Workflow {
 	controls: DispatchDeps;
 	/** The purpose of the permit that let a parked case resume, when it did: a resume permit authorizes verification only. */
 	resumePermitPurpose: PermitPurpose | null;
+	/** Parked verifier targets a repair-resume permit authorizes the workflow to repair before its one verification. */
+	resumeTargets: UnresolvedTarget[];
 }
 
 type PaidPhase = PermitPhase;
@@ -879,7 +881,10 @@ async function paidCall<T>(
 	// Beyond the automatic budget only a verify-only resume permit may authorize a call, and only a verification:
 	// the permit's phase budget (verify 1, classify 0, repair 0) is consumed below, so it authorizes exactly one.
 	const overCap = w.paidCalls >= w.policy.maxPaidCalls;
-	if (overCap && !(phase === "verify" && w.resumePermitPurpose === "resume-verify")) throw new HandOver("call-limit");
+	const permittedOverCap =
+		(phase === "verify" && (w.resumePermitPurpose === "resume-verify" || w.resumePermitPurpose === "resume-repair")) ||
+		(phase === "repair" && w.resumePermitPurpose === "resume-repair");
+	if (overCap && !permittedOverCap) throw new HandOver("call-limit");
 	if (w.costUsd >= w.policy.maxCostUsd) throw new HandOver("cost-limit");
 	if (w.options.signal?.aborted) {
 		// The job was cancelled (shutdown, expiry, canary deadline) before the request left: a transient local
@@ -889,7 +894,11 @@ async function paidCall<T>(
 		await park(w.claim, safe, w.deps);
 		throw new SentimentJobError({ ...safe, requestSent: false });
 	}
-	const dispatch = await authorizeDispatch(w, phase, requestShape, { requirePermit: overCap });
+	// A resumed workflow spends every call from its permit, open or held, so the permit's phase budget is the ledger of
+	// exactly what the resume authorized.
+	const dispatch = await authorizeDispatch(w, phase, requestShape, {
+		requirePermit: overCap || w.resumePermitPurpose !== null,
+	});
 	const attempt = { id: dispatch.attemptId, ordinal: dispatch.ordinal };
 	let answer: PaidAnswer<T>;
 	w.dispatch = dispatch;
@@ -1234,7 +1243,7 @@ async function handOver(
  */
 async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 	let candidate = parseProvisional(w.kase.provisionalResult);
-	let pending: UnresolvedTarget[] = [];
+	let pending: UnresolvedTarget[] = [...w.resumeTargets];
 	try {
 		if (!candidate) candidate = await initialCandidate(w);
 		for (;;) {
@@ -1253,7 +1262,11 @@ async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 				// A repair asked for by the verifier is only worth paying for if its re-verification also fits the budget;
 				// otherwise the candidate the verifier actually rejected is parked with the verifier's issues. Deterministic
 				// targets found before any verdict keep their own exit (the call budget check inside the request).
-				if (pending.length > 0 && w.paidCalls + 2 > w.policy.maxPaidCalls) {
+				if (
+					pending.length > 0 &&
+					w.paidCalls + 2 > w.policy.maxPaidCalls &&
+					w.resumePermitPurpose !== "resume-repair"
+				) {
 					throw new HandOver("verifier-rejected", w.paidCalls);
 				}
 				candidate = await repair(w, candidate, targets);
@@ -1266,7 +1279,8 @@ async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 			pending = verifierIssuesToTargets(verdict.issues);
 			// A resume permit authorizes verification only: a rejected verdict is the operator's decision (D14), never a
 			// repair or classify request and never a retry wait.
-			if (w.resumePermitPurpose === "resume-verify") throw new HandOver("verifier-rejected", w.paidCalls);
+			if (w.resumePermitPurpose === "resume-verify" || w.resumePermitPurpose === "resume-repair")
+				throw new HandOver("verifier-rejected", w.paidCalls);
 		}
 	} catch (error) {
 		return leaveWorkflow(w, error, candidate, pending);
@@ -1342,14 +1356,16 @@ export function resumableEvidence(
 	kase: StoredResolutionCase,
 	inputHash: string,
 	attempts: StoredAttempt[],
-	options: { verifyPermit?: boolean } = {},
+	options: { verifyPermit?: boolean; repairPermit?: boolean } = {},
 ): { attempt: StoredAttempt; candidate: SentimentClassificationResult } | null {
 	const reconcilable = kase.status === "awaiting_reconciliation" && kase.reviewReason === "unknown-provider-outcome";
-	// Amendment C: a case parked for review may resume at verification only under an explicit verify-only permit.
+	// Amendment C: a case parked for review may resume at verification only under an explicit verify-only permit; a
+	// verifier-rejected case resumes only under a permit that carries the repair+verify pair its budget could not afford.
 	const permitted =
-		options.verifyPermit === true &&
 		kase.status === "awaiting_review" &&
-		(kase.reviewReason === "contract-defect" || kase.reviewReason === "call-limit");
+		((options.verifyPermit === true &&
+			(kase.reviewReason === "contract-defect" || kase.reviewReason === "call-limit")) ||
+			(options.repairPermit === true && options.verifyPermit === true && kase.reviewReason === "verifier-rejected"));
 	if (!reconcilable && !permitted) return null;
 	if (kase.inputHash !== inputHash) return null;
 	if (attempts.some((a) => a.outcome === "sending")) return null;
@@ -1401,7 +1417,9 @@ export async function listResumableSentimentRuns(limit = RESUME_BATCH_MAX): Prom
 		(row) =>
 			(row.status === "awaiting_reconciliation" && row.reviewReason === "unknown-provider-outcome") ||
 			(row.status === "awaiting_review" &&
-				(row.reviewReason === "contract-defect" || row.reviewReason === "call-limit")),
+				(row.reviewReason === "contract-defect" ||
+					row.reviewReason === "call-limit" ||
+					row.reviewReason === "verifier-rejected")),
 	);
 	for (const row of parked) {
 		if (resumable.length >= limit) break;
@@ -1414,6 +1432,7 @@ export async function listResumableSentimentRuns(limit = RESUME_BATCH_MAX): Prom
 		if (kase.status === "awaiting_review" && !permitAllowsVerify(permit)) continue;
 		const evidence = resumableEvidence(kase, kase.inputHash, await loadProviderAttempts(row.analysisId), {
 			verifyPermit: permitAllowsVerify(permit),
+			repairPermit: permitAllowsRepair(permit),
 		});
 		if (evidence) {
 			resumable.push({
@@ -1431,6 +1450,20 @@ export function permitAllowsVerify(permit: { phaseBudget: unknown } | null): boo
 	if (!permit) return false;
 	const budget = permit.phaseBudget as Partial<Record<string, number>> | null;
 	return budget?.verify === 1;
+}
+
+/** A live permit whose repair budget is still 1. */
+export function permitAllowsRepair(permit: { phaseBudget: unknown } | null): boolean {
+	if (!permit) return false;
+	const budget = permit.phaseBudget as Partial<Record<string, number>> | null;
+	return budget?.repair === 1;
+}
+
+/** The parked verifier targets a repair-resume starts from; anything else starts clean. */
+function resumeTargetsOf(kase: StoredResolutionCase, purpose: PermitPurpose | null): UnresolvedTarget[] {
+	if (purpose !== "resume-repair") return [];
+	const targets = (kase.unresolvedTargets as UnresolvedTarget[] | null) ?? [];
+	return targets.filter((t) => t.source === "verifier");
 }
 
 export interface ResumableEnqueueResult {
@@ -1501,13 +1534,19 @@ async function resumeParkedCase(
 	inputHash: string,
 	attempts: StoredAttempt[],
 	deps: SentimentJobDeps,
-): Promise<{ kase: StoredResolutionCase; permitPurpose: PermitPurpose | null } | { outcome: SentimentJobOutcome }> {
+): Promise<
+	| { kase: StoredResolutionCase; permitPurpose: PermitPurpose | null; resumeTargets: UnresolvedTarget[] }
+	| { outcome: SentimentJobOutcome }
+> {
 	const permit = await dispatchDeps(deps).findLivePermit({
 		analysisId: claim.analysisId,
 		instanceId: kase.instanceId,
 		inputHash,
 	});
-	const evidence = resumableEvidence(kase, inputHash, attempts, { verifyPermit: permitAllowsVerify(permit) });
+	const evidence = resumableEvidence(kase, inputHash, attempts, {
+		verifyPermit: permitAllowsVerify(permit),
+		repairPermit: permitAllowsRepair(permit),
+	});
 	if (!evidence) {
 		await park(claim, null, deps);
 		return { outcome: reviewOutcome(kase) };
@@ -1523,10 +1562,12 @@ async function resumeParkedCase(
 	}
 	// The late call the previous owner never got to charge is counted before any budget decision.
 	const charged = await (deps.chargeResolutionCase ?? chargeResolutionCase)(claim.analysisId, claim);
+	const permitPurpose = permit ? (permit.purpose as PermitPurpose) : null;
+	const resumeTargets = resumeTargetsOf(kase, permitPurpose);
 	const resumed = {
-		status: "verifying" as const,
+		status: resumeTargets.length > 0 ? ("repairing" as const) : ("verifying" as const),
 		provisionalResult: evidence.candidate,
-		unresolvedTargets: [],
+		unresolvedTargets: resumeTargets,
 		reviewReason: null,
 		nextAttemptAt: null,
 	};
@@ -1538,7 +1579,8 @@ async function resumeParkedCase(
 			automatedProviderCalls: charged.automatedProviderCalls,
 			totalActualCostUsd: charged.totalActualCostUsd.toFixed(6),
 		},
-		permitPurpose: permit ? (permit.purpose as PermitPurpose) : null,
+		permitPurpose,
+		resumeTargets,
 	};
 }
 
@@ -1567,11 +1609,13 @@ async function classifyAndPersist(
 	}
 	const attempts = await (deps.loadProviderAttempts ?? loadProviderAttempts)(claim.analysisId);
 	let resumePermitPurpose: PermitPurpose | null = null;
+	let resumeTargets: UnresolvedTarget[] = [];
 	if (isParked(kase)) {
 		const resumed = await resumeParkedCase(kase, claim, inputHash, attempts, deps);
 		if ("outcome" in resumed) return resumed.outcome;
 		kase = resumed.kase;
 		resumePermitPurpose = resumed.permitPurpose;
+		resumeTargets = resumed.resumeTargets;
 	}
 	const dangling = attempts.find((a) => a.outcome === "sending");
 	if (dangling) {
@@ -1638,6 +1682,7 @@ async function classifyAndPersist(
 		dispatch: null,
 		controls,
 		resumePermitPurpose,
+		resumeTargets,
 	};
 	// Every request of this lifecycle passes the guard, whatever resolved the provider (production lock, canary wrapper, test double).
 	workflow.provider = guardProvider(provider, workflow);
@@ -1802,7 +1847,10 @@ async function settledWithoutClaim(
 		instanceId: kase.instanceId,
 		inputHash,
 	});
-	return resumableEvidence(kase, inputHash, attempts, { verifyPermit: permitAllowsVerify(permit) })
+	return resumableEvidence(kase, inputHash, attempts, {
+		verifyPermit: permitAllowsVerify(permit),
+		repairPermit: permitAllowsRepair(permit),
+	})
 		? null
 		: reviewOutcome(kase);
 }
