@@ -186,6 +186,17 @@ describe("verifier-rejected repair-resume: the stored-candidate invariant", () =
 		});
 	});
 
+	it("excludes an instance that already spent its permitted pair (a permit-bound attempt exists)", () => {
+		const spent = [
+			...rejectedPath(),
+			attempt({ phase: "repair", permitId: "permit-1" }),
+			attempt({ phase: "verify", candidate: null, permitId: "permit-1" }),
+		];
+		expect(selectVerifierRejectedCandidate(spent, INSTANCE, HASH, verifierTargets)).toEqual({
+			reason: "pair-already-spent",
+		});
+	});
+
 	it("the verify-only selectors still refuse a case with paid verifies", () => {
 		expect(selectStoredCandidate(rejectedPath(), INSTANCE, HASH)).toEqual({ reason: "paid-or-accepted-verify" });
 		expect(selectCallLimitCandidate(rejectedPath(), INSTANCE, HASH)).toEqual({ reason: "wrong-call-count" });

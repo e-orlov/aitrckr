@@ -109,7 +109,9 @@ export type ResumeExclusion =
 	/** verifier-rejected: the parked targets are not exclusively the verifier's (or are missing). */
 	| "targets-not-verifier"
 	/** verifier-rejected: the latest paid attempt is not the accepted verify that rejected the candidate. */
-	| "no-rejecting-verify";
+	| "no-rejecting-verify"
+	/** verifier-rejected: this instance already spent its one permitted repair+verify pair; the rest is a human's decision. */
+	| "pair-already-spent";
 
 export interface ResumeEligible {
 	analysisId: string;
@@ -248,6 +250,8 @@ export function selectVerifierRejectedCandidate(
 	const targets = Array.isArray(unresolvedTargets) ? (unresolvedTargets as { source?: unknown }[]) : [];
 	if (targets.length === 0 || targets.some((t) => t?.source !== "verifier")) return { reason: "targets-not-verifier" };
 	const own = attempts.filter((a) => a.instanceId === instanceId).sort((a, b) => a.ordinal - b.ordinal);
+	// One permitted pair per instance: a rejection after a permit-bound attempt is final for the automatic path.
+	if (own.some((a) => a.permitId !== null)) return { reason: "pair-already-spent" };
 	const answered = own.filter((a) => a.generationId !== null || a.actualCostUsd !== null);
 	const last = answered.at(-1);
 	if (!last || last.phase !== "verify" || last.outcome !== "accepted" || own.at(-1)?.id !== last.id)
