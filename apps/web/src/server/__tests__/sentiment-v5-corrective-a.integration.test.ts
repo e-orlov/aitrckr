@@ -348,7 +348,7 @@ describe("C parked work is pending_resolution, never failed", () => {
 		]);
 		expect(
 			await runSentimentJob(payload(run(3)), { resolveProvider: () => exhausted.provider, resolutionPolicy: fast }),
-		).toMatchObject({ status: "awaiting-review", paidCalls: 5 });
+		).toMatchObject({ status: "awaiting-review", paidCalls: 4 });
 		expect(await analysisOf(run(3))).toMatchObject({ status: "pending_resolution" });
 		expect((await caseOf(run(3))).status).toBe("awaiting_review");
 

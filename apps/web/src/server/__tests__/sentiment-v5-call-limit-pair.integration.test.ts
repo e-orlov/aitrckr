@@ -320,16 +320,17 @@ describe("IT-SNT-CL-001 the repair+verify pair rule", () => {
 		expect(outcome).toMatchObject({
 			status: "awaiting-review",
 			reason: "call-limit",
-			paidCalls: RESOLUTION_POLICY.maxPaidCalls,
+			paidCalls: RESOLUTION_POLICY.maxPaidCalls - 1,
 			unresolved: 1,
 		});
-		expect(script.calls).toEqual(["classify", "repair", "repair", "repair", "repair"]);
+		// The pair rule stops before the fifth call: a repair nothing could verify is never paid.
+		expect(script.calls).toEqual(["classify", "repair", "repair", "repair"]);
 		expect(await caseOf(run(3))).toMatchObject({ status: "awaiting_review", review_reason: "call-limit" });
 		// Not the resumable call-limit shape: the selector excludes it with a typed reason instead of resuming it.
 		const manifest = await selectResumableForVerify(undefined, { reviewReason: "call-limit" });
 		const analysis = await analysisOf(run(3));
 		expect(manifest.eligible.map((e) => e.analysisId)).not.toContain(analysis.id);
-		expect(manifest.excluded).toContainEqual({ analysisId: analysis.id, reason: "wrong-path" });
+		expect(manifest.excluded).toContainEqual({ analysisId: analysis.id, reason: "wrong-call-count" });
 	});
 });
 

@@ -72,15 +72,24 @@ describe("call-limit verify-only resume: the stored-candidate invariant", () => 
 		expect(selectCallLimitCandidate(attempts, INSTANCE, HASH)).toEqual({ reason: "wrong-call-count" });
 	});
 
-	it("excludes the deterministic-target parity path (classify then four repairs)", () => {
-		const attempts = [
-			attempt({ phase: "classify" }),
+	it("excludes the deterministic parity path whose last repair was refused; admits any shape whose last answered call is an accepted, never-verified candidate", () => {
+		const refused = [
+			attempt({ phase: "classify", outcome: "rejected" }),
+			attempt({ phase: "repair", outcome: "rejected" }),
+			attempt({ phase: "repair", outcome: "rejected" }),
+			attempt({ phase: "repair", outcome: "rejected" }),
+			attempt({ phase: "repair", outcome: "rejected" }),
+		];
+		expect(selectCallLimitCandidate(refused, INSTANCE, HASH)).toEqual({ reason: "wrong-path" });
+		const acceptedLast = [
+			attempt({ phase: "classify", outcome: "rejected" }),
 			attempt({ phase: "repair" }),
-			attempt({ phase: "repair" }),
-			attempt({ phase: "repair" }),
+			attempt({ phase: "verify", candidate: null }),
+			attempt({ phase: "repair", outcome: "rejected" }),
 			attempt({ phase: "repair" }),
 		];
-		expect(selectCallLimitCandidate(attempts, INSTANCE, HASH)).toEqual({ reason: "wrong-path" });
+		const picked = selectCallLimitCandidate(acceptedLast, INSTANCE, HASH);
+		expect("attempt" in picked && picked.attempt.id).toBe(acceptedLast[4].id);
 	});
 
 	it("excludes a path whose last verify was refused rather than answered", () => {

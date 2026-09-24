@@ -497,18 +497,19 @@ describe("IT-SNT-001 job lifecycle (fakes)", () => {
 		expect(await runSentimentJob(payload, d)).toMatchObject({
 			status: "awaiting-review",
 			reason: "call-limit",
-			paidCalls: 5,
+			paidCalls: 4,
 			unresolved: 1,
 		});
 		expect(d.persist).not.toHaveBeenCalled();
-		expect(fakes.calls.map((c) => c.phase)).toEqual(["repair", "repair", "repair", "repair"]);
+		// The fifth call would have been a repair no verification could follow; the pair rule stops one call earlier.
+		expect(fakes.calls.map((c) => c.phase)).toEqual(["repair", "repair", "repair"]);
 		expect(fakes.cases.get("a1")).toMatchObject({
 			status: "awaiting_review",
 			reviewReason: "call-limit",
-			automatedProviderCalls: 5,
+			automatedProviderCalls: 4,
 		});
 		expect(marks.at(-1)).toMatchObject({ status: "pending_resolution", errorCode: null, inputHash: null });
-		expect(usage).toHaveLength(5);
+		expect(usage).toHaveLength(4);
 		// A further run makes no call and keeps the review item.
 		const again = deps({ fakes, classify: vi.fn(async () => unresolved) });
 		expect(await runSentimentJob(payload, again.d)).toMatchObject({ status: "awaiting-review" });

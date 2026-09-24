@@ -1269,16 +1269,7 @@ async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 				w.claim,
 			);
 			if (targets.length > 0) {
-				// A repair asked for by the verifier is only worth paying for if its re-verification also fits the budget;
-				// otherwise the candidate the verifier actually rejected is parked with the verifier's issues. Deterministic
-				// targets found before any verdict keep their own exit (the call budget check inside the request).
-				if (
-					pending.length > 0 &&
-					w.paidCalls + 2 > w.policy.maxPaidCalls &&
-					w.resumePermitPurpose !== "resume-repair"
-				) {
-					throw new HandOver("verifier-rejected", w.paidCalls);
-				}
+				assertRepairPairAffordable(w, pending);
 				candidate = await repair(w, candidate, targets);
 				pending = [];
 				continue;
@@ -1298,6 +1289,17 @@ async function resolve(w: Workflow): Promise<SentimentJobOutcome> {
 		}
 	} catch (error) {
 		return leaveWorkflow(w, error, candidate, pending);
+	}
+}
+
+/**
+ * A repair is only worth paying for if its verification also fits the budget: a verifier-caused repair otherwise parks
+ * the candidate the verifier actually rejected (with its issues); a deterministic one parks the candidate under its own
+ * typed exit with the unbound targets — never a paid repair nobody can verify. A repair permit carries its own pair.
+ */
+function assertRepairPairAffordable(w: Workflow, pending: readonly UnresolvedTarget[]): void {
+	if (w.paidCalls + 2 > w.policy.maxPaidCalls && w.resumePermitPurpose !== "resume-repair") {
+		throw new HandOver(pending.length > 0 ? "verifier-rejected" : "call-limit", w.paidCalls);
 	}
 }
 
