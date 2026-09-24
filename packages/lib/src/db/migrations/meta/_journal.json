@@ -176,6 +176,13 @@
       "when": 1790002130935,
       "tag": "0024_sentiment_dispatch_controls",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1790229248959,
+      "tag": "0025_sentiment_resume_repair_permit",
+      "breakpoints": true
     }
   ]
 }

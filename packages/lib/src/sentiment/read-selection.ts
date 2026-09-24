@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNotNull, or, type SQL, sql } from "drizzle-orm";
 import { db } from "../db/db";
-import { sentimentAnalyses } from "../db/schema";
+import { sentimentAnalyses, sentimentResolutionCases } from "../db/schema";
 import {
 	SENTIMENT_CLASSIFIER_VERSION,
 	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
@@ -70,13 +70,15 @@ function readablePreference(): SQL {
 	return sql`array_position(ARRAY[${versions}]::text[], ${sentimentAnalyses.classifierVersion})`;
 }
 
-export type SentimentRunCoverageStatus = "completed" | "pending" | "failed" | "no_mentions";
+export type SentimentRunCoverageStatus = "completed" | "pending" | "review" | "failed" | "no_mentions";
 
 /**
  * One coverage status per prompt run over all its analysis rows, consistent
  * with the selection above: `completed` when a readable completed analysis is
- * selected; otherwise `pending` while a readable attempt is in flight or
- * parked inside its resolution workflow (`pending_resolution`); otherwise
+ * selected; otherwise `review` when the run's resolution case is parked for
+ * a human (`awaiting_review`/`awaiting_reconciliation`: nothing is in flight
+ * for it); otherwise `pending` while a readable attempt is in flight or still
+ * inside its resolution workflow; otherwise
  * `failed` when the newest readable attempt failed; otherwise
  * `no_mentions`; rows of unreadable versions or a stale taxonomy alone are
  * stale work still to be redone and count as `pending`.
@@ -85,10 +87,16 @@ export function sentimentRunCoverageStatus(): SQL<SentimentRunCoverageStatus> {
 	const readable = inArray(sentimentAnalyses.classifierVersion, [...SENTIMENT_READABLE_CLASSIFIER_VERSIONS]);
 	const completed = and(readableCompletedWhere());
 	const inFlight = and(readable, inArray(sentimentAnalyses.status, ["pending", "processing", "pending_resolution"]));
+	const parkedForReview = and(
+		readable,
+		eq(sentimentAnalyses.status, "pending_resolution"),
+		sql`exists (select 1 from ${sentimentResolutionCases} c where c.analysis_id = ${sentimentAnalyses.id} and c.status in ('awaiting_review', 'awaiting_reconciliation'))`,
+	);
 	const failed = and(readable, eq(sentimentAnalyses.status, "failed"));
 	const noMentions = and(readable, eq(sentimentAnalyses.status, "no_mentions"));
 	return sql<SentimentRunCoverageStatus>`case
 		when bool_or(${completed}) then 'completed'
+		when bool_or(${parkedForReview}) then 'review'
 		when bool_or(${inFlight}) then 'pending'
 		when bool_or(${failed}) then 'failed'
 		when bool_or(${noMentions}) then 'no_mentions'

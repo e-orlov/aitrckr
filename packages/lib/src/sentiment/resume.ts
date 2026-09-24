@@ -9,11 +9,14 @@ import { assessCandidate, sentimentInputHash } from "./classifier";
 import {
 	type ControlActor,
 	expireUnconsumedPermits,
+	isResumeRepairBudget,
 	isResumeVerifyBudget,
 	issuePermit,
 	PERMIT_LIVE_STATES,
+	type PermitPurpose,
 	type PhaseBudget,
 	RESERVATION_ESTIMATES_USD,
+	RESUME_REPAIR_PHASE_BUDGET,
 	RESUME_VERIFY_PHASE_BUDGET,
 	requireActor,
 } from "./controls";
@@ -45,13 +48,37 @@ import {
  */
 
 export const RESUME_VERIFY_ESTIMATED_BUDGET_USD = 0.02;
+/** Planning estimate for the repair+verify pair (two reservations of 0.02); not a price, not a cap. */
+export const RESUME_REPAIR_ESTIMATED_BUDGET_USD = 0.05;
 export const RESUME_VERIFY_TTL_SECONDS = 2 * 60 * 60;
 export const RESUME_DEFAULT_BATCH = 10;
 export const RESUME_MANIFEST_VERSION = 2;
 
 /** The parked review states a verify-only resume may address; each has its own evidence invariant. */
-export const RESUME_REVIEW_REASONS = ["contract-defect", "call-limit"] as const;
+export const RESUME_REVIEW_REASONS = ["contract-defect", "call-limit", "verifier-rejected"] as const;
 export type ResumeReviewReason = (typeof RESUME_REVIEW_REASONS)[number];
+
+/** The permit each review reason resumes with: verify-only for a stored unverified candidate, the repair+verify pair for a verifier-rejected one. */
+export function resumePermitFor(reviewReason: ResumeReviewReason): {
+	purpose: PermitPurpose;
+	budget: Readonly<PhaseBudget>;
+	estimatedBudgetUsd: number;
+	matches: (budget: PhaseBudget) => boolean;
+} {
+	return reviewReason === "verifier-rejected"
+		? {
+				purpose: "resume-repair",
+				budget: RESUME_REPAIR_PHASE_BUDGET,
+				estimatedBudgetUsd: RESUME_REPAIR_ESTIMATED_BUDGET_USD,
+				matches: isResumeRepairBudget,
+			}
+		: {
+				purpose: "resume-verify",
+				budget: RESUME_VERIFY_PHASE_BUDGET,
+				estimatedBudgetUsd: RESUME_VERIFY_ESTIMATED_BUDGET_USD,
+				matches: isResumeVerifyBudget,
+			};
+}
 /** The only automatic path that parks an unverified repair under `call-limit`: the fifth paid call was that repair. */
 export const CALL_LIMIT_RESUMABLE_PATH: readonly string[] = Object.freeze([
 	"classify",
@@ -78,7 +105,11 @@ export type ResumeExclusion =
 	/** call-limit: the instance's paid phases are not the exact parked-repair path. */
 	| "wrong-path"
 	/** call-limit: an attempt of the instance follows the parked repair. */
-	| "later-attempt";
+	| "later-attempt"
+	/** verifier-rejected: the parked targets are not exclusively the verifier's (or are missing). */
+	| "targets-not-verifier"
+	/** verifier-rejected: the latest paid attempt is not the accepted verify that rejected the candidate. */
+	| "no-rejecting-verify";
 
 export interface ResumeEligible {
 	analysisId: string;
@@ -115,6 +146,7 @@ async function candidateCases(executor: Executor, reviewReason: ResumeReviewReas
 			promptRunId: sentimentAnalyses.promptRunId,
 			instanceId: sentimentResolutionCases.instanceId,
 			inputHash: sentimentResolutionCases.inputHash,
+			unresolvedTargets: sentimentResolutionCases.unresolvedTargets,
 			createdAt: sentimentResolutionCases.createdAt,
 		})
 		.from(sentimentResolutionCases)
@@ -199,16 +231,47 @@ export function selectCallLimitCandidate(
 	return { attempt: latest, candidate: parsed.data };
 }
 
+/**
+ * The verifier-rejected invariant: the instance's latest paid attempt is the accepted verify whose reject verdict parked
+ * the case; the candidate it judged is the latest accepted classify/repair of the instance, built for the frozen input;
+ * the parked targets are exactly the verifier's (non-empty, all `source: "verifier"`); no unknown outcome anywhere. The
+ * resumed workflow repairs those targets once and verifies once — the pair the automatic budget could not afford.
+ */
+export function selectVerifierRejectedCandidate(
+	attempts: Attempt[],
+	instanceId: string,
+	inputHash: string,
+	unresolvedTargets: unknown,
+): { attempt: Attempt; candidate: SentimentClassificationResult } | { reason: ResumeExclusion } {
+	if (attempts.some((a) => a.outcome === "sending" || a.outcome === "aborted"))
+		return { reason: "sending-or-unknown-attempt" };
+	const targets = Array.isArray(unresolvedTargets) ? (unresolvedTargets as { source?: unknown }[]) : [];
+	if (targets.length === 0 || targets.some((t) => t?.source !== "verifier")) return { reason: "targets-not-verifier" };
+	const own = attempts.filter((a) => a.instanceId === instanceId).sort((a, b) => a.ordinal - b.ordinal);
+	const answered = own.filter((a) => a.generationId !== null || a.actualCostUsd !== null);
+	const last = answered.at(-1);
+	if (!last || last.phase !== "verify" || last.outcome !== "accepted" || own.at(-1)?.id !== last.id)
+		return { reason: "no-rejecting-verify" };
+	const latest = answered.filter((a) => a.phase === "classify" || a.phase === "repair").at(-1);
+	if (!latest || latest.outcome !== "accepted" || latest.candidate === null || latest.inputHash !== inputHash)
+		return { reason: "no-accepted-candidate" };
+	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
+	if (!parsed.success) return { reason: "candidate-malformed" };
+	return { attempt: latest, candidate: parsed.data };
+}
+
 /** The stored-candidate invariant of one review reason; the contract-defect rule is unchanged. */
 export function selectResumeCandidate(
 	reviewReason: ResumeReviewReason,
 	attempts: Attempt[],
 	instanceId: string,
 	inputHash: string,
+	unresolvedTargets: unknown = null,
 ): ReturnType<typeof selectStoredCandidate> {
-	return reviewReason === "call-limit"
-		? selectCallLimitCandidate(attempts, instanceId, inputHash)
-		: selectStoredCandidate(attempts, instanceId, inputHash);
+	if (reviewReason === "call-limit") return selectCallLimitCandidate(attempts, instanceId, inputHash);
+	if (reviewReason === "verifier-rejected")
+		return selectVerifierRejectedCandidate(attempts, instanceId, inputHash, unresolvedTargets);
+	return selectStoredCandidate(attempts, instanceId, inputHash);
 }
 
 /** Predicates 6–8 against the live run: same input, zero unresolved, a verifier document the guard and breaker accept. */
@@ -261,6 +324,7 @@ export async function selectResumableForVerify(
 			await loadProviderAttempts(row.analysisId, executor),
 			row.instanceId,
 			row.inputHash,
+			row.unresolvedTargets,
 		);
 		if ("reason" in stored) {
 			excluded.push({ analysisId: row.analysisId, reason: stored.reason });
@@ -290,11 +354,22 @@ export async function selectResumableForVerify(
 		count: eligible.length,
 		digest: digestOf(eligible.map((e) => e.analysisId)),
 		attemptDigest: digestOf(eligible.map((e) => e.latestAttemptId)),
-		projected: {
-			verifyCalls: eligible.length,
-			reservationEstimateUsd: (eligible.length * RESERVATION_ESTIMATES_USD.verify).toFixed(6),
-			hardLimits: "one verify phase per case; no classify or repair; permit expiry; one live permit per instance",
-		},
+		projected:
+			reviewReason === "verifier-rejected"
+				? {
+						verifyCalls: eligible.length,
+						reservationEstimateUsd: (
+							eligible.length *
+							(RESERVATION_ESTIMATES_USD.repair + RESERVATION_ESTIMATES_USD.verify)
+						).toFixed(6),
+						hardLimits:
+							"one repair and one verify phase per case; no classify; permit expiry; one live permit per instance",
+					}
+				: {
+						verifyCalls: eligible.length,
+						reservationEstimateUsd: (eligible.length * RESERVATION_ESTIMATES_USD.verify).toFixed(6),
+						hardLimits: "one verify phase per case; no classify or repair; permit expiry; one live permit per instance",
+					},
 	};
 }
 
@@ -347,7 +422,9 @@ async function permitForCase(
 	item: ResumeEligible,
 	manifestSha256: string,
 	who: ControlActor,
+	reviewReason: ResumeReviewReason,
 ): Promise<PermitDecision> {
+	const kind = resumePermitFor(reviewReason);
 	const live = await tx
 		.select()
 		.from(sentimentDispatchPermits)
@@ -367,10 +444,10 @@ async function permitForCase(
 			.where(eq(sentimentDispatchPermits.id, existing.id));
 		const budget = existing.phaseBudget as PhaseBudget;
 		const matches =
-			existing.purpose === "resume-verify" &&
+			existing.purpose === kind.purpose &&
 			existing.inputHash === item.inputHash &&
 			existing.contractSha256 === manifestSha256 &&
-			isResumeVerifyBudget(budget);
+			kind.matches(budget);
 		if (existing.state === "active") return { skipped: "permit-consumed" };
 		if (!clock.expired) {
 			return matches ? { permitId: existing.id, permit: "reused" } : { skipped: "permit-mismatch" };
@@ -383,14 +460,14 @@ async function permitForCase(
 	try {
 		const issued = await issuePermit(
 			{
-				purpose: "resume-verify",
+				purpose: kind.purpose,
 				promptRunId: item.promptRunId,
 				analysisId: item.analysisId,
 				instanceId: item.instanceId,
 				inputHash: item.inputHash,
 				classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
-				phaseBudget: { ...RESUME_VERIFY_PHASE_BUDGET },
-				estimatedCostBudgetUsd: RESUME_VERIFY_ESTIMATED_BUDGET_USD,
+				phaseBudget: { ...kind.budget },
+				estimatedCostBudgetUsd: kind.estimatedBudgetUsd,
 				ttlSeconds: RESUME_VERIFY_TTL_SECONDS,
 				contractSha256: manifestSha256,
 				...who,
@@ -455,6 +532,7 @@ export async function applyResumeForVerify(
 					reviewReason: sentimentResolutionCases.reviewReason,
 					instanceId: sentimentResolutionCases.instanceId,
 					inputHash: sentimentResolutionCases.inputHash,
+					unresolvedTargets: sentimentResolutionCases.unresolvedTargets,
 				})
 				.from(sentimentResolutionCases)
 				.where(eq(sentimentResolutionCases.analysisId, item.analysisId))
@@ -472,9 +550,10 @@ export async function applyResumeForVerify(
 				await loadProviderAttempts(item.analysisId, tx),
 				item.instanceId,
 				item.inputHash,
+				locked.unresolvedTargets,
 			);
 			if ("reason" in stored || stored.attempt.id !== item.latestAttemptId) return { skipped: "case-changed" as const };
-			return permitForCase(tx, item, manifestSha256, who);
+			return permitForCase(tx, item, manifestSha256, who, reviewReason);
 		});
 		if ("skipped" in decision) {
 			result.skipped.push({ analysisId: item.analysisId, reason: decision.skipped });

@@ -337,7 +337,7 @@ describe("B a changed input hash opens a new immutable instance", () => {
 describe("C parked work is pending_resolution, never failed", () => {
 	const scope = { brandId: BRAND, lookback: "1m" as const, timezone: "UTC", aspect: "overall" as const };
 
-	it("awaiting_review and awaiting_reconciliation leave the analysis pending_resolution; coverage counts them as pending", async () => {
+	it("awaiting_review and awaiting_reconciliation leave the analysis pending_resolution; coverage counts them as review, never as in progress", async () => {
 		const before = (await loadSentimentOverview(scope)).coverage.analyses;
 		const exhausted = scripted([
 			{ phase: "classify", answer: { entities: [brandUnbound] } },
@@ -375,7 +375,9 @@ describe("C parked work is pending_resolution, never failed", () => {
 
 		const after = (await loadSentimentOverview(scope)).coverage.analyses;
 		expect(after.failed).toBe(before.failed);
-		expect(after.pending).toBe(before.pending + 2);
+		// Parked cases are a human's work item, not work in flight: they never read as pending.
+		expect(after.review).toBe(before.review + 2);
+		expect(after.pending).toBe(before.pending);
 		const listed = await listUnresolvedCases();
 		expect(
 			listed

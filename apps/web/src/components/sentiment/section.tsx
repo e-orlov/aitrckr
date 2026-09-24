@@ -91,10 +91,13 @@ export function SentimentError({ onRetry }: { onRetry: () => void }) {
 
 function CoverageNote({ data }: { data: SentimentOverviewResponse }) {
 	const detectionPending = data.coverage.responsesDetected < data.eligibleResponses;
-	const classificationPending = data.coverage.analyses.pending > 0 || data.entities.some((row) => row.metrics.partial);
+	const classificationPending = data.coverage.analyses.pending > 0;
+	const review = data.coverage.analyses.review;
 	const failed = data.coverage.analyses.failed;
 	const unextractable = data.coverage.responsesUnextractable;
-	if (!detectionPending && !classificationPending && failed === 0 && unextractable === 0) return null;
+	const mentions = data.entities.reduce((sum, row) => sum + row.mentions, 0);
+	const analyzed = data.entities.reduce((sum, row) => sum + row.classified, 0);
+	if (!detectionPending && !classificationPending && review === 0 && failed === 0 && unextractable === 0) return null;
 	return (
 		<div
 			className="text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs"
@@ -109,6 +112,13 @@ function CoverageNote({ data }: { data: SentimentOverviewResponse }) {
 			)}
 			{classificationPending && (
 				<span>Sentiment analysis is still in progress for some mentions; scores show the analyzed part only. </span>
+			)}
+			{review > 0 && (
+				<span>
+					{analyzed.toLocaleString()} of {mentions.toLocaleString()} mentions analyzed. {review.toLocaleString()}{" "}
+					{review === 1 ? "response awaits" : "responses await"} human review because the independent verifier rejected
+					the classification or its evidence could not be grounded; scores show the analyzed part only.{" "}
+				</span>
 			)}
 			{failed > 0 && (
 				<span>
@@ -151,7 +161,7 @@ export function SentimentCards({
 	const rings = buildSentimentRings(data.chartRoster, data.entities, data.aspectLabel);
 	const sorted = sortEntityRows(data.entities, sortKey, view);
 	const detectionPending = data.coverage.responsesDetected < data.eligibleResponses;
-	const classificationPending = data.coverage.analyses.pending > 0 || data.entities.some((row) => row.metrics.partial);
+	const classificationPending = data.coverage.analyses.pending > 0;
 	const emptySample = data.entities.every((row) => row.sample === 0);
 	const period = `${longDate(data.dateRange.fromDate)} – ${longDate(data.dateRange.toDate)}`;
 
