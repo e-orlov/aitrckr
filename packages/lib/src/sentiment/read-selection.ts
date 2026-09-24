@@ -1,8 +1,9 @@
 import { and, eq, inArray, isNotNull, or, type SQL, sql } from "drizzle-orm";
 import { db } from "../db/db";
-import { sentimentAnalyses, sentimentResolutionCases } from "../db/schema";
+import { sentimentAnalyses, sentimentDetections, sentimentResolutionCases } from "../db/schema";
 import {
 	SENTIMENT_CLASSIFIER_VERSION,
+	SENTIMENT_DETECTOR_VERSION,
 	SENTIMENT_READABLE_CLASSIFIER_VERSIONS,
 	SENTIMENT_TAXONOMY_VERSION,
 } from "./types";
@@ -81,7 +82,9 @@ export type SentimentRunCoverageStatus = "completed" | "pending" | "review" | "f
  * inside its resolution workflow; otherwise
  * `failed` when the newest readable attempt failed; otherwise
  * `no_mentions`; rows of unreadable versions or a stale taxonomy alone are
- * stale work still to be redone and count as `pending`.
+ * stale work still to be redone and count as `pending` — unless the current
+ * detector found nothing to classify in that run, in which case no redo will
+ * ever happen and the run is `no_mentions`.
  */
 export function sentimentRunCoverageStatus(): SQL<SentimentRunCoverageStatus> {
 	const readable = inArray(sentimentAnalyses.classifierVersion, [...SENTIMENT_READABLE_CLASSIFIER_VERSIONS]);
@@ -94,11 +97,13 @@ export function sentimentRunCoverageStatus(): SQL<SentimentRunCoverageStatus> {
 	);
 	const failed = and(readable, eq(sentimentAnalyses.status, "failed"));
 	const noMentions = and(readable, eq(sentimentAnalyses.status, "no_mentions"));
+	const detectedNothing = sql`exists (select 1 from ${sentimentDetections} d where d.prompt_run_id = ${sentimentAnalyses.promptRunId} and d.detector_version = ${SENTIMENT_DETECTOR_VERSION} and d.status = 'no_mentions')`;
 	return sql<SentimentRunCoverageStatus>`case
 		when bool_or(${completed}) then 'completed'
 		when bool_or(${parkedForReview}) then 'review'
 		when bool_or(${inFlight}) then 'pending'
 		when bool_or(${failed}) then 'failed'
 		when bool_or(${noMentions}) then 'no_mentions'
+		when ${detectedNothing} then 'no_mentions'
 		else 'pending' end`;
 }

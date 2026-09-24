@@ -57,6 +57,24 @@ async function seedRun(i: number): Promise<string> {
 	return rows[0].id;
 }
 
+async function seedRunWithoutMentions(i: number) {
+	await client.query(
+		`INSERT INTO prompt_runs (id, prompt_id, brand_id, model, provider, version, web_search_enabled, raw_output, brand_mentioned, competitors_mentioned, created_at)
+		 VALUES ($1, $2, $3, 'chatgpt', 'openrouter', 'v', true, $4, false, '{}', now() - interval '2 days' + ($5 || ' minutes')::interval)`,
+		[
+			runId(i),
+			PROMPT,
+			BRAND,
+			JSON.stringify({ choices: [{ message: { content: `Answer ${i}: nobody named.` } }] }),
+			String(i),
+		],
+	);
+	await client.query(
+		`INSERT INTO sentiment_detections (prompt_run_id, brand_id, detector_version, status, mention_count) VALUES ($1, $2, $3, 'no_mentions', 0)`,
+		[runId(i), BRAND, SENTIMENT_DETECTOR_VERSION],
+	);
+}
+
 async function analysis(i: number, version: string, status: string, taxonomy = SENTIMENT_TAXONOMY_VERSION) {
 	const { rows } = await client.query<{ id: string }>(
 		`INSERT INTO sentiment_analyses (prompt_run_id, brand_id, classifier_version, taxonomy_version, status, completed_at)
@@ -156,8 +174,10 @@ beforeAll(async () => {
 	// Run 5: v2 completed only                                  → excluded
 	// Run 6: v3 completed 60 + v4 pending                       → counted, v3 (60)
 	// Run 7: v3 completed under an older taxonomy               → excluded (stale)
+	// Run 8: v2 completed only, current detector found no mention → excluded, terminal (no_mentions, not pending)
 	const m: Record<number, string> = {};
 	for (let i = 1; i <= 7; i++) m[i] = await seedRun(i);
+	await seedRunWithoutMentions(8);
 	await observe(await analysis(1, V3, "completed"), m[1], 1, 80, "positive", 70);
 	await observe(await analysis(2, V4, "completed"), m[2], 2, 90, "positive", 95);
 	await observe(await analysis(3, V3, "completed"), m[3], 3, 20, "negative", 10);
@@ -168,6 +188,7 @@ beforeAll(async () => {
 	await observe(await analysis(6, V3, "completed"), m[6], 6, 60, "positive");
 	await analysis(6, V4, "pending");
 	await observe(await analysis(7, V3, "completed", "sent-aspects-v0"), m[7], 7, 100, "positive");
+	await analysis(8, V2, "completed");
 });
 
 afterAll(async () => {
@@ -194,6 +215,7 @@ describe("V4-RED-007 / V4-RED-008 transitional version selection", () => {
 		expect(overview.coverage.analyses.completed).toBe(5);
 		expect(overview.coverage.analyses.failed).toBe(0);
 		expect(overview.coverage.analyses.pending).toBe(2);
+		expect(overview.coverage.analyses.noMentions).toBe(1);
 		const point = overview.series.find((p) => p.values[A]?.sample > 0)!;
 		expect(point.values[A]).toEqual({ sentiment: 74, sample: 5 });
 	});
