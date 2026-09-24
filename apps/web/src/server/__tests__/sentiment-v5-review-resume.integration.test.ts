@@ -407,8 +407,11 @@ describe("IT-SNT-RR-003 exactly one repair+verify pair under the permit", () => 
 			(await client.query("SELECT state FROM sentiment_dispatch_permits WHERE id = $1", [mine?.permitId])).rows[0]
 				.state,
 		).toBe("exhausted");
-		// Selectable again only by a fresh explicit manifest — never re-run automatically.
+		// The pair was spent: neither the maintenance inventory nor a fresh manifest selects the instance again.
 		expect((await listResumableSentimentRuns(1000)).map((r) => r.promptRunId)).not.toContain(run(6));
+		const fresh = await selectRR();
+		expect(fresh.eligible.map((e) => e.analysisId)).not.toContain(rr.analysis_id);
+		expect(fresh.excluded).toContainEqual({ analysisId: rr.analysis_id, reason: "pair-already-spent" });
 		const again = scripted([{ phase: "repair", answer: { entities: [brandOk] } }]);
 		expect(await runSentimentJob(payload(run(6)), { resolveProvider: () => again.provider })).toMatchObject({
 			status: "awaiting-review",
