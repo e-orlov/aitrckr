@@ -536,7 +536,7 @@ describe("S8 transient provider error → bounded backoff → completed", () => 
 });
 
 describe("S9 cost/call ceiling → awaiting_review", () => {
-	it("five paid calls exhaust the policy; the case stays open as awaiting_review with the provisional result; nothing persisted", async () => {
+	it("the budget parks a deterministic repair loop before the last unverifiable repair: awaiting_review/call-limit at four calls, candidate kept; nothing persisted", async () => {
 		const { provider, script } = scripted([
 			{ phase: "classify", answer: { entities: [brandUnbound] } },
 			{ phase: "repair", answer: { entities: [brandUnbound] } },
@@ -546,15 +546,17 @@ describe("S9 cost/call ceiling → awaiting_review", () => {
 			{ phase: "repair", answer: { entities: [brandOk()] } },
 		]);
 		const outcome = await runSentimentJob(payload(run(9)), { resolveProvider: () => provider, resolutionPolicy: fast });
+		// The fifth call would be a repair no sixth call could verify: the pair rule parks the case one call earlier.
 		expect(outcome).toMatchObject({
 			status: "awaiting-review",
-			paidCalls: RESOLUTION_POLICY.maxPaidCalls,
+			reason: "call-limit",
+			paidCalls: RESOLUTION_POLICY.maxPaidCalls - 1,
 			unresolved: 1,
 		});
-		expect(script.steps).toHaveLength(1);
+		expect(script.steps).toHaveLength(2);
 		const c = await caseOf(run(9));
-		expect(c).toMatchObject({ status: "awaiting_review", automated_provider_calls: 5 });
-		expect(Number(c.total_actual_cost_usd)).toBeCloseTo(0.1, 6);
+		expect(c).toMatchObject({ status: "awaiting_review", automated_provider_calls: 4 });
+		expect(Number(c.total_actual_cost_usd)).toBeCloseTo(0.08, 6);
 		expect(c.unresolved_targets).toHaveLength(1);
 		expect(c.provisional_result).not.toBeNull();
 		expect(JSON.stringify(c.provisional_result)).not.toMatch(/Rechtsschutz|Premium-Tarif/);
@@ -564,7 +566,7 @@ describe("S9 cost/call ceiling → awaiting_review", () => {
 		expect(
 			await runSentimentJob(payload(run(9)), { resolveProvider: () => provider, resolutionPolicy: fast }),
 		).toMatchObject({ status: "awaiting-review" });
-		expect(script.steps).toHaveLength(1);
+		expect(script.steps).toHaveLength(2);
 		expect((await listUnresolvedCases()).some((u) => u.promptRunId === run(9) && u.status === "awaiting_review")).toBe(
 			true,
 		);
@@ -634,7 +636,7 @@ describe("S10 / S11 human adjudication", () => {
 		expect((await caseOf(run(9))).status).toBe("resolved");
 		expect((await listUnresolvedCases()).some((u) => u.promptRunId === run(9))).toBe(false);
 		// No provider call was made by adjudication.
-		expect((await attemptsOf(run(9))).filter((a) => a.generation_id !== null)).toHaveLength(5);
+		expect((await attemptsOf(run(9))).filter((a) => a.generation_id !== null)).toHaveLength(4);
 	});
 });
 

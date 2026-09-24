@@ -440,7 +440,7 @@ describe("IT-SNT-VF-004 call-limit-repair and the explicit second pair", () => {
 		const cl = await caseOf(run(7));
 		expect((await selectResumableForVerify(undefined, { reviewReason: "call-limit" })).excluded).toContainEqual({
 			analysisId: cl.analysis_id,
-			reason: "wrong-path",
+			reason: "wrong-call-count",
 		});
 		const { manifest, applied } = await applyMode("call-limit-repair");
 		expect(manifest.eligible.map((e) => e.analysisId)).toContain(cl.analysis_id);
@@ -451,7 +451,7 @@ describe("IT-SNT-VF-004 call-limit-repair and the explicit second pair", () => {
 		]);
 		expect(await runSentimentJob(payload(run(7)), { resolveProvider: () => p2 })).toMatchObject({
 			status: "classified",
-			paidCalls: 7,
+			paidCalls: 6,
 		});
 		expect(script.calls).toEqual(["repair", "verify"]);
 		expect(script.prompts[0]).toMatch(/does not name this candidate/);

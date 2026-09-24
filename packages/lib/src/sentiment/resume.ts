@@ -96,7 +96,7 @@ export function resumePermitFor(reviewReason: ResumeReviewReason): {
 				matches: isResumeVerifyBudget,
 			};
 }
-/** The only automatic path that parks an unverified repair under `call-limit`: the fifth paid call was that repair. */
+/** The shape the pair rule (#53) left behind before it covered every repair: the fifth paid call was that repair. */
 export const CALL_LIMIT_RESUMABLE_PATH: readonly string[] = Object.freeze([
 	"classify",
 	"verify",
@@ -239,14 +239,11 @@ export function selectCallLimitCandidate(
 	const own = attempts.filter((a) => a.instanceId === instanceId).sort((a, b) => a.ordinal - b.ordinal);
 	const answered = own.filter((a) => a.generationId !== null || a.actualCostUsd !== null);
 	if (answered.length !== maxPaidCalls) return { reason: "wrong-call-count" };
-	if (
-		answered.length !== CALL_LIMIT_RESUMABLE_PATH.length ||
-		answered.some((a, i) => a.phase !== CALL_LIMIT_RESUMABLE_PATH[i] || a.outcome !== "accepted")
-	) {
-		return { reason: "wrong-path" };
-	}
+	// The invariant is the shape, not one fixed phase sequence: the budget's last answered call is an accepted candidate
+	// (classify or repair) that no verify ever judged — whatever refusals and verdicts preceded it.
 	const latest = answered.at(-1);
-	if (!latest) return { reason: "no-accepted-candidate" };
+	if (!latest || latest.outcome !== "accepted" || (latest.phase !== "repair" && latest.phase !== "classify"))
+		return { reason: "wrong-path" };
 	if (own.at(-1)?.id !== latest.id) return { reason: "later-attempt" };
 	if (latest.candidate === null || latest.inputHash !== inputHash) return { reason: "no-accepted-candidate" };
 	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
