@@ -683,7 +683,7 @@ export const sentimentFilteredClaims = pgTable(
 		),
 		validationCodeCheck: check(
 			"sentiment_filtered_claims_validation_code_check",
-			sql`${table.validationCode} IN ('aspect-ungrounded', 'evidence-entity-unbound', 'polarity-category-mismatch', 'mixed-needs-dual-evidence', 'evidence-anchor-polarity-conflict')`,
+			sql`${table.validationCode} IN ('aspect-ungrounded', 'evidence-entity-unbound', 'polarity-category-mismatch', 'mixed-needs-dual-evidence', 'evidence-anchor-polarity-conflict', 'verifier:entity-misattribution', 'verifier:polarity-mismatch', 'verifier:category-mismatch', 'verifier:mixed-semantics', 'verifier:aspect-misrouted', 'verifier:unsupported-evaluation')`,
 		),
 	}),
 ).enableRLS();

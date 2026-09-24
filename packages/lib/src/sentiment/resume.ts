@@ -55,8 +55,25 @@ export const RESUME_DEFAULT_BATCH = 10;
 export const RESUME_MANIFEST_VERSION = 2;
 
 /** The parked review states a verify-only resume may address; each has its own evidence invariant. */
-export const RESUME_REVIEW_REASONS = ["contract-defect", "call-limit", "verifier-rejected"] as const;
+export const RESUME_REVIEW_REASONS = [
+	"contract-defect",
+	"call-limit",
+	"verifier-rejected",
+	"call-limit-repair",
+] as const;
 export type ResumeReviewReason = (typeof RESUME_REVIEW_REASONS)[number];
+
+/**
+ * The stored case review reasons a resume mode addresses. `verifier-rejected` also admits a case that a permitted
+ * repair left as `contract-defect` without an answer (an unpaid provider refusal): its evidence is still the rejecting
+ * verify and the verifier's targets. `call-limit-repair` addresses the deterministic parity path (classify then repairs
+ * that never bound their evidence) with one permitted repair+verify pair.
+ */
+export function admittedCaseReasons(mode: ResumeReviewReason): readonly ReviewReason[] {
+	if (mode === "verifier-rejected") return ["verifier-rejected", "contract-defect"];
+	if (mode === "call-limit-repair") return ["call-limit"];
+	return [mode];
+}
 
 /** The permit each review reason resumes with: verify-only for a stored unverified candidate, the repair+verify pair for a verifier-rejected one. */
 export function resumePermitFor(reviewReason: ResumeReviewReason): {
@@ -65,7 +82,7 @@ export function resumePermitFor(reviewReason: ResumeReviewReason): {
 	estimatedBudgetUsd: number;
 	matches: (budget: PhaseBudget) => boolean;
 } {
-	return reviewReason === "verifier-rejected"
+	return reviewReason === "verifier-rejected" || reviewReason === "call-limit-repair"
 		? {
 				purpose: "resume-repair",
 				budget: RESUME_REPAIR_PHASE_BUDGET,
@@ -111,7 +128,9 @@ export type ResumeExclusion =
 	/** verifier-rejected: the latest paid attempt is not the accepted verify that rejected the candidate. */
 	| "no-rejecting-verify"
 	/** verifier-rejected: this instance already spent its one permitted repair+verify pair; the rest is a human's decision. */
-	| "pair-already-spent";
+	| "pair-already-spent"
+	/** call-limit-repair: the instance's parked targets are not exclusively deterministic evidence bindings. */
+	| "targets-not-deterministic";
 
 export interface ResumeEligible {
 	analysisId: string;
@@ -126,6 +145,8 @@ export interface ResumeManifest {
 	version: number;
 	/** The review state this manifest resumes; re-checked under the row lock at apply. */
 	reviewReason: ResumeReviewReason;
+	/** Operator-admitted second permitted pair (after changed repair guidance); recorded so apply re-selects identically. */
+	allowSecondPair?: boolean;
 	classifierVersion: string;
 	generatedAt: string;
 	eligible: ResumeEligible[];
@@ -161,7 +182,7 @@ async function candidateCases(executor: Executor, reviewReason: ResumeReviewReas
 				isNull(sentimentAnalyses.verifiedAt),
 				isNull(sentimentAnalyses.verifierVersion),
 				eq(sentimentResolutionCases.status, "awaiting_review"),
-				eq(sentimentResolutionCases.reviewReason, reviewReason),
+				inArray(sentimentResolutionCases.reviewReason, [...admittedCaseReasons(reviewReason)]),
 				isNull(sentimentResolutionCases.nextAttemptAt),
 			),
 		)
@@ -244,21 +265,61 @@ export function selectVerifierRejectedCandidate(
 	instanceId: string,
 	inputHash: string,
 	unresolvedTargets: unknown,
+	options: { allowSecondPair?: boolean } = {},
 ): { attempt: Attempt; candidate: SentimentClassificationResult } | { reason: ResumeExclusion } {
 	if (attempts.some((a) => a.outcome === "sending" || a.outcome === "aborted"))
 		return { reason: "sending-or-unknown-attempt" };
 	const targets = Array.isArray(unresolvedTargets) ? (unresolvedTargets as { source?: unknown }[]) : [];
 	if (targets.length === 0 || targets.some((t) => t?.source !== "verifier")) return { reason: "targets-not-verifier" };
 	const own = attempts.filter((a) => a.instanceId === instanceId).sort((a, b) => a.ordinal - b.ordinal);
-	// One permitted pair per instance: a rejection after a permit-bound attempt is final for the automatic path.
-	if (own.some((a) => a.permitId !== null)) return { reason: "pair-already-spent" };
 	const answered = own.filter((a) => a.generationId !== null || a.actualCostUsd !== null);
+	// One permitted pair per instance (a refusal that never answered spent nothing). An operator may admit exactly one
+	// further pair explicitly — after the repair guidance changed — never a third.
+	const paidPermitted = answered.filter((a) => a.permitId !== null).length;
+	if (paidPermitted > 0 && !(options.allowSecondPair === true && paidPermitted <= 2))
+		return { reason: "pair-already-spent" };
 	const last = answered.at(-1);
-	if (!last || last.phase !== "verify" || last.outcome !== "accepted" || own.at(-1)?.id !== last.id)
+	const trailingUnpaid = own.slice(own.findIndex((a) => a.id === last?.id) + 1);
+	if (
+		!last ||
+		last.phase !== "verify" ||
+		last.outcome !== "accepted" ||
+		trailingUnpaid.some((a) => a.generationId !== null || a.actualCostUsd !== null || a.outcome !== "provider-error")
+	)
 		return { reason: "no-rejecting-verify" };
 	const latest = answered.filter((a) => a.phase === "classify" || a.phase === "repair").at(-1);
 	if (!latest || latest.outcome !== "accepted" || latest.candidate === null || latest.inputHash !== inputHash)
 		return { reason: "no-accepted-candidate" };
+	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
+	if (!parsed.success) return { reason: "candidate-malformed" };
+	return { attempt: latest, candidate: parsed.data };
+}
+
+/**
+ * The deterministic parity path: every answered attempt of the instance is a classify or repair (no verify was ever
+ * reached), the parked targets are exclusively deterministic evidence bindings, and the latest answered attempt
+ * carries a parseable candidate for the frozen input. The resumed workflow re-assesses that candidate, repairs the
+ * unbound evidence once and verifies once — the pair the automatic budget never got to.
+ */
+export function selectCallLimitRepairCandidate(
+	attempts: Attempt[],
+	instanceId: string,
+	inputHash: string,
+	unresolvedTargets: unknown,
+): { attempt: Attempt; candidate: SentimentClassificationResult } | { reason: ResumeExclusion } {
+	if (attempts.some((a) => a.outcome === "sending" || a.outcome === "aborted"))
+		return { reason: "sending-or-unknown-attempt" };
+	const targets = Array.isArray(unresolvedTargets) ? (unresolvedTargets as { source?: unknown }[]) : [];
+	if (targets.length === 0 || targets.some((t) => t?.source !== "deterministic"))
+		return { reason: "targets-not-deterministic" };
+	const own = attempts.filter((a) => a.instanceId === instanceId).sort((a, b) => a.ordinal - b.ordinal);
+	if (own.some((a) => a.permitId !== null && (a.generationId !== null || a.actualCostUsd !== null)))
+		return { reason: "pair-already-spent" };
+	const answered = own.filter((a) => a.generationId !== null || a.actualCostUsd !== null);
+	if (answered.length === 0 || answered.some((a) => a.phase === "verify")) return { reason: "wrong-path" };
+	const latest = answered.at(-1);
+	if (!latest || own.at(-1)?.id !== latest.id) return { reason: "later-attempt" };
+	if (latest.candidate === null || latest.inputHash !== inputHash) return { reason: "no-accepted-candidate" };
 	const parsed = sentimentClassificationResultSchema.safeParse(latest.candidate);
 	if (!parsed.success) return { reason: "candidate-malformed" };
 	return { attempt: latest, candidate: parsed.data };
@@ -271,18 +332,22 @@ export function selectResumeCandidate(
 	instanceId: string,
 	inputHash: string,
 	unresolvedTargets: unknown = null,
+	options: { allowSecondPair?: boolean } = {},
 ): ReturnType<typeof selectStoredCandidate> {
 	if (reviewReason === "call-limit") return selectCallLimitCandidate(attempts, instanceId, inputHash);
+	if (reviewReason === "call-limit-repair")
+		return selectCallLimitRepairCandidate(attempts, instanceId, inputHash, unresolvedTargets);
 	if (reviewReason === "verifier-rejected")
-		return selectVerifierRejectedCandidate(attempts, instanceId, inputHash, unresolvedTargets);
+		return selectVerifierRejectedCandidate(attempts, instanceId, inputHash, unresolvedTargets, options);
 	return selectStoredCandidate(attempts, instanceId, inputHash);
 }
 
-/** Predicates 6–8 against the live run: same input, zero unresolved, a verifier document the guard and breaker accept. */
+/** Predicates 6–8 against the live run: same input, zero unresolved (unless the mode exists to repair them), a verifier document the guard and breaker accept. */
 async function assessLiveInput(
 	row: { promptRunId: string; instanceId: string; inputHash: string },
 	candidate: SentimentClassificationResult,
 	executor: Executor,
+	options: { expectUnresolved?: boolean } = {},
 ): Promise<ResumeExclusion | null> {
 	const run = await loadRunForSentiment(row.promptRunId, executor);
 	if (!run || run.answerBody === null) return "run-unreadable";
@@ -295,7 +360,7 @@ async function assessLiveInput(
 	const anchors = segmentAnswer(run.answerBody, ranges);
 	const assessment = assessCandidate(candidate, { answerBody: run.answerBody, candidates, anchors, analysis: ranges });
 	if (assessment.contractDefect) return "contract-defect";
-	if (assessment.unresolved.length > 0) return "needs-repair";
+	if (assessment.unresolved.length > 0 && !options.expectUnresolved) return "needs-repair";
 	let document: Record<string, unknown>;
 	try {
 		document = prepareStructuredOutputSchema(
@@ -317,7 +382,7 @@ async function assessLiveInput(
 /** Read-only selection by invariant; mutates nothing. */
 export async function selectResumableForVerify(
 	executor: Executor = db,
-	options: { reviewReason?: ResumeReviewReason } = {},
+	options: { reviewReason?: ResumeReviewReason; allowSecondPair?: boolean } = {},
 ): Promise<ResumeManifest> {
 	const reviewReason = options.reviewReason ?? "contract-defect";
 	const eligible: ResumeEligible[] = [];
@@ -329,12 +394,15 @@ export async function selectResumableForVerify(
 			row.instanceId,
 			row.inputHash,
 			row.unresolvedTargets,
+			{ allowSecondPair: options.allowSecondPair },
 		);
 		if ("reason" in stored) {
 			excluded.push({ analysisId: row.analysisId, reason: stored.reason });
 			continue;
 		}
-		const live = await assessLiveInput(row, stored.candidate, executor);
+		const live = await assessLiveInput(row, stored.candidate, executor, {
+			expectUnresolved: reviewReason === "call-limit-repair",
+		});
 		if (live) {
 			excluded.push({ analysisId: row.analysisId, reason: live });
 			continue;
@@ -351,6 +419,7 @@ export async function selectResumableForVerify(
 	return {
 		version: RESUME_MANIFEST_VERSION,
 		reviewReason,
+		allowSecondPair: options.allowSecondPair === true,
 		classifierVersion: SENTIMENT_CLASSIFIER_VERSION,
 		generatedAt: (await databaseNow(executor)).toISOString(),
 		eligible,
@@ -516,7 +585,8 @@ export async function applyResumeForVerify(
 	const reviewReason = args.manifest.reviewReason;
 	if (!(RESUME_REVIEW_REASONS as readonly string[]).includes(reviewReason))
 		throw new Error(`manifest reviewReason must be one of ${RESUME_REVIEW_REASONS.join(", ")}`);
-	const current = await selectResumableForVerify(executor, { reviewReason });
+	const allowSecondPair = args.manifest.allowSecondPair === true;
+	const current = await selectResumableForVerify(executor, { reviewReason, allowSecondPair });
 	const drift =
 		current.count !== args.manifest.count
 			? `count ${args.manifest.count} → ${current.count}`
@@ -543,7 +613,7 @@ export async function applyResumeForVerify(
 				.for("update");
 			if (
 				locked?.status !== "awaiting_review" ||
-				(locked.reviewReason as ReviewReason | null) !== reviewReason ||
+				!admittedCaseReasons(reviewReason).includes(locked.reviewReason as ReviewReason) ||
 				locked.instanceId !== item.instanceId ||
 				locked.inputHash !== item.inputHash
 			) {
@@ -555,6 +625,7 @@ export async function applyResumeForVerify(
 				item.instanceId,
 				item.inputHash,
 				locked.unresolvedTargets,
+				{ allowSecondPair },
 			);
 			if ("reason" in stored || stored.attempt.id !== item.latestAttemptId) return { skipped: "case-changed" as const };
 			return permitForCase(tx, item, manifestSha256, who, reviewReason);

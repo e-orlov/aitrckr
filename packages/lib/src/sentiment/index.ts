@@ -307,6 +307,14 @@ export {
 	schemaBudgetViolations,
 } from "./schema-budget";
 export {
+	applyVerifierFilteredSettlements,
+	type SettleCandidate,
+	type SettleExclusion,
+	type SettleManifest,
+	type SettleResult,
+	selectVerifierFilteredSettlements,
+} from "./settle";
+export {
 	type AnalysisClaim,
 	type ClaimOptions,
 	type ClaimOutcome,

@@ -1,7 +1,8 @@
 /**
  * Verifier-only resumption of sentiment cases parked for review (Amendment C).
  *
- *   verify --dry-run --out <manifest.json> [--review-reason contract-defect|call-limit|verifier-rejected]
+ *   verify --dry-run --out <manifest.json> [--review-reason contract-defect|call-limit|verifier-rejected|call-limit-repair] [--second-pair]
+ *   settle --dry-run --out <manifest.json> | settle --apply --manifest <f> --manifest-sha256 <hex> [--limit N]
  *       Selects by invariant, writes the manifest (ordered ids, count, digests,
  *       projected verify calls and the reservation planning estimate) and
  *       prints its sha256. Mutates nothing.
@@ -22,6 +23,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import {
 	applyResumeForVerify,
+	applyVerifierFilteredSettlements,
 	ensureSentimentQueue,
 	manifestSha256,
 	RESUME_DEFAULT_BATCH,
@@ -29,7 +31,9 @@ import {
 	RESUME_REVIEW_REASONS,
 	type ResumeManifest,
 	type ResumeReviewReason,
+	type SettleManifest,
 	selectResumableForVerify,
+	selectVerifierFilteredSettlements,
 } from "@workspace/lib/sentiment";
 import boss from "../src/boss";
 
@@ -45,6 +49,7 @@ const { values, positionals } = parseArgs({
 		manifest: { type: "string" },
 		"manifest-sha256": { type: "string" },
 		"review-reason": { type: "string" },
+		"second-pair": { type: "boolean", default: false },
 		limit: { type: "string" },
 		actor: { type: "string" },
 		reason: { type: "string" },
@@ -57,12 +62,16 @@ async function dryRun(): Promise<number> {
 	const reviewReason = values["review-reason"] ?? "contract-defect";
 	if (!(RESUME_REVIEW_REASONS as readonly string[]).includes(reviewReason))
 		throw new UsageError(`--review-reason must be one of ${RESUME_REVIEW_REASONS.join(", ")}`);
-	const manifest = await selectResumableForVerify(undefined, { reviewReason: reviewReason as ResumeReviewReason });
+	const manifest = await selectResumableForVerify(undefined, {
+		reviewReason: reviewReason as ResumeReviewReason,
+		allowSecondPair: values["second-pair"],
+	});
 	const json = JSON.stringify(manifest, null, 2);
 	await writeFile(values.out, json, "utf8");
 	console.log(
 		JSON.stringify({
 			reviewReason: manifest.reviewReason,
+			allowSecondPair: manifest.allowSecondPair === true,
 			count: manifest.count,
 			excluded: manifest.excluded.length,
 			digest: manifest.digest,
@@ -107,9 +116,46 @@ async function apply(): Promise<number> {
 	}
 }
 
+/**
+ * settle: ADR Amendment E on already-parked verifier-rejected cases — the verifier objected only to aspect claims,
+ * so those claims are dropped and the rest is persisted as the verified result. No provider request, no permit.
+ */
+async function settle(): Promise<number> {
+	if (values["dry-run"]) {
+		if (!values.out) throw new UsageError("--dry-run needs --out <manifest.json>");
+		const manifest = await selectVerifierFilteredSettlements();
+		const json = JSON.stringify(manifest, null, 2);
+		await writeFile(values.out, json, "utf8");
+		const reasons: Record<string, number> = {};
+		for (const e of manifest.excluded) reasons[e.reason] = (reasons[e.reason] ?? 0) + 1;
+		console.log(
+			JSON.stringify({
+				count: manifest.count,
+				excluded: reasons,
+				manifest: values.out,
+				manifestSha256: manifestSha256(json),
+			}),
+		);
+		return EXIT.ok;
+	}
+	if (!values.manifest || !values["manifest-sha256"])
+		throw new UsageError("--apply needs --manifest and --manifest-sha256");
+	const json = await readFile(values.manifest, "utf8");
+	if (manifestSha256(json) !== values["manifest-sha256"].toLowerCase())
+		throw new UsageError("manifest sha256 does not match the file");
+	const manifest = JSON.parse(json) as SettleManifest;
+	const limit = values.limit ? Number(values.limit) : RESUME_DEFAULT_BATCH;
+	if (!Number.isInteger(limit) || limit <= 0) throw new UsageError("--limit must be a positive integer");
+	const result = await applyVerifierFilteredSettlements(manifest, { limit });
+	console.log(JSON.stringify(result));
+	return EXIT.ok;
+}
+
 async function main(): Promise<number> {
-	if (positionals[0] !== "verify") throw new UsageError('the only mode is "verify"');
+	if (positionals[0] !== "verify" && positionals[0] !== "settle")
+		throw new UsageError('the mode must be "verify" or "settle"');
 	if (values["dry-run"] === values.apply) throw new UsageError("use exactly one of --dry-run or --apply");
+	if (positionals[0] === "settle") return settle();
 	return values["dry-run"] ? dryRun() : apply();
 }
 

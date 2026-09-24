@@ -197,11 +197,20 @@ describe("A1 closed automatic-retry allow-list", () => {
 	});
 });
 
+describe("A1b HTTP 402 is the account's state, not the request's: a transient refusal", () => {
+	it("402 insufficient_credits → retry_wait with the bounded backoff; one unpaid attempt, no review", async () => {
+		const { d, fakes, classify } = harness(typed(402, "insufficient_credits"));
+		expect(await runSentimentJob(payload, d)).toMatchObject({ status: "retry-wait", consecutiveFailures: 1 });
+		expect(classify).toHaveBeenCalledTimes(1);
+		expect(fakes.attempts.map((a) => a.outcome)).toEqual(["provider-error"]);
+		expect(fakes.cases.get("a1")).toMatchObject({ status: "retry_wait" });
+	});
+});
+
 describe("A1 everything outside the allow-list makes exactly one call and parks the run", () => {
 	const review: [string, () => unknown][] = [
 		["400 bad_request", () => typed(400, "bad_request")],
 		["401 unauthorized", () => typed(401, "unauthorized")],
-		["402 insufficient_credits", () => typed(402, "insufficient_credits")],
 		["403 forbidden", () => typed(403, "forbidden")],
 		["404 not_found", () => typed(404, "not_found")],
 		["409 conflict", () => typed(409, "conflict")],
