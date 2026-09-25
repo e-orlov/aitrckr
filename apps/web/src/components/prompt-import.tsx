@@ -251,12 +251,10 @@ function ReviewSummary({ review, blocking }: { review: PromptImportReview; block
 								<>
 									{" "}
 									— for example{" "}
-									{item.examples.slice(0, 3).map((example, i) => (
-										<span key={`${example}-${i}`}>
-											{i > 0 && ", "}
-											<q>{example}</q>
-										</span>
-									))}
+									{item.examples
+										.slice(0, 3)
+										.map((example) => `“${example}”`)
+										.join(", ")}
 									{item.examples.length > 3 && "…"}
 								</>
 							)}
