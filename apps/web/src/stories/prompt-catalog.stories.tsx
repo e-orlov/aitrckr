@@ -1,20 +1,41 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { SidebarInset, SidebarProvider } from "@workspace/ui/components/sidebar";
 import { expect, userEvent, waitFor, within } from "storybook/test";
-import { PromptsEditor } from "@/components/prompts-editor";
+import { PromptCatalog } from "@/components/prompt-catalog";
+import type { PromptCatalogPage } from "@/server/prompt-catalog-load";
 import { mockPromptSave } from "./_mocks/server-prompts";
 
-const prompts = Array.from({ length: 24 }, (_, i) => ({
+const now = new Date("2026-09-01T00:00:00Z");
+const rows: PromptCatalogPage["rows"] = Array.from({ length: 24 }, (_, i) => ({
 	id: `prompt-${i}`,
+	brandId: "mock-brand-id",
 	value: `What are the best AI visibility tools for ${["agencies", "startups", "enterprises", "ecommerce"][i % 4]}? (${i + 1})`,
 	enabled: i % 5 !== 0,
 	tags: i % 3 === 0 ? ["comparison"] : [],
 	systemTags: i % 2 === 0 ? ["unbranded"] : ["branded"],
+	premiumModels: [],
+	createdAt: now,
+	updatedAt: now,
 }));
 
+function page(pageRows: PromptCatalogPage["rows"], overrides: Partial<PromptCatalogPage> = {}): PromptCatalogPage {
+	return {
+		rows: pageRows,
+		total: pageRows.length,
+		page: 1,
+		pageSize: 50,
+		totalPages: 1,
+		brand: { total: pageRows.length, enabled: pageRows.filter((p) => p.enabled).length },
+		tagOptions: ["comparison", "pricing"],
+		...overrides,
+	};
+}
+
+const search = { page: 1, q: "", tag: "", status: "all" as const };
+
 const meta = {
-	title: "Pages/PromptsEditor",
-	component: PromptsEditor,
+	title: "Pages/PromptCatalog",
+	component: PromptCatalog,
 	parameters: { layout: "fullscreen" },
 	decorators: [
 		(Story) => (
@@ -31,17 +52,30 @@ const meta = {
 			</SidebarProvider>
 		),
 	],
-} satisfies Meta<typeof PromptsEditor>;
+} satisfies Meta<typeof PromptCatalog>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {
+	args: { brandId: "mock-brand-id", page: page(rows), search },
+};
+
+/** A page deep inside a large catalog: the pager and the brand-wide counter. */
+export const PageOfTenThousand: Story = {
 	args: {
-		initialPrompts: prompts,
 		brandId: "mock-brand-id",
-		pageTitle: "Prompts",
-		pageDescription: "Add, edit, or remove your brand tracking keywords and prompts",
+		page: page(rows, { total: 10_000, page: 137, totalPages: 200, brand: { total: 10_000, enabled: 412 } }),
+		search: { ...search, page: 137 },
+	},
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		await expect(canvas.getByTestId("catalog-range")).toHaveTextContent("Showing 6,801–6,850 of 10,000 prompts");
+		await expect(canvas.getByTestId("catalog-capacity")).toHaveTextContent(
+			"10,000/10,000 prompts in this brand · 412 enabled",
+		);
+		await expect(canvas.getByRole("button", { name: /^add prompt$/i })).toBeDisabled();
+		await expect(canvas.getByText("Page 137 of 200")).toBeVisible();
 	},
 };
 
@@ -51,12 +85,7 @@ export const Default: Story = {
  * the safe save message, keep their unsaved edits, and be able to save again.
  */
 export const SaveFailureShowsSafeMessage: Story = {
-	args: {
-		initialPrompts: prompts.slice(0, 3),
-		brandId: "mock-brand-id",
-		pageTitle: "Prompts",
-		pageDescription: "Add, edit, or remove your brand tracking keywords and prompts",
-	},
+	args: { brandId: "mock-brand-id", page: page(rows.slice(0, 3)), search },
 	play: async ({ canvasElement }) => {
 		const canvas = within(canvasElement);
 		const canary = "F04_R2_SECRET_CANARY";
@@ -76,6 +105,7 @@ export const SaveFailureShowsSafeMessage: Story = {
 			await expect(text).not.toContain(leak);
 		}
 		await expect(canvas.getByText("Unsaved changes")).toBeVisible();
+		await expect(firstPrompt).toHaveValue(`${rows[0].value} edited`);
 
 		// The fault was one-shot; the retry goes through and the bar clears.
 		await userEvent.click(await canvas.findByRole("button", { name: /save changes/i }));
