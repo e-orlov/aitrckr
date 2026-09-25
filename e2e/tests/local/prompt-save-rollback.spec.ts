@@ -21,13 +21,26 @@ const VALID_NEW = `F04-CORR-IT-001 valid ${Date.now()}`;
 const TRIGGER = "f04_corr_it001_reject_sentinel";
 const FUNCTION = "f04_corr_it001_reject_sentinel_fn";
 
-async function openBulkPaste(page: Page) {
-  const textarea = page.getByRole("textbox", { name: /prompts to add/i });
+const visiblePromptInputs = (page: Page) => page.getByPlaceholder("Enter prompt text...").filter({ visible: true });
+
+/**
+ * Adds a new row through "Add Prompt" (it appears at the top of the page) and
+ * fills its text and one tag. The click is retried because under load the page
+ * can still be hydrating when the button first renders.
+ */
+async function addPromptRow(page: Page, value: string, tag: string) {
+  const before = await visiblePromptInputs(page).count();
   await expect(async () => {
-    await page.getByRole("button", { name: /add multiple/i }).click();
-    await expect(textarea).toBeVisible({ timeout: 2_000 });
+    await page.getByRole("button", { name: /^add prompt$/i }).click();
+    await expect(visiblePromptInputs(page)).toHaveCount(before + 1, { timeout: 2_000 });
   }).toPass({ timeout: 30_000 });
-  return textarea;
+  await visiblePromptInputs(page).first().fill(value);
+  const row = page.locator("div.md\\:grid").filter({ has: page.getByPlaceholder("Enter prompt text...") }).first();
+  await row.getByRole("combobox").last().click();
+  await page.getByPlaceholder("Search or create tag...").fill(tag);
+  await page.getByRole("option", { name: new RegExp(`add .*${tag}`, "i") }).click();
+  await page.keyboard.press("Escape");
+  await expect(row.getByRole("button", { name: `Remove ${tag}`, exact: true })).toBeVisible();
 }
 
 test.describe("Prompt save rolls back as a whole", () => {
@@ -97,7 +110,7 @@ test.describe("Prompt save rolls back as a whole", () => {
       if (res.url().includes("/_serverFn/")) serverFnBodies.push(await res.text().catch(() => ""));
     });
     await page.goto(`${brandUrl()}/settings/prompts`);
-    await expect(page.getByRole("textbox").first()).toBeVisible();
+    await expect(page.getByPlaceholder("Enter prompt text...").first()).toBeAttached();
 
     // Earlier write: add a tag to the seeded prompt through its own tags combobox.
     const seeded = (await client.query("SELECT value FROM prompts WHERE id = $1", [PROMPT_IDS.branded1])).rows[0].value;
@@ -112,9 +125,8 @@ test.describe("Prompt save rolls back as a whole", () => {
     await expect(row.getByRole("button", { name: "Remove rolled-back", exact: true })).toBeVisible();
 
     // Later writes: one valid new prompt and the sentinel, in the same save.
-    const textarea = await openBulkPaste(page);
-    await textarea.fill(`${VALID_NEW};ok\n${SENTINEL};boom`);
-    await page.getByRole("button", { name: /^add 2 prompts$/i }).click();
+    await addPromptRow(page, VALID_NEW, "ok");
+    await addPromptRow(page, SENTINEL, "boom");
     const unsavedBar = page.getByText("Unsaved changes", { exact: true });
     await expect(unsavedBar).toBeVisible();
 
@@ -165,7 +177,7 @@ test.describe("Prompt save rolls back as a whole", () => {
       "rolled-back",
     ]);
     await page.reload();
-    await expect(page.getByRole("textbox").first()).toBeVisible();
+    await expect(page.getByPlaceholder("Enter prompt text...").first()).toBeAttached();
     await expect(page.getByRole("button", { name: "Remove rolled-back", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Remove ok", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Remove boom", exact: true })).toBeVisible();
