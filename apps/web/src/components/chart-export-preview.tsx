@@ -108,7 +108,7 @@ export function ChartExportPreview({
 						</span>
 					) : (
 						<span className="font-titan-one font-normal lowercase text-blue-600" style={{ fontSize: 24 }}>
-							elmo
+							aitrckr
 						</span>
 					)}
 				</div>
