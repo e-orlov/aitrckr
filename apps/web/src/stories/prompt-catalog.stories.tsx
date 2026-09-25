@@ -112,3 +112,30 @@ export const SaveFailureShowsSafeMessage: Story = {
 		await waitFor(() => expect(canvas.queryByText("Unsaved changes")).toBeNull());
 	},
 };
+
+/**
+ * Import: nothing is parsed until Review, Review reports totals, and Commit
+ * is what writes. Disabled is the default status.
+ */
+export const ImportReviewThenCommit: Story = {
+	args: { brandId: "mock-brand-id", page: page(rows.slice(0, 3)), search },
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		await userEvent.click(canvas.getByRole("button", { name: /^import prompts$/i }));
+		const textarea = canvas.getByLabelText(/prompts to import, one per line/i);
+		await userEvent.click(textarea);
+		await userEvent.paste("best running shoes for flat feet;shoes\n\nmost durable trail runners;shoes;trail");
+		// Typing produced no review yet: Import is still disabled.
+		await expect(canvas.getByRole("button", { name: /^import$/i })).toBeDisabled();
+		await expect(canvas.getByRole("radio", { name: /add as disabled/i })).toBeChecked();
+
+		await userEvent.click(canvas.getByRole("button", { name: /^review$/i }));
+		const review = await canvas.findByTestId("prompt-import-review");
+		await expect(review).toHaveTextContent("2 prompts will be added as disabled out of 3 lines");
+		await expect(review).toHaveTextContent("Skipped 1 blank line");
+
+		await userEvent.click(canvas.getByRole("button", { name: /^import 2 prompts$/i }));
+		await expect(await canvas.findByRole("status")).toHaveTextContent("Imported 2 prompts as disabled.");
+		await expect(canvas.queryByTestId("prompt-import-panel")).toBeNull();
+	},
+};

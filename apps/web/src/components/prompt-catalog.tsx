@@ -15,6 +15,7 @@ import { Input } from "@workspace/ui/components/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@workspace/ui/components/select";
 import { Inbox, Plus, Search, X } from "lucide-react";
 import { type FormEvent, useEffect, useId, useMemo, useRef, useState } from "react";
+import { PromptImportPanel } from "@/components/prompt-import";
 import {
 	type EditablePrompt,
 	newPromptEntry,
@@ -64,11 +65,9 @@ interface PromptCatalogProps {
 	page: PromptCatalogPage;
 	search: PromptCatalogQuery;
 	premium?: PremiumAllowance;
-	/** Rendered between the toolbar and the rows: the import panel. */
-	children?: React.ReactNode;
 }
 
-export function PromptCatalog({ brandId, page, search, premium, children }: PromptCatalogProps) {
+export function PromptCatalog({ brandId, page, search, premium }: PromptCatalogProps) {
 	const navigate = useNavigate();
 	const router = useRouter();
 	const invalidatePromptsSummary = useInvalidatePromptsSummary();
@@ -268,7 +267,14 @@ export function PromptCatalog({ brandId, page, search, premium, children }: Prom
 				>
 					<Plus className="h-4 w-4" /> Add Prompt
 				</Button>
-				{children}
+				<PromptImportPanel
+					brandId={brandId}
+					blockedReason={isDirty ? "Save or discard the edits on this page before importing." : undefined}
+					onImported={() => {
+						invalidatePromptsSummary(brandId);
+						router.invalidate();
+					}}
+				/>
 			</div>
 			{roomLeft <= 0 && (
 				<p className="text-xs text-muted-foreground">
