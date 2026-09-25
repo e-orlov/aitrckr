@@ -185,10 +185,10 @@ export {
 export {
 	type AnchorContext,
 	type AnchorGrounding,
+	belongsOnlyToOthers,
 	type GroundingMap,
 	groundAnchors,
 	isAttributable,
-	belongsOnlyToOthers,
 	namesOnlyOthers,
 } from "./grounding";
 export { type HeldReleaseResult, type HeldWorkItem, listHeldWork, releaseHeldWork } from "./held-release";
@@ -257,6 +257,26 @@ export {
 	selectedSentimentAnalysisIds,
 	sentimentRunCoverageStatus,
 } from "./read-selection";
+export {
+	planReanchor,
+	type ReanchorAction,
+	type ReanchorPlan,
+	type SpanMapping,
+	type StoredEntityResult,
+	type StoredTargetResult,
+} from "./reanchor";
+export {
+	applyReanchorEntry,
+	buildReanchorManifest,
+	manifestDigest as reanchorManifestDigest,
+	planAnalysis as planReanchorAnalysis,
+	REANCHOR_MANIFEST_VERSION,
+	type ReanchorApplyOutcome,
+	type ReanchorManifest,
+	type ReanchorManifestEntry,
+	type ReanchorScope,
+	reanchorStatus,
+} from "./reanchor-apply";
 export {
 	backoffMs,
 	buildRepairPrompt,

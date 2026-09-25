@@ -13,7 +13,8 @@
 		"backfill:sentiment": "tsx --env-file=../web/.env scripts/sentiment-backfill.ts",
 		"canary:sentiment": "tsx --env-file=../web/.env scripts/sentiment-canary.ts",
 		"control:sentiment": "tsx --env-file=../web/.env scripts/sentiment-control.ts",
-		"resume:sentiment": "tsx --env-file=../web/.env scripts/sentiment-resume.ts"
+		"resume:sentiment": "tsx --env-file=../web/.env scripts/sentiment-resume.ts",
+		"reanchor:sentiment": "tsx --env-file=../web/.env scripts/sentiment-evidence-reanchor.ts"
 	},
 	"dependencies": {
 		"@sentry/node": "^10.70.0",

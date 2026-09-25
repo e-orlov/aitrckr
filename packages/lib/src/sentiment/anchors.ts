@@ -166,12 +166,16 @@ function wordBefore(text: string, index: number): string {
  * statement too, so two clauses of one cell can be cited apart.
  */
 function sentenceEnds(line: string, lineStart: number, analysis: AnalyzableText, cell = false): number[] {
+	const ends = punctuationEnds(line, lineStart, analysis);
+	if (!cell) return ends;
+	const statements = [...line.matchAll(CELL_STATEMENT_END)]
+		.filter((match) => !isExcludedOffset(analysis, lineStart + match.index))
+		.map((match) => match.index + 1);
+	return [...new Set([...ends, ...statements])].sort((a, b) => a - b);
+}
+
+function punctuationEnds(line: string, lineStart: number, analysis: AnalyzableText): number[] {
 	const ends: number[] = [];
-	if (cell) {
-		for (const match of line.matchAll(CELL_STATEMENT_END)) {
-			if (!isExcludedOffset(analysis, lineStart + match.index)) ends.push(match.index + 1);
-		}
-	}
 	for (const match of line.matchAll(SENTENCE_END)) {
 		const at = match.index;
 		const end = at + match[0].length;
@@ -190,7 +194,7 @@ function sentenceEnds(line: string, lineStart: number, analysis: AnalyzableText,
 		}
 		ends.push(end);
 	}
-	return cell ? [...new Set(ends)].sort((a, b) => a - b) : ends;
+	return ends;
 }
 
 interface Span {

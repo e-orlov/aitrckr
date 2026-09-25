@@ -471,7 +471,7 @@ Entity keys are opaque identifiers. Return each "key" exactly as listed in ENTIT
 
 Grounding — evaluate one exact candidate at a time and cite only segments that are about that candidate:
 - A segment is evidence for a candidate only when it names that candidate (name or alias) or unmistakably continues a sentence, list or table row that names it. A segment that names a different candidate is never evidence for this one, even if it appears in the same paragraph or table.
-- Never exchange evidence between the rows or columns of a comparison table: the row or cell that describes candidate B says nothing about candidate A.
+- Never exchange evidence between the rows or columns of a comparison table: every cell is its own segment, shown in its row between pipes; a cell is evidence only for the candidate its column header or its row names, and the cell that describes candidate B says nothing about candidate A.
 - A segment that names no candidate at all (a general checklist, a generic tip, a definition, a heading) cannot carry a verdict by itself; cite it only next to a segment that names the candidate, and only when it clearly continues that candidate's description. Bullets directly under a product title that names the candidate, and the paragraph that directly answers a one-line question naming the candidate, count as continuing it; bullets under a generic label ("Advantages", "Disadvantages", "Conclusion", "Check before signing") do not.
 - Aspects are optional findings, not a checklist: never return an aspect for every taxonomy key. Return an aspect only when a segment that names the candidate (or continues such a segment) explicitly evaluates that aspect; when no such segment exists, leave the aspect out. An omitted aspect means "considered, not supported by this text" and is the correct answer; an aspect resting on a generic checklist, a general recommendation, a statistic or an unevaluated description is a defect and will be discarded.
 - Never fill a missing aspect with a "neutral" placeholder: a "neutral" aspect is only for a segment that names the candidate and describes that aspect factually without evaluating it.
@@ -527,4 +527,4 @@ ANSWER (segments; cite by id):
 """"
 `;
 
-exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"660c844f87648e9ae83f5a975f4cd56b9525887707f20b59794e03726e9d2c52"`;
+exports[`CT-SNT-008 provider-facing prompt and schema snapshots > renders the prompt from anchored segments and stays byte-identical 2`] = `"76a75ea3a88309c25e513462c7b41c90345ff3a0123ab06d00798db08b186ef4"`;

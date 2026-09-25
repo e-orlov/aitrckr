@@ -57,8 +57,14 @@ export interface AdjudicationTemplate {
 	entities: { key: string; entityType: "brand" | "competitor"; name: string }[];
 	/** Every anchor id of the answer with its grounding: which candidates it names explicitly / inherits, or `generic`. */
 	anchors: { id: string; explicit: string[]; inherited: string[]; context: string | null }[];
-	/** The last automatic candidate (keys, verdicts, anchor ids, polarities). */
+	/**
+	 * The last automatic candidate (keys, verdicts, anchor ids, polarities) —
+	 * null when the case's input hash is not the current one: its anchor ids
+	 * were assigned under another segmentation and would name other text now.
+	 */
 	provisionalResult: SentimentClassificationResult | null;
+	/** True when the stored case was opened for another input than the one computed now; nothing of it is carried over. */
+	inputDrift: boolean;
 	unresolvedTargets: UnresolvedTarget[];
 	attempts: { ordinal: number; phase: string; outcome: string; costUsd: number | null }[];
 	/** The decision the operator fills in: the full internal result for every entity. */
@@ -116,13 +122,17 @@ export async function adjudicationTemplate(analysisOrRunId: string): Promise<Adj
 	const kase = await loadResolutionCase(analysisId);
 	if (!kase) throw new Error(`analysis ${analysisId} has no resolution case`);
 	const grounding = groundAnchors(run.answerBody, anchors, candidates);
-	const provisional = sentimentClassificationResultSchema.safeParse(kase.provisionalResult);
+	const inputHash = sentimentInputHash(run.answerBody, candidates, ranges);
+	const inputDrift = kase.inputHash !== inputHash;
+	const provisional = inputDrift
+		? { success: false as const }
+		: sentimentClassificationResultSchema.safeParse(kase.provisionalResult);
 	const attempts = await loadProviderAttempts(analysisId);
 	return {
 		analysisId,
 		promptRunId: analysis.promptRunId,
 		brandId: analysis.brandId,
-		inputHash: sentimentInputHash(run.answerBody, candidates, ranges),
+		inputHash,
 		status: kase.status as ResolutionCaseStatus,
 		reviewReason: (kase.reviewReason as ReviewReason | null) ?? null,
 		automatedProviderCalls: kase.automatedProviderCalls,
@@ -138,7 +148,8 @@ export async function adjudicationTemplate(analysisOrRunId: string): Promise<Adj
 			};
 		}),
 		provisionalResult: provisional.success ? provisional.data : null,
-		unresolvedTargets: (kase.unresolvedTargets as UnresolvedTarget[]) ?? [],
+		inputDrift,
+		unresolvedTargets: inputDrift ? [] : ((kase.unresolvedTargets as UnresolvedTarget[]) ?? []),
 		attempts: attempts.map((t) => ({
 			ordinal: t.ordinal,
 			phase: t.phase,
@@ -147,7 +158,7 @@ export async function adjudicationTemplate(analysisOrRunId: string): Promise<Adj
 		})),
 		decision: {
 			analysisId,
-			inputHash: sentimentInputHash(run.answerBody, candidates, ranges),
+			inputHash,
 			decidedBy: "",
 			entities: provisional.success ? provisional.data.entities : [],
 		},

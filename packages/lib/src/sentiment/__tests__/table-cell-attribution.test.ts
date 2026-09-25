@@ -35,8 +35,18 @@ function anchorOf(answer: string, anchors: EvidenceAnchor[], text: string): Evid
 }
 
 const cite = (polarity: "positive" | "negative", ...ids: string[]) => ids.map((anchorId) => ({ anchorId, polarity }));
-const positive = (...ids: string[]) => ({ category: "positive", score: 80, confidence: 0.9, evidence: cite("positive", ...ids) });
-const negative = (...ids: string[]) => ({ category: "negative", score: 25, confidence: 0.9, evidence: cite("negative", ...ids) });
+const positive = (...ids: string[]) => ({
+	category: "positive",
+	score: 80,
+	confidence: 0.9,
+	evidence: cite("positive", ...ids),
+});
+const negative = (...ids: string[]) => ({
+	category: "negative",
+	score: 25,
+	confidence: 0.9,
+	evidence: cite("negative", ...ids),
+});
 const mixed = (positiveIds: string[], negativeIds: string[]) => ({
 	category: "mixed",
 	score: 50,
@@ -107,13 +117,23 @@ describe("SENT-ATTR-01 evidence attribution per phrase", () => {
 					{ key: ARAG.key, ...negative(aragCell.id), aspects: [] },
 					{ key: WGV.key, ...negative(aragCell.id), aspects: [] },
 				]),
-			).toThrow(expect.objectContaining({ code: "evidence-entity-unbound", diagnostic: expect.objectContaining({ entityKey: WGV.key }) }));
+			).toThrow(
+				expect.objectContaining({
+					code: "evidence-entity-unbound",
+					diagnostic: expect.objectContaining({ entityKey: WGV.key }),
+				}),
+			);
 			expect(() =>
 				validate(answer, [
 					{ key: ARAG.key, ...positive(wgvCell.id), aspects: [] },
 					{ key: WGV.key, ...positive(wgvCell.id), aspects: [] },
 				]),
-			).toThrow(expect.objectContaining({ code: "evidence-entity-unbound", diagnostic: expect.objectContaining({ entityKey: ARAG.key }) }));
+			).toThrow(
+				expect.objectContaining({
+					code: "evidence-entity-unbound",
+					diagnostic: expect.objectContaining({ entityKey: ARAG.key }),
+				}),
+			);
 		});
 
 		it("one correct citation never lets the neighbouring cell of the other entity into the stored evidence", () => {
@@ -189,7 +209,12 @@ describe("SENT-ATTR-01 evidence attribution per phrase", () => {
 					{ key: ARAG.key, ...negative(aragItem.id), aspects: [] },
 					{ key: WGV.key, ...mixed([wgvItem.id], [aragItem.id]), aspects: [] },
 				]),
-			).toThrow(expect.objectContaining({ code: "evidence-entity-unbound", diagnostic: expect.objectContaining({ anchorId: aragItem.id }) }));
+			).toThrow(
+				expect.objectContaining({
+					code: "evidence-entity-unbound",
+					diagnostic: expect.objectContaining({ anchorId: aragItem.id }),
+				}),
+			);
 		});
 	});
 
@@ -211,7 +236,9 @@ describe("SENT-ATTR-01 evidence attribution per phrase", () => {
 			expect(isAttributable(grounding.get(aragClause.id)!, ARAG.key)).toBe(true);
 			expect(isAttributable(grounding.get(aragClause.id)!, WGV.key)).toBe(false);
 			// The plain cell of the ARAG column still belongs to ARAG.
-			expect(isAttributable(grounding.get(anchorOf(answer, anchors, "Keine weitere Bewertung.").id)!, ARAG.key)).toBe(true);
+			expect(isAttributable(grounding.get(anchorOf(answer, anchors, "Keine weitere Bewertung.").id)!, ARAG.key)).toBe(
+				true,
+			);
 		});
 
 		it("keeps both independent attributions and their exact fragments", () => {
