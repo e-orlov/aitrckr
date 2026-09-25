@@ -27,7 +27,8 @@ const TABLE =
 /** A span exactly as the pre-v3 segmenter stored it: the whole row line, pipes included. */
 function rowSpan(answer: string, startsWith: string, polarity: SentimentEvidence["polarity"]): SentimentEvidence {
 	const start = answer.indexOf(startsWith);
-	const end = answer.indexOf("\n", start);
+	const lineEnd = answer.indexOf("\n", start);
+	const end = lineEnd === -1 ? answer.length : lineEnd;
 	return { quote: answer.slice(start, end), start, end, polarity };
 }
 function sentenceSpan(answer: string, text: string, polarity: SentimentEvidence["polarity"]): SentimentEvidence {
@@ -222,6 +223,40 @@ describe("planReanchor", () => {
 		];
 		const repair = planReanchor({ answerBody: TABLE, candidates, storedInputHash: "old", entities: mixed });
 		expect(repair.action).toBe("repair");
+	});
+
+	it("in a row-per-entity table the narrowed span keeps the descriptive cells and leaves the naming cell out", () => {
+		const rows = [
+			"| Tarif | Bewertung |",
+			"|---|---|",
+			"| Arvo Komfort | Sehr gut erreichbar; eher teuer |",
+			"| Beltra Plus | Günstig |",
+		].join("\n");
+		const entities: StoredEntityResult[] = [
+			{
+				key: "brand",
+				category: "positive",
+				score: 75,
+				confidence: 0.9,
+				evidence: [rowSpan(rows, "| Arvo Komfort |", "positive")],
+				aspects: [],
+			},
+			{
+				key: "c-beltra",
+				category: "positive",
+				score: 75,
+				confidence: 0.9,
+				evidence: [rowSpan(rows, "| Beltra Plus |", "positive")],
+				aspects: [],
+			},
+		];
+		const plan = planReanchor({ answerBody: rows, candidates, storedInputHash: "old", entities });
+		expect(plan.action).toBe("reverify");
+		expect(plan.candidate!.entities[0].evidence.map((r) => r.anchorId)).toEqual([
+			idOf(rows, "Sehr gut erreichbar;"),
+			idOf(rows, "eher teuer"),
+		]);
+		expect(plan.candidate!.entities[1].evidence.map((r) => r.anchorId)).toEqual([idOf(rows, "Günstig")]);
 	});
 
 	it("a result whose overall evidence was entirely the other entity's is classified again", () => {

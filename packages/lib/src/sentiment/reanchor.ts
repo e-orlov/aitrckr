@@ -102,7 +102,19 @@ function mapSpan(
 		else if (g && belongsOnlyToOthers(g, entityKey)) droppedOthers.push(anchor.id);
 		else droppedGeneric.push(anchor.id);
 	}
-	return { kind: "narrowed", kept, droppedOthers, droppedGeneric };
+	return { kind: "narrowed", kept: withoutNamingCells(kept, grounding), droppedOthers, droppedGeneric };
+}
+
+/**
+ * In a row-per-entity table the row's naming cell (`| **Arvo Komfort** | …`)
+ * is the label the descriptive cells inherit from, not an evaluation of its
+ * own; when the span keeps such descriptive cells, the naming cells before
+ * them are left out so the verifier is not asked to confirm a bare name.
+ */
+function withoutNamingCells(kept: string[], grounding: ReturnType<typeof groundAnchors>): string[] {
+	const first = kept.findIndex((id) => grounding.get(id)?.context === "table-row");
+	if (first === -1) return kept;
+	return kept.filter((id, index) => index >= first || grounding.get(id)?.context !== "explicit");
 }
 
 function refsOf(mappings: SpanMapping[], evidence: SentimentEvidence[]): SentimentEvidenceRef[] | null {
