@@ -47,13 +47,14 @@ export interface ParseBulkPromptsOptions {
 const FIELD_SEPARATOR = ";";
 
 /**
- * Comparison key for two prompts being "the same".
+ * Comparison key for two prompts being "the same" — the one identity every
+ * creation path (paste, import, onboarding, API) checks duplicates against.
  *
  * Case and surrounding whitespace are ignored, and runs of internal whitespace
  * collapse to one space, so a line re-pasted from a wrapped document does not
- * arrive as a second distinct prompt.
+ * arrive as a second distinct prompt. Tags play no part in it.
  */
-function dedupeKey(value: string): string {
+export function promptIdentityKey(value: string): string {
 	return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
@@ -77,7 +78,7 @@ function dedupeKey(value: string): string {
 export function parseBulkPrompts(text: string, options: ParseBulkPromptsOptions = {}): BulkPromptParse {
 	const { existing = [], limit = MAX_PROMPTS } = options;
 
-	const seen = new Set(existing.map(dedupeKey));
+	const seen = new Set(existing.map(promptIdentityKey));
 	const room = Math.max(0, limit - existing.length);
 
 	const added: BulkPromptRecord[] = [];
@@ -104,7 +105,7 @@ export function parseBulkPrompts(text: string, options: ParseBulkPromptsOptions 
 			return;
 		}
 
-		const key = dedupeKey(value);
+		const key = promptIdentityKey(value);
 		if (withinPaste.has(key)) {
 			skipped.duplicateInPaste.push(value);
 			return;

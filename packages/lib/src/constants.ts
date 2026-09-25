@@ -43,7 +43,8 @@ export function getDefaultDelayHours(): number {
 
 // Maximum limits for brand resources
 export const MAX_COMPETITORS = 500;
-export const MAX_PROMPTS = 100;
+/** Per brand, counting disabled prompts too: a disabled prompt still occupies a catalog row. */
+export const MAX_PROMPTS = 10_000;
 
 /**
  * Sentinel providers store in `prompt_runs.web_queries` when a web search
