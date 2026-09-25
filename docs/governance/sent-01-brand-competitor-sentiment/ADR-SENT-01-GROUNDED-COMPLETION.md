@@ -183,6 +183,29 @@ PR-2 owns alert evaluation, baselines and the maintenance heartbeat (the `sentim
 | canary entry point under a held dispatch | `sentiment-dispatch-controls.integration.test.ts` (IT-SNT-C-015) |
 | CI executes the matrix and the DB verifier | `.github/workflows/e2e.yaml` job `Scheduling Policy Verification`, `e2e/sentiment-ci/reconcile.cjs` |
 
+## Amendment F — evidence attribution per table cell (recorded 2026-09-25, SENT-ATTR-01)
+
+A stored evidence span is the exact anchor the model cited. Under the v2 evidence contract a Markdown table row was one anchor and every row of a comparison table inherited every entity its header named, so an evaluative phrase about entity B in B's column was stored, verified and highlighted as evidence for entity A whenever the row was cited for A. Amendment F changes the evidence contract and the grounding, not the categories, the score formula or any aggregate.
+
+### F1. Evidence contract `sent-evidence-v3`
+
+- Every cell of a table row is segmented on its own (statements inside a cell split at `; `); an anchor carries its row and column. The model reads a row as a row (`| [s0005] … | [s0006] … |`) and cites cells.
+- Grounding of a cell that names nobody: the header cell of its own column when the header names an entity (column-per-entity table); nothing when the header names entities in other columns only (a label or summary column); otherwise the nearest preceding cell of its own row that names an entity (row-per-entity table). An anchor that names an entity itself inherits nothing anywhere, so a cell naming the other column's entity is that entity's evidence alone.
+- A citation that is another entity's evidence — by name or by structural context (`belongsOnlyToOthers`) — is refused with `evidence-entity-unbound` even when a neighbouring citation of the same target is correct; a generic anchor (nobody's) may still accompany an attributable one, as before.
+
+### F2. Compatibility
+
+- The input hash of an answer with a table row carries the evidence contract version; an answer without one keeps its pre-v3 hash. A stored candidate whose anchor ids were assigned under v2 is therefore never replayed against v3 anchors (resume refuses on input drift, the job rotates the instance, the adjudication template carries no candidate), while table-free results and their candidates stay current without any write.
+- Stored results of table-bearing answers are repaired through `reanchor:sentiment`: `plan` derives per analysis whether the result is unchanged, identical but stale in its hash (`restamp`, the only direct write), a narrowed candidate to verify or repair (the resolution case is rotated to a fresh instance for the current input, seeded with the candidate, and the worker verifies and persists as for every run), or an answer to classify again; `apply` refuses on any drift from the frozen manifest. A fallback row of an older version is never written; the current-version result of its run supersedes it.
+
+### F3. Traceability
+
+| Requirement | Evidence |
+| --- | --- |
+| cell-level anchors, per-cell grounding, refusal next to a correct citation, explicit comparison inside one cell | `table-cell-attribution.test.ts`, `grounding.test.ts`, `anchors.test.ts` |
+| re-anchoring plan: current / restamp / reverify / repair / reclassify | `reanchor.test.ts` |
+| golden and reproducer fixtures under the new contract | `golden/v4-cases.ts`, `v4-grounding.test.ts` |
+
 ## Consequences
 
 - Runs that v4 rejected for an aspect-only defect complete under v5 with the aspect dropped; runs with an overall defect remain terminal.
