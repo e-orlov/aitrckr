@@ -126,6 +126,35 @@ describe("CT-SNT-002 sentiment provider lock", () => {
 		expect(result.entities[0].evidence[0]).toMatchObject({ start: 0, end: 24, polarity: "positive" });
 	});
 
+	it("routes only sentiment classification to Flex when opted in and preserves the billed tier", async () => {
+		configureEveryProvider();
+		vi.stubEnv("SENTIMENT_OPENROUTER_SERVICE_TIER", "flex");
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: async () => ({
+				id: "gen-flex-001",
+				service_tier: "flex",
+				choices: [{ message: { content: JSON.stringify(goodAnswer) } }],
+				usage: { cost: 0.012, server_tool_use: { web_search_requests: 1 } },
+			}),
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await classifySentiment({ answerBody: answer, candidates });
+		const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(body).toMatchObject({
+			model: SENTIMENT_MODEL,
+			service_tier: "flex",
+			max_tool_calls: 1,
+			provider: { require_parameters: true },
+		});
+		expect(result.request).toMatchObject({ serviceTier: "flex", webSearch: true });
+		expect(result.servedServiceTier).toBe("flex");
+		expect(result.usage?.costUsd).toBe(0.012);
+	});
+
 	it("propagates only safe numeric usage from the OpenRouter response and logs nothing", async () => {
 		configureEveryProvider();
 		const logs: string[] = [];

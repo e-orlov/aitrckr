@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { StructuredResearchRequestError } from "../../providers/types";
+import { type StructuredResearchOptions, StructuredResearchRequestError } from "../../providers/types";
 import type { SentimentClassification } from "../classifier";
 import { SentimentValidationError, sentimentInputHash } from "../classifier";
 import type { DetectableEntity } from "../detector";
@@ -191,6 +191,25 @@ const verifiedOutcome = {
 };
 
 describe("IT-SNT-001 job lifecycle (fakes)", () => {
+	it("passes Flex through the guarded verifier without changing the classifier version", async () => {
+		vi.stubEnv("SENTIMENT_OPENROUTER_SERVICE_TIER", "flex");
+		try {
+			const fakes = resolutionFakes();
+			const provider = fakes.phasesProvider();
+			const research = provider.runStructuredResearch!;
+			const sent: unknown[] = [];
+			provider.runStructuredResearch = <T>(options: StructuredResearchOptions<T>) => {
+				sent.push(options);
+				return research(options);
+			};
+			const { d } = deps({ fakes, resolveProvider: () => provider });
+			expect(await runSentimentJob(payload, d)).toMatchObject({ status: "classified" });
+			expect(sent).toContainEqual(expect.objectContaining({ serviceTier: "flex", webSearch: false }));
+			expect(payload.classifierVersion).toBe(SENTIMENT_CLASSIFIER_VERSION);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
 	it("claims, classifies, verifies, persists atomically and records one success usage event per paid answer", async () => {
 		const { d, usage, fakes } = deps();
 		const outcome = await runSentimentJob(payload, d);

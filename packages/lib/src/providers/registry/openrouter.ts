@@ -14,6 +14,7 @@ import {
 	type StructuredResearchRequestSummary,
 	StructuredResearchResponseError,
 	type StructuredResearchResult,
+	type StructuredResearchServedTier,
 	type StructuredResearchUsage,
 } from "../types";
 
@@ -255,7 +256,12 @@ function summarizeRequest(body: Record<string, unknown>): StructuredResearchRequ
 		maxOutputTokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
 		strictJsonSchema: responseFormat?.type === "json_schema" && responseFormat.json_schema?.strict === true,
 		requireParameters: routing?.require_parameters === true,
+		...(body.service_tier === "flex" ? { serviceTier: "flex" as const } : {}),
 	};
+}
+
+function servedServiceTier(value: unknown): StructuredResearchServedTier | undefined {
+	return value === "default" || value === "flex" || value === "priority" || value === null ? value : undefined;
 }
 
 /**
@@ -282,6 +288,7 @@ export const openrouter: Provider = {
 		webSearch = true,
 		signal,
 		maxOutputTokens,
+		serviceTier,
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
 		// Raw fetch (no AI SDK) so we can attach OpenRouter's server-tool fields
 		// — the AI SDK's OpenAI-compat path doesn't pass them through. The schema is
@@ -295,6 +302,7 @@ export const openrouter: Provider = {
 				json_schema: { name: "research_output", strict: true, schema: jsonSchema },
 			},
 			provider: { ...STRICT_ROUTING },
+			...(serviceTier === "flex" ? { service_tier: "flex" } : {}),
 			...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
 			...(webSearch ? webSearchRequestFields() : {}),
 		};
@@ -334,6 +342,7 @@ export const openrouter: Provider = {
 			generationId: envelope.generationId,
 			usage: envelope.usage,
 			request: envelope.request,
+			...(data?.service_tier !== undefined ? { servedServiceTier: servedServiceTier(data.service_tier) } : {}),
 		};
 	},
 

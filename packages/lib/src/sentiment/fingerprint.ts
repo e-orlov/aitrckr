@@ -68,6 +68,8 @@ export interface RequestProfile {
 	output: { mode: "json_schema"; strict: true; requireParameters: true };
 	/** `sfp1:` fingerprint of the schema the request carries. */
 	schema: string;
+	/** The capacity tier is part of the breaker and permit scope when explicitly pinned. */
+	serviceTier?: "flex";
 }
 
 /**
@@ -76,7 +78,11 @@ export interface RequestProfile {
  * (repair, verify), strict JSON-schema output with strict parameter routing,
  * and the schema shape. Never the prompt, the document or a credential.
  */
-export function sentimentRequestProfile(args: { webSearch: boolean; schemaFp: string }): RequestProfile {
+export function sentimentRequestProfile(args: {
+	webSearch: boolean;
+	schemaFp: string;
+	serviceTier?: "flex";
+}): RequestProfile {
 	return {
 		adapter: SENTIMENT_PROVIDER_ID,
 		endpoint: OPENROUTER_API_URL,
@@ -84,6 +90,7 @@ export function sentimentRequestProfile(args: { webSearch: boolean; schemaFp: st
 		tools: args.webSearch ? { kind: "openrouter:web_search", maxToolCalls: 1, toolChoice: "required" } : null,
 		output: { mode: "json_schema", strict: true, requireParameters: true },
 		schema: args.schemaFp,
+		...(args.serviceTier === "flex" ? { serviceTier: "flex" as const } : {}),
 	};
 }
 

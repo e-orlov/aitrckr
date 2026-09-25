@@ -3,7 +3,12 @@ import type { z } from "zod";
 import type { SentimentAnalysis } from "../db/schema";
 import { toStructuredOutputJsonSchema } from "../providers/json-schema";
 import { prepareStructuredOutputSchema, StructuredOutputSchemaError } from "../providers/schema-contract";
-import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
+import type {
+	Provider,
+	StructuredResearchRequestSummary,
+	StructuredResearchServedTier,
+	StructuredResearchUsage,
+} from "../providers/types";
 import { StructuredResearchRequestError, StructuredResearchResponseError } from "../providers/types";
 import { type EvidenceAnchor, segmentAnswer } from "./anchors";
 import {
@@ -73,6 +78,7 @@ import {
 	verifierIssuesToTargets,
 	verifierResultSchemaFor,
 } from "./resolution";
+import { sentimentServiceTier } from "./service-tier";
 import {
 	type AnalysisClaim,
 	candidatesFromMentions,
@@ -131,6 +137,7 @@ export type SentimentJobOutcome =
 			/** Usage, request summary and generation id of the initial classification call. */
 			usage?: StructuredResearchUsage;
 			request?: StructuredResearchRequestSummary;
+			servedServiceTier?: StructuredResearchServedTier;
 			generationId: string | null;
 			/** Aspect claims dropped as unsupported by the answer; the analysis is complete without them. */
 			filteredClaimCount: number;
@@ -265,6 +272,7 @@ export interface DispatchContext {
 	schemaFp: string;
 	phase: PaidPhase;
 	webSearch: boolean;
+	serviceTier?: "flex";
 	probeGeneration: number | null;
 	reservedEstimateUsd: number | null;
 }
@@ -404,7 +412,12 @@ interface Workflow {
 	repairs: number;
 	verifierRejections: number;
 	consecutiveFailures: number;
-	initial: { usage?: StructuredResearchUsage; request?: StructuredResearchRequestSummary; generationId: string | null };
+	initial: {
+		usage?: StructuredResearchUsage;
+		request?: StructuredResearchRequestSummary;
+		servedServiceTier?: StructuredResearchServedTier;
+		generationId: string | null;
+	};
 	/** Set for exactly the duration of one authorized request; read by the guarded provider. */
 	dispatch: DispatchContext | null;
 	controls: DispatchDeps;
@@ -576,7 +589,9 @@ function guardProvider(provider: Provider, w: Workflow): Provider {
 			if (!context) throw new SentimentDispatchHeldError("no-dispatch-context");
 			const document = prepareStructuredOutputSchema(options.schema as z.ZodType);
 			const schemaFp = schemaShapeFingerprint(document);
-			const scopeKey = requestScopeKey(sentimentRequestProfile({ webSearch: options.webSearch ?? true, schemaFp }));
+			const scopeKey = requestScopeKey(
+				sentimentRequestProfile({ webSearch: options.webSearch ?? true, schemaFp, serviceTier: options.serviceTier }),
+			);
 			if (schemaFp !== context.schemaFp || scopeKey !== context.scopeKey) {
 				throw new SentimentDispatchHeldError("fingerprint-mismatch");
 			}
@@ -656,7 +671,11 @@ async function authorizeDispatch(
 	} catch (error) {
 		if (!(error instanceof StructuredOutputSchemaError)) throw error;
 		const schemaFp = schemaShapeFingerprint(toStructuredOutputJsonSchema(request.schema));
-		const profile = sentimentRequestProfile({ webSearch: request.webSearch, schemaFp });
+		const profile = sentimentRequestProfile({
+			webSearch: request.webSearch,
+			schemaFp,
+			serviceTier: sentimentServiceTier(),
+		});
 		await recordBreakerOpen(w, {
 			scopeKey: requestScopeKey(profile),
 			profile,
@@ -671,7 +690,11 @@ async function authorizeDispatch(
 		throw new HandOver("contract-defect", 0, sanitizeSentimentError(error));
 	}
 	const schemaFp = schemaShapeFingerprint(document);
-	const profile = sentimentRequestProfile({ webSearch: request.webSearch, schemaFp });
+	const profile = sentimentRequestProfile({
+		webSearch: request.webSearch,
+		schemaFp,
+		serviceTier: sentimentServiceTier(),
+	});
 	const scopeKey = requestScopeKey(profile);
 	const held = isHeld(await w.controls.readDispatchState());
 	const now = await w.controls.databaseNow();
@@ -725,6 +748,7 @@ async function authorizeDispatch(
 			schemaFp,
 			phase,
 			webSearch: request.webSearch,
+			...(sentimentServiceTier() === "flex" ? { serviceTier: "flex" as const } : {}),
 			probeGeneration,
 			reservedEstimateUsd,
 		};
@@ -826,7 +850,11 @@ async function requestFailure(
 	if (BREAKER_OPENING_CLASSES.has(failureClass)) {
 		await recordBreakerOpen(w, {
 			scopeKey: dispatch.scopeKey,
-			profile: sentimentRequestProfile({ webSearch: dispatch.webSearch, schemaFp: dispatch.schemaFp }),
+			profile: sentimentRequestProfile({
+				webSearch: dispatch.webSearch,
+				schemaFp: dispatch.schemaFp,
+				serviceTier: dispatch.serviceTier,
+			}),
 			schemaFp: dispatch.schemaFp,
 			failureClass,
 			phase,
@@ -965,6 +993,7 @@ async function structured(w: Workflow, prompt: string, schema: StructuredSchema)
 			webSearch: false,
 			signal: w.options.signal,
 			maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,
+			...(sentimentServiceTier() === "flex" ? { serviceTier: "flex" as const } : {}),
 		});
 		return {
 			value: result.object,
@@ -1070,6 +1099,7 @@ async function initialCandidate(w: Workflow): Promise<SentimentClassificationRes
 	w.initial = {
 		usage: classification.usage,
 		request: classification.request,
+		...(classification.servedServiceTier !== undefined ? { servedServiceTier: classification.servedServiceTier } : {}),
 		generationId: classification.generationId ?? null,
 	};
 	if (classification.contractDefect || !classification.candidate) throw new HandOver("contract-defect");
@@ -1168,6 +1198,7 @@ async function persistVerified(w: Workflow, assessment: CandidateAssessment): Pr
 		inputHash: w.inputHash,
 		usage: w.initial.usage,
 		request: w.initial.request,
+		...(w.initial.servedServiceTier !== undefined ? { servedServiceTier: w.initial.servedServiceTier } : {}),
 		generationId: w.initial.generationId,
 	};
 	try {
@@ -1196,6 +1227,7 @@ async function persistVerified(w: Workflow, assessment: CandidateAssessment): Pr
 		entityKeys: assessment.entities.map((entity) => entity.key),
 		usage: w.initial.usage,
 		request: w.initial.request,
+		...(w.initial.servedServiceTier !== undefined ? { servedServiceTier: w.initial.servedServiceTier } : {}),
 		generationId: w.initial.generationId,
 		filteredClaimCount: assessment.filteredClaims.length,
 		filteredClaimCodes: countFilteredClaimCodes(assessment.filteredClaims),

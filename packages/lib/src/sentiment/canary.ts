@@ -21,6 +21,7 @@ import { runSentimentJob, type SentimentJobDeps, type SentimentJobOutcome } from
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import { RESOLUTION_POLICY } from "./resolution";
+import { sentimentServiceTier } from "./service-tier";
 import {
 	candidatesFromMentions,
 	claimAnalysis,
@@ -93,6 +94,7 @@ export const sentimentCanaryContractSchema = z.strictObject({
 	detectorVersion: z.string().min(1),
 	provider: z.string().min(1),
 	model: z.string().min(1),
+	serviceTier: z.literal("flex").optional(),
 });
 
 export type SentimentCanaryContract = z.infer<typeof sentimentCanaryContractSchema>;
@@ -106,6 +108,7 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"contract-detector-version",
 	"contract-provider",
 	"contract-model",
+	"contract-service-tier",
 	"run-not-found",
 	"prompt-mismatch",
 	"brand-mismatch",
@@ -136,6 +139,8 @@ export const SENTIMENT_CANARY_REJECT_CODES = [
 	"request-max-tokens",
 	"request-structured-output",
 	"request-require-parameters",
+	"request-service-tier",
+	"response-service-tier",
 	"usage-missing",
 	"web-search-count-conflict",
 	"web-search-count-unknown",
@@ -189,6 +194,9 @@ export type SentimentCanaryOutcome =
 			entityKeys?: string[];
 			usage?: StructuredResearchUsage;
 			request?: StructuredResearchRequestSummary;
+			servedServiceTier?: "default" | "flex" | "priority" | null;
+			/** Observed tier of each successful provider response, in call order. */
+			servedServiceTiers?: ("default" | "flex" | "priority" | "unknown")[];
 			/** Safe generation id of the paid call; present on a classified outcome, null when the provider reported none or an unsafe one. */
 			generationId?: string | null;
 			/** Aspect claims the answer did not support, dropped before persistence (classifier v5); the analysis is complete without them. */
@@ -338,6 +346,7 @@ export interface SentimentCanaryRunDescription {
 	detectorVersion: string;
 	provider: string;
 	model: string;
+	serviceTier?: "flex";
 }
 
 /**
@@ -391,6 +400,7 @@ export async function inspectSentimentCanaryRun(
 		detectorVersion: SENTIMENT_DETECTOR_VERSION,
 		provider: SENTIMENT_PROVIDER_ID,
 		model: SENTIMENT_MODEL,
+		...(sentimentServiceTier() === "flex" ? { serviceTier: "flex" as const } : {}),
 	};
 }
 
@@ -410,6 +420,7 @@ function contractVersionReasons(contract: SentimentCanaryContract): SentimentCan
 	if (contract.detectorVersion !== SENTIMENT_DETECTOR_VERSION) reasons.push({ code: "contract-detector-version" });
 	if (contract.provider !== SENTIMENT_PROVIDER_ID) reasons.push({ code: "contract-provider" });
 	if (contract.model !== SENTIMENT_MODEL) reasons.push({ code: "contract-model" });
+	if (contract.serviceTier !== sentimentServiceTier()) reasons.push({ code: "contract-service-tier" });
 	return reasons;
 }
 
@@ -487,6 +498,7 @@ function requestReasons(
 	if (request.maxOutputTokens !== limits.maxOutputTokens) reasons.push({ code: "request-max-tokens" });
 	if (request.strictJsonSchema !== true) reasons.push({ code: "request-structured-output" });
 	if (request.requireParameters !== true) reasons.push({ code: "request-require-parameters" });
+	if (request.serviceTier !== contract.serviceTier) reasons.push({ code: "request-service-tier" });
 	return reasons;
 }
 
@@ -532,6 +544,20 @@ function entityKeysMatch(contract: SentimentCanaryContract, entityKeys: string[]
 	);
 }
 
+function servedTierReasons(
+	contract: SentimentCanaryContract,
+	outcome: SentimentCanaryOutcome,
+	providerCalls: number,
+): SentimentCanaryReason[] {
+	return contract.serviceTier === "flex" &&
+		outcome.status === "classified" &&
+		(outcome.servedServiceTier !== "flex" ||
+			outcome.servedServiceTiers?.length !== providerCalls ||
+			outcome.servedServiceTiers.some((tier) => tier !== "flex"))
+		? [{ code: "response-service-tier" }]
+		: [];
+}
+
 /**
  * The post-call contract: exactly one attempt, between one and the policy's
  * maximum of paid provider requests (initial classification, targeted
@@ -559,6 +585,7 @@ export function evaluateSentimentCanary(
 	else if (outcome.status !== "classified") reasons.push({ code: "job-outcome", detail: outcome.status });
 	else {
 		reasons.push(...requestReasons(outcome.request, contract, limits), ...usageReasons(outcome.usage, limits));
+		reasons.push(...servedTierReasons(contract, outcome, counts.providerCalls));
 		if (!entityKeysMatch(contract, outcome.entityKeys)) reasons.push({ code: "entities-mismatch" });
 		// A paid answer the operator cannot reconcile against the provider's ledger is never accepted.
 		if (!outcome.generationId) reasons.push({ code: "generation-id-missing" });
@@ -675,6 +702,7 @@ export async function runSentimentCanary(args: {
 
 	const controller = new AbortController();
 	let providerCalls = 0;
+	const servedServiceTiers: ("default" | "flex" | "priority" | "unknown")[] = [];
 	let gateReasons: SentimentCanaryReason[] | null = null;
 	const classifyBase = base.classify ?? classifySentiment;
 	const claimBase = base.claimAnalysis ?? claimAnalysis;
@@ -687,9 +715,11 @@ export async function runSentimentCanary(args: {
 			if (!research) return provider;
 			return {
 				...provider,
-				runStructuredResearch<T>(options: StructuredResearchOptions<T>) {
+				async runStructuredResearch<T>(options: StructuredResearchOptions<T>) {
 					providerCalls += 1;
-					return research(options);
+					const result = await research(options);
+					servedServiceTiers.push(result.servedServiceTier ?? "unknown");
+					return result;
 				},
 			};
 		},
@@ -731,6 +761,8 @@ export async function runSentimentCanary(args: {
 					entityKeys: classification.entities.map((entity) => entity.key),
 					usage: classification.usage,
 					request: classification.request,
+					servedServiceTier: classification.servedServiceTier,
+					servedServiceTiers,
 					generationId: classification.generationId ?? null,
 					filteredClaimCount: classification.filteredClaims.length,
 					filteredClaimCodes: countFilteredClaimCodes(classification.filteredClaims),
@@ -778,6 +810,8 @@ export async function runSentimentCanary(args: {
 				entityKeys: result.entityKeys,
 				usage: result.usage,
 				request: result.request,
+				servedServiceTier: result.servedServiceTier,
+				servedServiceTiers,
 				generationId: result.generationId,
 				filteredClaimCount: result.filteredClaimCount,
 				filteredClaimCodes: result.filteredClaimCodes,

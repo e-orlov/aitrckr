@@ -144,6 +144,7 @@ export function safeEnvelope(value: unknown): PaidResponseEnvelope | null {
 						maxOutputTokens: countOrNull(r.maxOutputTokens),
 						strictJsonSchema: r.strictJsonSchema === true,
 						requireParameters: r.requireParameters === true,
+						...(r.serviceTier === "flex" ? { serviceTier: "flex" as const } : {}),
 					}
 				: null,
 		usage: u

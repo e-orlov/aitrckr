@@ -203,6 +203,12 @@ export const ENV_REGISTRY: EnvVarSpec[] = [
 		description: "OpenRouter API key.",
 	},
 	{
+		name: "SENTIMENT_OPENROUTER_SERVICE_TIER",
+		scope: "server",
+		requiredBy: "optional",
+		description: "Set to flex to opt sentiment classification, repair and verification into OpenRouter Flex capacity.",
+	},
+	{
 		name: "JINA_API_KEY",
 		scope: "server",
 		requiredBy: "optional",

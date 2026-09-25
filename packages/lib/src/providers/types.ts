@@ -36,6 +36,8 @@ export interface StructuredResearchOptions<T> {
 	 * callers that never set it keep their provider's default behaviour.
 	 */
 	maxOutputTokens?: number;
+	/** Request discounted capacity for this call when the adapter supports it. */
+	serviceTier?: "flex";
 }
 
 /**
@@ -75,7 +77,11 @@ export interface StructuredResearchRequestSummary {
 	strictJsonSchema?: boolean;
 	/** `provider.require_parameters` was sent as `true` (routing may not drop a request parameter); absent when the summary predates the flag. */
 	requireParameters?: boolean;
+	/** The explicitly requested capacity tier; absent for normal routing. */
+	serviceTier?: "flex";
 }
+
+export type StructuredResearchServedTier = "default" | "flex" | "priority" | null;
 
 export interface StructuredResearchResult<T> {
 	object: T;
@@ -85,6 +91,8 @@ export interface StructuredResearchResult<T> {
 	request?: StructuredResearchRequestSummary;
 	/** Opaque provider generation id, for audit and billing reconciliation; null when not reported. */
 	generationId?: string | null;
+	/** Capacity tier reported by the provider; undefined when the response omits it. */
+	servedServiceTier?: StructuredResearchServedTier;
 }
 
 /**

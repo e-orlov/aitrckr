@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import type { z } from "zod";
 import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../providers/config";
 import { toStructuredOutputJsonSchema } from "../providers/json-schema";
-import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
+import type {
+	Provider,
+	StructuredResearchRequestSummary,
+	StructuredResearchServedTier,
+	StructuredResearchUsage,
+} from "../providers/types";
 import { StructuredResearchResponseError } from "../providers/types";
 import { anchorMap, type EvidenceAnchor, hasTableRows, SENTIMENT_EVIDENCE_VERSION, segmentAnswer } from "./anchors";
 import { type DiagnosticReason, type DiagnosticStage, diagnostic, safeGenerationId } from "./diagnostics";
@@ -14,6 +19,7 @@ import { resolveSentimentProvider } from "./provider";
 import { type AnalyzableText, analyzableText, analyzeAnswerRanges } from "./ranges";
 import type { VerifierIssueCode } from "./resolution";
 import { schemaBudgetViolations } from "./schema-budget";
+import { sentimentServiceTier } from "./service-tier";
 import { normalizeText } from "./text";
 import {
 	type EvidencePolarity,
@@ -123,6 +129,7 @@ export interface SentimentClassification {
 	request?: StructuredResearchRequestSummary;
 	/** Opaque provider generation id of the call, for audit; null when the provider reported none. */
 	generationId?: string | null;
+	servedServiceTier?: StructuredResearchServedTier;
 }
 
 /**
@@ -752,6 +759,7 @@ async function requestClassification(
 			webSearch: true,
 			signal,
 			maxOutputTokens: SENTIMENT_MAX_OUTPUT_TOKENS,
+			...(sentimentServiceTier() === "flex" ? { serviceTier: "flex" as const } : {}),
 		});
 	} catch (error) {
 		if (error instanceof StructuredResearchResponseError) {
@@ -842,6 +850,7 @@ export async function classifySentiment(
 			usage: safeEnvelope(envelope)?.usage ?? undefined,
 			request: safeEnvelope(envelope)?.request ?? undefined,
 			generationId: envelope.generationId,
+			...(result.servedServiceTier !== undefined ? { servedServiceTier: result.servedServiceTier } : {}),
 		};
 	} catch (error) {
 		if (error instanceof SentimentValidationError) throw error.withEnvelope(envelope);

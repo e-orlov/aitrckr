@@ -110,6 +110,13 @@ describe("rp1 request-profile scope key", () => {
 		expect(requestScopeKey(classify)).not.toBe(requestScopeKey(repair));
 	});
 
+	it("isolates Flex failures and permits from the default capacity scope", () => {
+		const standard = sentimentRequestProfile({ webSearch: true, schemaFp });
+		const flex = sentimentRequestProfile({ webSearch: true, schemaFp, serviceTier: "flex" });
+		expect(requestScopeKey(flex)).not.toBe(requestScopeKey(standard));
+		expect(flex).toMatchObject({ serviceTier: "flex" });
+	});
+
 	it("changes with the schema shape and carries no document, prompt or credential", () => {
 		const other = sentimentRequestProfile({ webSearch: false, schemaFp: fp(verifierResultSchemaFor(anchorsA, keysA)) });
 		expect(requestScopeKey(other)).not.toBe(requestScopeKey(sentimentRequestProfile({ webSearch: false, schemaFp })));

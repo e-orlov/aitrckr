@@ -236,6 +236,33 @@ describe("openrouter runStructuredResearch", () => {
 	const schema = z.object({ summary: z.string(), competitors: z.array(z.string()) });
 	const structured = { summary: "ok", competitors: ["a", "b"] };
 
+	it("pins Flex only for an explicitly opted-in structured call and reports the served tier", async () => {
+		const fetchMock = stubFetch({
+			service_tier: "flex",
+			choices: [{ message: { content: JSON.stringify(structured) } }],
+			usage: { cost: 0.012 },
+		});
+		const result = await openrouter.runStructuredResearch!({
+			prompt: "research",
+			schema,
+			webSearch: true,
+			serviceTier: "flex",
+		});
+		const { body } = sentRequest(fetchMock);
+		expect(body.service_tier).toBe("flex");
+		expectWebSearchContract(body);
+		expect(body.response_format).toMatchObject({ type: "json_schema", json_schema: { strict: true } });
+		expect(result).toMatchObject({
+			servedServiceTier: "flex",
+			request: { serviceTier: "flex" },
+			usage: { costUsd: 0.012 },
+		});
+
+		const normal = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
+		await openrouter.runStructuredResearch!({ prompt: "research", schema });
+		expect(sentRequest(normal).body).not.toHaveProperty("service_tier");
+	});
+
 	it("keeps the research model and strict JSON schema while adding the German web search", async () => {
 		const fetchMock = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
 

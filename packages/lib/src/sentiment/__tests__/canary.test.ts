@@ -204,7 +204,10 @@ const codes = (report: SentimentCanaryReport) =>
 
 const fast = { deadlineMs: 1000, watchdogMs: 2000 };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
+});
 
 describe("canary run-id acceptance", () => {
 	it("accepts exactly the frozen run id and nothing else", () => {
@@ -336,6 +339,13 @@ describe("canary preflight refuses before any request", () => {
 		expect(report.verdict.status).toBe("reject");
 		return codes(report);
 	};
+
+	it("freezes the tier before spending and refuses a contract from the other route", async () => {
+		vi.stubEnv("SENTIMENT_OPENROUTER_SERVICE_TIER", "flex");
+		expect(await refusal({})).toEqual(["contract-service-tier"]);
+		const { deps } = storeFakes(goodProvider());
+		expect(await inspectSentimentCanaryRun(FROZEN, deps)).toMatchObject({ serviceTier: "flex" });
+	});
 
 	it("unknown run id", async () => {
 		expect(await refusal({ loadRun: vi.fn(async () => null) })).toEqual(["run-not-found"]);
@@ -484,6 +494,45 @@ describe("canary preflight refuses before any request", () => {
 });
 
 describe("canary verdict after the one call", () => {
+	it("accepts Flex only when both request and provider response confirm it", () => {
+		const flexContract = { ...contract, serviceTier: "flex" as const };
+		const outcome = {
+			status: "classified" as const,
+			entities: 2,
+			entityKeys: ["brand", WGV],
+			usage: goodUsage,
+			request: { ...goodRequest, serviceTier: "flex" as const },
+			generationId: "gen-good-001",
+			verified: true as const,
+			servedServiceTier: "default" as "default" | "flex",
+			servedServiceTiers: ["default", "flex"] as ("default" | "flex")[],
+		};
+		const counts = { attempts: 1, providerCalls: 2 };
+		expect(evaluateSentimentCanary(flexContract, outcome, counts)).toEqual({
+			status: "reject",
+			reasons: [{ code: "response-service-tier" }],
+		});
+		expect(
+			evaluateSentimentCanary(
+				flexContract,
+				{ ...outcome, servedServiceTier: "flex", servedServiceTiers: ["flex", "flex"] },
+				counts,
+			),
+		).toEqual({
+			status: "accept",
+		});
+		expect(
+			evaluateSentimentCanary(
+				flexContract,
+				{ ...outcome, servedServiceTier: "flex", servedServiceTiers: ["flex", "default"] },
+				counts,
+			),
+		).toEqual({ status: "reject", reasons: [{ code: "response-service-tier" }] });
+		expect(evaluateSentimentCanary(flexContract, { ...outcome, request: goodRequest }, counts)).toEqual({
+			status: "reject",
+			reasons: [{ code: "request-service-tier" }, { code: "response-service-tier" }],
+		});
+	});
 	it("accepts exactly the frozen contract: one attempt, one request with the locked shape, usage within limits, exact entities", async () => {
 		const provider = goodProvider();
 		const { deps, usage } = storeFakes(provider);
