@@ -25,7 +25,7 @@ Rules:
 
 export const SENTIMENT_GROUNDING_RULES = `Grounding — evaluate one exact candidate at a time and cite only segments that are about that candidate:
 - A segment is evidence for a candidate only when it names that candidate (name or alias) or unmistakably continues a sentence, list or table row that names it. A segment that names a different candidate is never evidence for this one, even if it appears in the same paragraph or table.
-- Never exchange evidence between the rows or columns of a comparison table: the row or cell that describes candidate B says nothing about candidate A.
+- Never exchange evidence between the rows or columns of a comparison table: every cell is its own segment, shown in its row between pipes; a cell is evidence only for the candidate its column header or its row names, and the cell that describes candidate B says nothing about candidate A.
 - A segment that names no candidate at all (a general checklist, a generic tip, a definition, a heading) cannot carry a verdict by itself; cite it only next to a segment that names the candidate, and only when it clearly continues that candidate's description. Bullets directly under a product title that names the candidate, and the paragraph that directly answers a one-line question naming the candidate, count as continuing it; bullets under a generic label ("Advantages", "Disadvantages", "Conclusion", "Check before signing") do not.
 - Aspects are optional findings, not a checklist: never return an aspect for every taxonomy key. Return an aspect only when a segment that names the candidate (or continues such a segment) explicitly evaluates that aspect; when no such segment exists, leave the aspect out. An omitted aspect means "considered, not supported by this text" and is the correct answer; an aspect resting on a generic checklist, a general recommendation, a statistic or an unevaluated description is a defect and will be discarded.
 - Never fill a missing aspect with a "neutral" placeholder: a "neutral" aspect is only for a segment that names the candidate and describes that aspect factually without evaluating it.
@@ -56,9 +56,39 @@ export function aspectTaxonomyText(): string {
 	}).join("\n");
 }
 
-/** The answer as the model receives it: every anchor once, in order, prefixed by its id — natural language only, citations elided. */
+/**
+ * The answer as the model receives it: every anchor once, in order, prefixed
+ * by its id — natural language only, citations elided. The cells of one table
+ * row stay on one line between pipes, so the model reads the table's layout
+ * while citing one cell at a time.
+ */
 export function renderAnchoredAnswer(anchors: readonly EvidenceAnchor[]): string {
-	return anchors.map((anchor) => `[${anchor.id}] ${anchor.naturalText}`).join("\n");
+	const lines: string[] = [];
+	let row: { index: number; column: number; cells: string[] } | null = null;
+	const flush = () => {
+		if (row) lines.push(`| ${row.cells.join(" | ")} |`);
+		row = null;
+	};
+	for (const anchor of anchors) {
+		const tagged = `[${anchor.id}] ${anchor.naturalText}`;
+		if (!anchor.table) {
+			flush();
+			lines.push(tagged);
+			continue;
+		}
+		if (!row || row.index !== anchor.table.row) {
+			flush();
+			row = { index: anchor.table.row, column: anchor.table.column, cells: [tagged] };
+			continue;
+		}
+		if (anchor.table.column === row.column) row.cells[row.cells.length - 1] += ` ${tagged}`;
+		else {
+			row.column = anchor.table.column;
+			row.cells.push(tagged);
+		}
+	}
+	flush();
+	return lines.join("\n");
 }
 
 /**

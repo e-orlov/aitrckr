@@ -4,11 +4,11 @@ import { API_PROVIDER_MAX_OUTPUT_TOKENS } from "../providers/config";
 import { toStructuredOutputJsonSchema } from "../providers/json-schema";
 import type { Provider, StructuredResearchRequestSummary, StructuredResearchUsage } from "../providers/types";
 import { StructuredResearchResponseError } from "../providers/types";
-import { anchorMap, type EvidenceAnchor, segmentAnswer } from "./anchors";
+import { anchorMap, type EvidenceAnchor, hasTableRows, SENTIMENT_EVIDENCE_VERSION, segmentAnswer } from "./anchors";
 import { type DiagnosticReason, type DiagnosticStage, diagnostic, safeGenerationId } from "./diagnostics";
 import { safeEnvelope } from "./errors";
 import { type PaidResponseEnvelope, SentimentValidationError } from "./errors-validation";
-import { type GroundingMap, groundAnchors, isAttributable, namesOnlyOthers } from "./grounding";
+import { belongsOnlyToOthers, type GroundingMap, groundAnchors, isAttributable } from "./grounding";
 import { buildSentimentPrompt } from "./prompt";
 import { resolveSentimentProvider } from "./provider";
 import { type AnalyzableText, analyzableText, analyzeAnswerRanges } from "./ranges";
@@ -139,7 +139,11 @@ export const SENTIMENT_MAX_OUTPUT_TOKENS = API_PROVIDER_MAX_OUTPUT_TOKENS.openro
  * (key, type, name, aliases) in a stable order. A stored analysis is current
  * only while this hash still matches, so a roster, name or alias change makes
  * the run eligible again instead of being hidden behind an older completed
- * analysis.
+ * analysis. The model reads the answer as segments, so the segmentation is
+ * part of the input too: an answer whose segments the evidence contract
+ * version changed (a table row is cell by cell since sent-evidence-v3) carries
+ * that version, while an answer segmented identically under every version
+ * keeps its hash, and with it every stored candidate that still applies.
  */
 export function sentimentInputHash(
 	answerBody: string,
@@ -148,6 +152,7 @@ export function sentimentInputHash(
 ): string {
 	const canonical = {
 		body: normalizeText(analyzableText(analysis)),
+		...(hasTableRows(answerBody) ? { evidence: SENTIMENT_EVIDENCE_VERSION } : {}),
 		candidates: [...candidates]
 			.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 			.map((c) => ({
@@ -195,8 +200,10 @@ function claimIdentity(where: EvidenceWhere, ref: SentimentEvidenceRef): string 
 }
 
 /**
- * One citation of one target: the anchor must belong to the answer; an
- * identical claim (same target, anchor and polarity) is de-duplicated
+ * One citation of one target: the anchor must belong to the answer and must
+ * not be another candidate's evidence (by name or by structural context —
+ * the neighbouring cell of a comparison table, the other entity's section);
+ * an identical claim (same target, anchor and polarity) is de-duplicated
  * deterministically (the first occurrence stands); two different polarities on
  * one anchor within one target are admissible only as the positive/negative
  * pair of a Mixed target — any other differing pair is a contradiction.
@@ -219,10 +226,10 @@ function resolveOneRef(
 		});
 	}
 	const grounding = groundingMap?.get(ref.anchorId);
-	if (grounding && namesOnlyOthers(grounding, where.entityKey)) {
+	if (grounding && belongsOnlyToOthers(grounding, where.entityKey)) {
 		fail(
 			"evidence-entity-unbound",
-			`${where.label}: anchor "${ref.anchorId}" names another candidate but not this one`,
+			`${where.label}: anchor "${ref.anchorId}" is attributed to another candidate but not this one`,
 			where,
 			{ evidenceIndex: index, anchorId: ref.anchorId },
 		);
@@ -281,11 +288,12 @@ function assertPolarityFitsCategory(
 
 /**
  * Resolve cited anchors into stored evidence for one target: every id must
- * belong to this answer, identical claims collapse to one, an anchor that
- * names only other candidates is refused, one anchor may carry positive and
- * negative only for a Mixed target, the polarities must fit the category,
- * and at least one anchor must be attributable to the target's entity. The
- * stored form is the exact raw slice of the anchor.
+ * belong to this answer, identical claims collapse to one, an anchor that is
+ * only another candidate's (by name or by context) is refused whatever its
+ * neighbours are, one anchor may carry positive and negative only for a Mixed
+ * target, the polarities must fit the category, and at least one anchor must
+ * be attributable to the target's entity. The stored form is the exact raw
+ * slice of the anchor.
  */
 function resolveEvidence(
 	anchors: Map<string, EvidenceAnchor>,

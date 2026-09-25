@@ -88,20 +88,20 @@ export const GOLDEN_V4_CASES: GoldenV4Case[] = [
 		id: "v4-swap-de",
 		lang: "de",
 		family: "entity-swap",
-		// s0001 Beltra sentence · s0002 table header · s0003 Beltra row · s0004 Arvo row
+		// s0001 Beltra sentence · s0002–s0004 header cells · s0005–s0007 Beltra row cells · s0008–s0010 Arvo row cells
 		answer:
 			"Für Deutschland ist derzeit die Beltra Optimal der stärkste Kandidat beim Preis-Leistungs-Verhältnis.\n\n| Tarif | Geeignet für | Besonderheit |\n|---|---|---|\n| Beltra Optimal | Preisbewusste Singles | Bestes Preis-Leistungs-Verhältnis |\n| Arvo Komfort | Wer umfangreiche Leistungen möchte | Etwas teurer, dafür starke Zusatzleistungen |",
 		candidates: both,
 		result: {
 			entities: [
-				{ key: ARVO, ...positive(80, "s0001", "s0003"), aspects: [] },
-				{ key: BELTRA, ...mixed(["s0004"], ["s0004"]), aspects: [] },
+				{ key: ARVO, ...positive(80, "s0001", "s0007"), aspects: [] },
+				{ key: BELTRA, ...mixed(["s0010"], ["s0010"]), aspects: [] },
 			],
 		},
 		expected: { [ARVO]: { category: "mixed" }, [BELTRA]: { category: "positive" } },
 		grounding: {
-			[ARVO]: { allowedAnchors: ["s0004", "s0002"], forbiddenAnchors: ["s0001", "s0003"] },
-			[BELTRA]: { allowedAnchors: ["s0001", "s0003", "s0002"], forbiddenAnchors: ["s0004"] },
+			[ARVO]: { allowedAnchors: ["s0008", "s0009", "s0010"], forbiddenAnchors: ["s0001", "s0005", "s0006", "s0007"] },
+			[BELTRA]: { allowedAnchors: ["s0001", "s0005", "s0006", "s0007"], forbiddenAnchors: ["s0008", "s0009", "s0010"] },
 		},
 		expectedValidator: { kind: "reject", code: "evidence-entity-unbound" },
 	},
@@ -209,7 +209,8 @@ export const GOLDEN_V4_CASES: GoldenV4Case[] = [
 		id: "v4-table-en",
 		lang: "en",
 		family: "table",
-		// s0001 intro · s0002 header row · s0003 price row · s0004 coverage row · s0005 verdict
+		// s0001 intro · s0002–s0004 header cells · s0005 "Price" · s0006 Arvo price · s0007 Beltra price ·
+		// s0008 "Coverage" · s0009 Arvo coverage · s0010 Beltra coverage · s0011 verdict
 		answer:
 			"Comparison of the two legal insurers:\n\n| Criterion | Arvo | Beltra |\n|---|---|---|\n| Price | Usually more expensive | Often cheaper |\n| Coverage | Very broad modular cover | Solid standard cover |\n\nOverall Arvo is the stronger choice if you want breadth.",
 		candidates: both,
@@ -217,18 +218,18 @@ export const GOLDEN_V4_CASES: GoldenV4Case[] = [
 			entities: [
 				{
 					key: ARVO,
-					...mixed(["s0004", "s0005"], ["s0003"]),
+					...mixed(["s0009", "s0011"], ["s0006"]),
 					aspects: [
-						{ key: "price", ...negative(30, "s0003") },
-						{ key: "coverage", ...positive(85, "s0004") },
+						{ key: "price", ...negative(30, "s0006") },
+						{ key: "coverage", ...positive(85, "s0009") },
 					],
 				},
 				{
 					key: BELTRA,
-					...positive(70, "s0003", "s0004"),
+					...positive(70, "s0007", "s0010"),
 					aspects: [
-						{ key: "price", ...positive(75, "s0003") },
-						{ key: "coverage", ...positive(65, "s0004") },
+						{ key: "price", ...positive(75, "s0007") },
+						{ key: "coverage", ...positive(65, "s0010") },
 					],
 				},
 			],
@@ -241,8 +242,8 @@ export const GOLDEN_V4_CASES: GoldenV4Case[] = [
 			},
 		},
 		grounding: {
-			[ARVO]: { allowedAnchors: ["s0002", "s0003", "s0004", "s0005"], forbiddenAnchors: [] },
-			[BELTRA]: { allowedAnchors: ["s0002", "s0003", "s0004"], forbiddenAnchors: ["s0005"] },
+			[ARVO]: { allowedAnchors: ["s0003", "s0006", "s0009", "s0011"], forbiddenAnchors: ["s0004", "s0007", "s0010"] },
+			[BELTRA]: { allowedAnchors: ["s0004", "s0007", "s0010"], forbiddenAnchors: ["s0003", "s0006", "s0009", "s0011"] },
 		},
 		expectedValidator: { kind: "accept" },
 	},

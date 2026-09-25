@@ -44,19 +44,30 @@ const mixed = (positiveIds: string[], negativeIds: string[]) => ({
 });
 
 describe("V4-RED-001 entity swap", () => {
-	// s0001 Beltra sentence · s0002 table header · s0003 Beltra row · s0004 Arvo row
+	// s0001 Beltra sentence · s0002–s0004 header cells · s0005–s0007 Beltra row cells · s0008–s0010 Arvo row cells
 	const answer =
 		"Für Deutschland ist derzeit die Beltra Optimal der stärkste Kandidat beim Preis-Leistungs-Verhältnis.\n\n| Tarif | Geeignet für | Besonderheit |\n|---|---|---|\n| Beltra Optimal | Preisbewusste Singles | Bestes Preis-Leistungs-Verhältnis |\n| Arvo Komfort | Wer umfangreiche Leistungen möchte | Etwas teurer, dafür starke Zusatzleistungen |";
 
 	it("segments the reproducer as documented", () => {
-		expect(ids(answer)).toEqual(["s0001", "s0002", "s0003", "s0004"]);
+		expect(ids(answer)).toEqual([
+			"s0001",
+			"s0002",
+			"s0003",
+			"s0004",
+			"s0005",
+			"s0006",
+			"s0007",
+			"s0008",
+			"s0009",
+			"s0010",
+		]);
 	});
 
 	it("refuses an Arvo observation whose every anchor names only Beltra, and vice versa", () => {
 		const swapped = {
 			entities: [
-				{ key: "brand", ...positive(["s0001", "s0003"]), aspects: [] },
-				{ key: "c-beltra", ...mixed(["s0004"], ["s0004"]), aspects: [] },
+				{ key: "brand", ...positive(["s0001", "s0005"]), aspects: [] },
+				{ key: "c-beltra", ...mixed(["s0010"], ["s0010"]), aspects: [] },
 			],
 		};
 		expect(() => validateSentimentResult(swapped, { answerBody: answer, candidates })).toThrow(
@@ -67,8 +78,8 @@ describe("V4-RED-001 entity swap", () => {
 	it("accepts the correctly grounded labelling of the same answer", () => {
 		const grounded = {
 			entities: [
-				{ key: "brand", ...mixed(["s0004"], ["s0004"]), aspects: [] },
-				{ key: "c-beltra", ...positive(["s0001", "s0003"]), aspects: [] },
+				{ key: "brand", ...mixed(["s0010"], ["s0010"]), aspects: [] },
+				{ key: "c-beltra", ...positive(["s0001", "s0007"]), aspects: [] },
 			],
 		};
 		const entities = validateSentimentResult(grounded, { answerBody: answer, candidates });
