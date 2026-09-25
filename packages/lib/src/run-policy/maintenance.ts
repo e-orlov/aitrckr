@@ -26,6 +26,8 @@ export interface MaintenancePromptState {
 		state: "created" | "active" | "retry";
 		/** Failure streak it carries, so a deliberate backoff is distinguishable. */
 		consecutiveFailures: number;
+		/** When the job is due to run. Unknown for jobs recorded before this field existed. */
+		startAfter?: Date;
 	} | null;
 }
 
@@ -54,9 +56,24 @@ type MaintenanceAction =
 	| { kind: "schedule"; cadenceHours: number }
 	| { kind: "expedite"; jobId: string };
 
+/**
+ * A future job that is due within one run interval is the chain working as
+ * designed — a first run spread over the cadence, or the next run of a prompt
+ * that is simply between cycles — not a job to drag forward or to alert on.
+ * Anything further out than a full interval is stalled by definition.
+ */
+function hasScheduledJobWithinInterval(state: MaintenancePromptState, nowMs: number): boolean {
+	const job = state.pendingJob;
+	if (!job || job.state !== "created" || !job.startAfter) return false;
+	const startMs = job.startAfter.getTime();
+	const intervalMs = Math.min(...state.plan.targets.map((t) => t.intervalHours)) * 3600 * 1000;
+	return startMs > nowMs && startMs - nowMs <= intervalMs;
+}
+
 function actionForPrompt(state: MaintenancePromptState, nowMs: number): MaintenanceAction {
 	// A job that is running or retrying is already being handled.
 	if (state.pendingJob && state.pendingJob.state !== "created") return { kind: "none" };
+	if (hasScheduledJobWithinInterval(state, nowMs)) return { kind: "none" };
 
 	// A prompt with no recorded runs is inherently overdue: there is nothing
 	// fresh. This covers brand-new prompts and revived chains whose history
@@ -93,7 +110,9 @@ export function computeMaintenanceDecisions(promptStates: MaintenancePromptState
 		// No targets (unentitled org, no picks, outside the pool): the prompt is
 		// meant to be stopped. Not overdue, nothing to start, no alert noise.
 		if (state.plan.targets.length === 0 || state.plan.rescheduleHours === null) continue;
-		if (isPromptOverdue(state, nowMs, OVERDUE_ALERT_GRACE_MS)) decisions.alertOverdueCount++;
+		if (isPromptOverdue(state, nowMs, OVERDUE_ALERT_GRACE_MS) && !hasScheduledJobWithinInterval(state, nowMs)) {
+			decisions.alertOverdueCount++;
+		}
 
 		const action = actionForPrompt(state, nowMs);
 		if (action.kind === "schedule") {

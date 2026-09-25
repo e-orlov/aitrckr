@@ -1,5 +1,10 @@
-// Runs per target per firing when the RUNS_PER_PROMPT env var is unset or invalid.
-export const RUNS_PER_PROMPT_FALLBACK = 5;
+/**
+ * Runs per target per firing when the RUNS_PER_PROMPT env var is unset or
+ * invalid. One: a deployment that never set the variable, or mistyped it, pays
+ * for one answer per prompt and target, not five. Operators who want several
+ * samples turn it up deliberately.
+ */
+export const RUNS_PER_PROMPT_FALLBACK = 1;
 
 /**
  * How many times a firing runs each of a prompt's targets. Answers vary between
