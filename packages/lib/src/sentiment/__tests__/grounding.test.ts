@@ -60,15 +60,34 @@ describe("grounding guard", () => {
 		expect(isAttributable(map.get("s0003")!, "c-beltra")).toBe(true);
 	});
 
-	it("table rows inherit the header row's candidates; the header itself inherits nothing", () => {
-		const { map } = ground(
+	it("a table cell inherits the candidate of its own column header only; label cells and the header itself inherit nothing", () => {
+		// s0001 Kriterium · s0002 Arvo · s0003 Beltra · s0004 Preis · s0005 teurer · s0006 günstiger · s0007 Service · s0008 gut · s0009 ok · s0010 Fazit
+		const { anchors, map } = ground(
 			"| Kriterium | Arvo | Beltra |\n|---|---|---|\n| Preis | teurer | günstiger |\n| Service | gut | ok |\n\nFazit folgt.",
 		);
-		expect(keys(map.get("s0001")!.explicit)).toEqual(["brand", "c-beltra"]);
-		expect(map.get("s0002")).toMatchObject({ context: "table-header" });
-		expect(keys(map.get("s0002")!.inherited)).toEqual(["brand", "c-beltra"]);
-		expect(map.get("s0003")).toMatchObject({ context: "table-header" });
+		expect(anchors.map((a) => a.text)).toEqual([
+			"Kriterium",
+			"Arvo",
+			"Beltra",
+			"Preis",
+			"teurer",
+			"günstiger",
+			"Service",
+			"gut",
+			"ok",
+			"Fazit folgt.",
+		]);
+		expect(map.get("s0001")).toMatchObject({ context: "generic" });
+		expect(keys(map.get("s0002")!.explicit)).toEqual(["brand"]);
+		expect(keys(map.get("s0003")!.explicit)).toEqual(["c-beltra"]);
 		expect(map.get("s0004")).toMatchObject({ context: "generic" });
+		expect(map.get("s0005")).toMatchObject({ context: "table-header" });
+		expect(keys(map.get("s0005")!.inherited)).toEqual(["brand"]);
+		expect(map.get("s0006")).toMatchObject({ context: "table-header" });
+		expect(keys(map.get("s0006")!.inherited)).toEqual(["c-beltra"]);
+		expect(keys(map.get("s0008")!.inherited)).toEqual(["brand"]);
+		expect(keys(map.get("s0009")!.inherited)).toEqual(["c-beltra"]);
+		expect(map.get("s0010")).toMatchObject({ context: "generic" });
 	});
 
 	it("list items inherit a colon-terminated intro line that names a candidate, across blank lines, but not a generic intro", () => {
@@ -114,14 +133,30 @@ describe("grounding guard", () => {
 		expect(isAttributable(map.get("s0005")!, "brand")).toBe(false);
 	});
 
-	it("a comparison row stays attributable to every header entity even when a cell names the other one", () => {
+	it("a cell that names the other column's candidate is evidence for that candidate alone, never for its column", () => {
+		// s0004 Vergleich · s0005 Arvo-column cell naming Beltra · s0006 Beltra-column cell
 		const { map } = ground(
 			"| Kriterium | Arvo | Beltra |\n|---|---|---|\n| Vergleich | Etwas besser als Beltra bewertet | Leicht dahinter |",
 		);
-		expect(keys(map.get("s0002")!.explicit)).toEqual(["c-beltra"]);
-		expect(keys(map.get("s0002")!.inherited)).toEqual(["brand", "c-beltra"]);
-		expect(namesOnlyOthers(map.get("s0002")!, "brand")).toBe(false);
-		expect(isAttributable(map.get("s0002")!, "brand")).toBe(true);
+		expect(keys(map.get("s0005")!.explicit)).toEqual(["c-beltra"]);
+		expect(keys(map.get("s0005")!.inherited)).toEqual([]);
+		expect(namesOnlyOthers(map.get("s0005")!, "brand")).toBe(true);
+		expect(isAttributable(map.get("s0005")!, "brand")).toBe(false);
+		expect(keys(map.get("s0006")!.inherited)).toEqual(["c-beltra"]);
+		expect(isAttributable(map.get("s0006")!, "brand")).toBe(false);
+	});
+
+	it("in a row-per-candidate table the cells after the naming cell belong to that row's candidate only", () => {
+		// s0001 Tarif · s0002 Preis · s0003 Arvo Komfort · s0004 teurer · s0005 Beltra Plus · s0006 günstig
+		const { map } = ground("| Tarif | Preis |\n|---|---|\n| Arvo Komfort | teurer |\n| Beltra Plus | günstig |");
+		expect(map.get("s0004")).toMatchObject({ context: "table-row" });
+		expect(keys(map.get("s0004")!.inherited)).toEqual(["brand"]);
+		expect(isAttributable(map.get("s0004")!, "c-beltra")).toBe(false);
+		expect(map.get("s0006")).toMatchObject({ context: "table-row" });
+		expect(keys(map.get("s0006")!.inherited)).toEqual(["c-beltra"]);
+		expect(isAttributable(map.get("s0006")!, "brand")).toBe(false);
+		// The header's own cells and a label cell before any name belong to nobody.
+		expect(map.get("s0001")).toMatchObject({ context: "generic" });
 	});
 
 	it("namesOnlyOthers is true exactly for an anchor that names candidates other than the claimed one", () => {

@@ -8,8 +8,10 @@ export {
 } from "./adjudication";
 export {
 	ANCHOR_MAX_COUNT,
+	type AnchorTableCell,
 	anchorMap,
 	type EvidenceAnchor,
+	hasTableRows,
 	isAnchorId,
 	SENTIMENT_EVIDENCE_VERSION,
 	segmentAnswer,
@@ -186,6 +188,7 @@ export {
 	type GroundingMap,
 	groundAnchors,
 	isAttributable,
+	belongsOnlyToOthers,
 	namesOnlyOthers,
 } from "./grounding";
 export { type HeldReleaseResult, type HeldWorkItem, listHeldWork, releaseHeldWork } from "./held-release";

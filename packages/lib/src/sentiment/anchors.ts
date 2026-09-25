@@ -13,13 +13,20 @@ import { EVIDENCE_QUOTE_MAX_LENGTH } from "./types";
  * Version of the evidence contract between the classifier and the provider:
  * the answer is handed over as ordered, identified natural-language segments
  * (citation ranges are never segments and are elided from what the model
- * reads) and the model cites segment ids, never text. Frozen into the canary
- * contract.
+ * reads) and the model cites segment ids, never text. Since v3 every cell of
+ * a Markdown table row is segmented on its own, so a citation can never span
+ * the cells of two different columns. Frozen into the canary contract.
  */
-export const SENTIMENT_EVIDENCE_VERSION = "sent-evidence-v2";
+export const SENTIMENT_EVIDENCE_VERSION = "sent-evidence-v3";
 
 /** Hard cap on anchors per answer; a longer answer is refused before any call. */
 export const ANCHOR_MAX_COUNT = 400;
+
+/** Where a table-cell anchor sits: the row's line index in the answer and the cell's column, both 0-based. */
+export interface AnchorTableCell {
+	row: number;
+	column: number;
+}
 
 /** One exact, immutable slice of the raw answer the model may cite by id. */
 export interface EvidenceAnchor {
@@ -30,10 +37,19 @@ export interface EvidenceAnchor {
 	text: string;
 	/** The natural-language text of the slice with citation ranges elided — what the provider reads. */
 	naturalText: string;
+	/** Set when the slice lies inside a cell of a Markdown table row; absent for every other line. */
+	table?: AnchorTableCell;
 }
 
 const ANCHOR_ID = /^s\d{4}$/;
 const LINE_BREAK = /\r\n|\r|\n/g;
+/** A Markdown table row opens with a pipe; the alignment row (pipes, colons, dashes, spaces) carries no content. */
+const TABLE_ROW = /^\s*\|/u;
+const TABLE_SEPARATOR = /^\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*$/u;
+/** An unescaped pipe separates two cells of a table row. */
+const CELL_SEPARATOR = /(?<!\\)\|/gu;
+/** Inside a table cell a semicolon followed by whitespace separates two statements. */
+const CELL_STATEMENT_END = /;(?=\s)/gu;
 /** Bullet, numbered and quote markers that open a Markdown line; never part of an anchor. */
 const LINE_MARKER = /^(?:[ \t]*)(?:(?:[-*+•▪◦]|\d{1,3}[.)]|[a-z][.)]|>)[ \t]+)+/iu;
 const SENTENCE_END = /[.!?…]+["'”’»)]?(?=\s)/gu;
@@ -91,6 +107,40 @@ export function isAnchorId(value: string): boolean {
 	return ANCHOR_ID.test(value);
 }
 
+/** Is this line a Markdown table row with content (not the alignment row)? */
+export function isTableRowLine(line: string): boolean {
+	return TABLE_ROW.test(line) && !TABLE_SEPARATOR.test(line);
+}
+
+/** Is this line the alignment row of a Markdown table? */
+export function isTableSeparatorLine(line: string): boolean {
+	return TABLE_SEPARATOR.test(line) && line.includes("-");
+}
+
+/** Does the answer contain a table row — the one structure the v3 evidence contract segments differently from v2? */
+export function hasTableRows(answerBody: string): boolean {
+	return answerBody.split(LINE_BREAK).some(isTableRowLine);
+}
+
+/**
+ * The cells of one table row as ranges relative to the line: the text between
+ * unescaped pipes, the empty edge left of a leading pipe or right of a trailing
+ * pipe dropped, columns numbered from 0 in reading order.
+ */
+export function tableCellRanges(line: string): { start: number; end: number; column: number }[] {
+	const pieces: { start: number; end: number }[] = [];
+	let from = 0;
+	for (const cut of line.matchAll(CELL_SEPARATOR)) {
+		pieces.push({ start: from, end: cut.index });
+		from = cut.index + 1;
+	}
+	pieces.push({ start: from, end: line.length });
+	const blank = (piece: { start: number; end: number }) => line.slice(piece.start, piece.end).trim() === "";
+	if (pieces.length > 0 && blank(pieces[0])) pieces.shift();
+	if (pieces.length > 0 && blank(pieces[pieces.length - 1])) pieces.pop();
+	return pieces.map((piece, column) => ({ ...piece, column }));
+}
+
 function anchorIdFor(index: number): string {
 	return `s${String(index + 1).padStart(4, "0")}`;
 }
@@ -109,9 +159,19 @@ function wordBefore(text: string, index: number): string {
 	return text.slice(from, index).toLowerCase();
 }
 
-/** Sentence boundaries inside one line, as end offsets relative to the line; punctuation inside a citation range never ends a sentence. */
-function sentenceEnds(line: string, lineStart: number, analysis: AnalyzableText): number[] {
+/**
+ * Sentence boundaries inside one line (or one table cell), as end offsets
+ * relative to `line`; punctuation inside a citation range never ends a
+ * sentence. Inside a table cell a semicolon followed by whitespace ends a
+ * statement too, so two clauses of one cell can be cited apart.
+ */
+function sentenceEnds(line: string, lineStart: number, analysis: AnalyzableText, cell = false): number[] {
 	const ends: number[] = [];
+	if (cell) {
+		for (const match of line.matchAll(CELL_STATEMENT_END)) {
+			if (!isExcludedOffset(analysis, lineStart + match.index)) ends.push(match.index + 1);
+		}
+	}
 	for (const match of line.matchAll(SENTENCE_END)) {
 		const at = match.index;
 		const end = at + match[0].length;
@@ -130,7 +190,7 @@ function sentenceEnds(line: string, lineStart: number, analysis: AnalyzableText)
 		}
 		ends.push(end);
 	}
-	return ends;
+	return cell ? [...new Set(ends)].sort((a, b) => a - b) : ends;
 }
 
 interface Span {
@@ -138,6 +198,7 @@ interface Span {
 	end: number;
 	/** Raw range of a stripped list marker (`1.`, `2)`, `-`, `>`); markup, not answer content. */
 	marker?: { start: number; end: number };
+	table?: AnchorTableCell;
 }
 
 /**
@@ -229,10 +290,11 @@ function splitLongSpan(text: string, start: number, end: number, analysis: Analy
 
 /**
  * Deterministic segmentation of a raw answer into citable anchors: line by
- * line (CRLF/LF/CR), sentence by sentence (German/English abbreviations,
- * numbers and URLs do not end a sentence), each span trimmed of whitespace,
- * list markers and edge citations, over-long spans split at safe boundaries,
- * ids assigned in answer order. Citation ranges (`analyzeAnswerRanges`) are
+ * line (CRLF/LF/CR), a table row cell by cell (a cell's statements split at
+ * `; ` as well), sentence by sentence (German/English abbreviations, numbers
+ * and URLs do not end a sentence), each span trimmed of whitespace, list
+ * markers and edge citations, over-long spans split at safe boundaries, ids
+ * assigned in answer order. Citation ranges (`analyzeAnswerRanges`) are
  * never anchors: a source line yields none, a trailing `([domain](url))` is
  * cut off, a citation inside a sentence stays inside the raw slice but is
  * elided from `naturalText`. Two environments holding the same answer produce
@@ -256,19 +318,30 @@ export function segmentAnswer(
 	}
 	lines.push({ start: lineStart, end: answerBody.length });
 
-	for (const line of lines) {
-		const text = answerBody.slice(line.start, line.end);
+	const segmentRange = (start: number, end: number, table?: AnchorTableCell) => {
+		const text = answerBody.slice(start, end);
 		let from = 0;
-		for (const end of [...sentenceEnds(text, line.start, analysis), text.length]) {
-			if (end <= from) continue;
-			const span = contentSpan(answerBody, line.start + from, line.start + end, analysis);
-			from = end;
+		for (const sentenceEnd of [...sentenceEnds(text, start, analysis, table !== undefined), text.length]) {
+			if (sentenceEnd <= from) continue;
+			const span = contentSpan(answerBody, start + from, start + sentenceEnd, analysis);
+			from = sentenceEnd;
 			if (!span) continue;
-			if (span.end - span.start > EVIDENCE_QUOTE_MAX_LENGTH)
-				spans.push(...splitLongSpan(answerBody, span.start, span.end, analysis));
-			else spans.push(span);
+			const pieces =
+				span.end - span.start > EVIDENCE_QUOTE_MAX_LENGTH
+					? splitLongSpan(answerBody, span.start, span.end, analysis)
+					: [span];
+			for (const piece of pieces) spans.push(table ? { ...piece, table } : piece);
 		}
-	}
+	};
+	lines.forEach((line, row) => {
+		const text = answerBody.slice(line.start, line.end);
+		if (!isTableRowLine(text)) {
+			segmentRange(line.start, line.end);
+			return;
+		}
+		for (const cell of tableCellRanges(text))
+			segmentRange(line.start + cell.start, line.start + cell.end, { row, column: cell.column });
+	});
 
 	if (spans.length > ANCHOR_MAX_COUNT) {
 		throw new SentimentValidationError(
@@ -282,6 +355,7 @@ export function segmentAnswer(
 		end: span.end,
 		text: answerBody.slice(span.start, span.end),
 		naturalText: naturalTextOf(analysis, span),
+		...(span.table ? { table: span.table } : {}),
 	}));
 	assertCoverage(
 		answerBody,

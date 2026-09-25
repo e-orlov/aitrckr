@@ -1,4 +1,4 @@
-import type { EvidenceAnchor } from "./anchors";
+import { type EvidenceAnchor, isTableRowLine, isTableSeparatorLine } from "./anchors";
 import { containsBoundedTerm } from "./detector";
 import { normalizeText } from "./text";
 import type { SentimentCandidate } from "./types";
@@ -13,17 +13,20 @@ import type { SentimentCandidate } from "./types";
  * Two levels of attribution:
  * - `explicit`: the anchor itself names the candidate (name or alias, bounded).
  * - `inherited`: candidates attributed from the anchor's structural context —
- *   the header row of its table (a row of a comparison table describes every
- *   entity the header names, even when a cell mentions the other one), the
- *   colon-terminated line introducing its list, the emphasised product-title
- *   line standing alone right above its list when that title names exactly one
- *   candidate, the first line of its own list item, the nearest preceding
- *   anchor of its own paragraph that names a candidate, the one-line
- *   clarifying question right above its paragraph when the paragraph opens
- *   with a continuation form and names no other candidate, or the nearest
- *   heading above it when nothing in between names any candidate. Every
- *   inheritance is one hop and never crosses a table boundary, another heading
- *   or a line that names a candidate.
+ *   for a table cell the header cell of its own column (a column-per-entity
+ *   comparison table) or, when the header names nobody, the nearest preceding
+ *   cell of its own row that names a candidate (a row-per-entity table); for
+ *   everything else the colon-terminated line introducing its list, the
+ *   emphasised product-title line standing alone right above its list when
+ *   that title names exactly one candidate, the first line of its own list
+ *   item, the nearest preceding anchor of its own paragraph that names a
+ *   candidate, the one-line clarifying question right above its paragraph
+ *   when the paragraph opens with a continuation form and names no other
+ *   candidate, or the nearest heading above it when nothing in between names
+ *   any candidate. Every inheritance is one hop and never crosses a table
+ *   boundary, another heading or a line that names a candidate; an anchor
+ *   that names a candidate itself inherits nothing, so a cell that names
+ *   the other column's entity is evidence for that entity alone.
  * An anchor is attributable to the union of both sets; an anchor that names
  * candidates itself and is not attributable to the claimed one names only
  * others; a `generic` anchor (neither set) is attributable to nobody and can
@@ -32,6 +35,7 @@ import type { SentimentCandidate } from "./types";
 export type AnchorContext =
 	| "explicit"
 	| "table-header"
+	| "table-row"
 	| "list-intro"
 	| "list-item"
 	| "paragraph"
@@ -53,9 +57,6 @@ export type GroundingMap = ReadonlyMap<string, AnchorGrounding>;
 const LINE_BREAK = /\r\n|\r|\n/g;
 const CONTENT = /[\p{L}\p{N}]/u;
 const HEADING = /^\s{0,3}#{1,6}\s/u;
-const TABLE_ROW = /^\s*\|/u;
-/** A Markdown table alignment row: pipes, colons, dashes and spaces only. */
-const TABLE_SEPARATOR = /^\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*$/u;
 const LIST_ITEM = /^(?:[ \t]*)(?:[-*+•▪◦]|\d{1,3}[.)]|[a-z][.)]|>)[ \t]+/iu;
 /** An indented line (two spaces or a tab) directly under a list item continues that item. */
 const INDENTED = /^(?: {2,}|\t)/u;
@@ -88,12 +89,15 @@ interface Line {
 	anchors: EvidenceAnchor[];
 	/** Union of the explicit candidate sets of the line's anchors. */
 	explicit: Set<string>;
+	/** For a table row: the explicit candidate set of every cell, by column. */
+	cells: Map<number, Set<string>>;
 }
 
 function classifyLine(text: string, previous: LineKind | null): LineKind {
-	if (!CONTENT.test(text)) return TABLE_SEPARATOR.test(text) && text.includes("-") ? "table-separator" : "blank";
+	if (!CONTENT.test(text)) return isTableSeparatorLine(text) ? "table-separator" : "blank";
 	if (HEADING.test(text)) return "heading";
-	if (TABLE_ROW.test(text)) return TABLE_SEPARATOR.test(text) ? "table-separator" : "table-row";
+	if (isTableRowLine(text)) return "table-row";
+	if (isTableSeparatorLine(text)) return "table-separator";
 	if (LIST_ITEM.test(text)) return "list-item";
 	if (INDENTED.test(text) && (previous === "list-item" || previous === "list-continuation")) return "list-continuation";
 	return "text";
@@ -126,7 +130,15 @@ function splitLines(answerBody: string, anchors: readonly EvidenceAnchor[], term
 	const push = (end: number) => {
 		const text = answerBody.slice(start, end);
 		const previous = lines.at(-1)?.kind ?? null;
-		lines.push({ index, start, end, kind: classifyLine(text, previous), anchors: [], explicit: new Set() });
+		lines.push({
+			index,
+			start,
+			end,
+			kind: classifyLine(text, previous),
+			anchors: [],
+			explicit: new Set(),
+			cells: new Map(),
+		});
 		index += 1;
 	};
 	for (const brk of answerBody.matchAll(LINE_BREAK)) {
@@ -139,7 +151,13 @@ function splitLines(answerBody: string, anchors: readonly EvidenceAnchor[], term
 		while (lineAt < lines.length - 1 && anchor.start >= lines[lineAt].end) lineAt += 1;
 		const line = lines[lineAt];
 		line.anchors.push(anchor);
-		for (const key of explicitKeys(anchor.naturalText, terms)) line.explicit.add(key);
+		const keys = explicitKeys(anchor.naturalText, terms);
+		for (const key of keys) line.explicit.add(key);
+		if (anchor.table) {
+			const cell = line.cells.get(anchor.table.column) ?? new Set<string>();
+			for (const key of keys) cell.add(key);
+			line.cells.set(anchor.table.column, cell);
+		}
 	}
 	return lines;
 }
@@ -313,16 +331,40 @@ function groundOne(
 	explicitByAnchor: Map<string, Set<string>>,
 ): AnchorGrounding {
 	let inheritance: Inheritance | null = null;
-	if (line.kind === "table-row") inheritance = tableInheritance(lines, line);
-	else if (explicit.size === 0) inheritance = contextInheritance(answerBody, lines, line, anchor, explicitByAnchor);
+	if (explicit.size > 0) inheritance = null;
+	else if (line.kind === "table-row") inheritance = tableInheritance(lines, line, anchor, explicitByAnchor);
+	else inheritance = contextInheritance(answerBody, lines, line, anchor, explicitByAnchor);
 	const context: AnchorContext = explicit.size > 0 ? "explicit" : (inheritance?.context ?? "generic");
 	return { anchorId: anchor.id, explicit, inherited: inheritance?.keys ?? new Set(), context };
 }
 
-/** A comparison row describes every entity of its header, whatever a cell happens to name. */
-function tableInheritance(lines: Line[], line: Line): Inheritance | null {
+/**
+ * A table cell that names nobody belongs to the entity of its column when the
+ * header cell of that column names one (a column-per-entity comparison
+ * table); in such a table a column whose header names nobody (the criterion
+ * label, a summary column) belongs to nobody. When the header names no
+ * candidate at all (a row-per-entity table, or no header), the cell belongs
+ * to the nearest preceding cell of its own row that names a candidate. A cell
+ * never inherits from another row or another column.
+ */
+function tableInheritance(
+	lines: Line[],
+	line: Line,
+	anchor: EvidenceAnchor,
+	explicitByAnchor: Map<string, Set<string>>,
+): Inheritance | null {
 	const header = tableHeader(lines, line);
-	return header && header.explicit.size > 0 ? { keys: header.explicit, context: "table-header" } : null;
+	if (header && header.explicit.size > 0) {
+		const column = anchor.table?.column;
+		const owner = column === undefined ? undefined : header.cells.get(column);
+		return owner && owner.size > 0 ? { keys: owner, context: "table-header" } : null;
+	}
+	const ownAnchors = line.anchors;
+	for (let i = ownAnchors.indexOf(anchor) - 1; i >= 0; i -= 1) {
+		const keys = explicitByAnchor.get(ownAnchors[i].id);
+		if (keys && keys.size > 0) return { keys, context: "table-row" };
+	}
+	return null;
 }
 
 /** Structural context for an anchor that names no candidate itself, in order of proximity. */
@@ -362,4 +404,14 @@ export function isAttributable(grounding: AnchorGrounding, entityKey: string): b
 /** Does the anchor name other candidates while not being attributable to `entityKey` — evidence that belongs to somebody else? */
 export function namesOnlyOthers(grounding: AnchorGrounding, entityKey: string): boolean {
 	return grounding.explicit.size > 0 && !isAttributable(grounding, entityKey);
+}
+
+/**
+ * Is the anchor somebody else's evidence — attributed, by name or by its
+ * structural context (the other column of a comparison table, the other
+ * entity's section or list), to at least one candidate and not to
+ * `entityKey`? A generic anchor belongs to nobody and is not somebody else's.
+ */
+export function belongsOnlyToOthers(grounding: AnchorGrounding, entityKey: string): boolean {
+	return (grounding.explicit.size > 0 || grounding.inherited.size > 0) && !isAttributable(grounding, entityKey);
 }
