@@ -9,6 +9,7 @@ import {
 	sentimentResolutionCases,
 } from "../db/schema";
 import { sentimentInputHash } from "./classifier";
+import { isHeld, readDispatchState } from "./controls";
 import { type SentimentSender, sendSentimentJob } from "./enqueue";
 import { analyzeAnswerRanges } from "./ranges";
 import { selectedSentimentAnalyses } from "./read-selection";
@@ -272,6 +273,7 @@ export async function buildReanchorManifest(args: { brandId?: string } = {}): Pr
 
 export type ReanchorApplyOutcome =
 	| { analysisId: string; outcome: "restamped" }
+	/** `jobId` is null when no sender was given or dispatch is held; a held rotation is picked up by the next apply with a sender. */
 	| { analysisId: string; outcome: "rotated"; instanceId: string; jobId: string | null }
 	| { analysisId: string; outcome: "enqueued"; jobId: string | null }
 	| { analysisId: string; outcome: "skipped"; reason: string }
@@ -322,8 +324,7 @@ export async function applyReanchorEntry(
 		};
 
 	if (entry.action === "enqueue") {
-		const jobId = sender ? await sendSentimentJob(sender, row.promptRunId) : null;
-		return { analysisId: entry.analysisId, outcome: "enqueued", jobId };
+		return { analysisId: entry.analysisId, outcome: "enqueued", jobId: await send(sender, row.promptRunId) };
 	}
 	if (entry.action === "restamp") {
 		const updated = await db
@@ -362,8 +363,14 @@ export async function applyReanchorEntry(
 	});
 	if (!kase)
 		return { analysisId: entry.analysisId, outcome: "drift", reason: "case of this input already in progress" };
-	const jobId = sender ? await sendSentimentJob(sender, row.promptRunId) : null;
+	const jobId = await send(sender, row.promptRunId);
 	return { analysisId: entry.analysisId, outcome: "rotated", instanceId: kase.instanceId, jobId };
+}
+
+/** One job send, like every other producer gated on the dispatch control: nothing is sent while dispatch is held. */
+async function send(sender: SentimentSender | null, promptRunId: string): Promise<string | null> {
+	if (!sender || isHeld(await readDispatchState())) return null;
+	return sendSentimentJob(sender, promptRunId);
 }
 
 /** The live state of a manifest's analyses after an apply: what the worker did with each. */

@@ -63,6 +63,7 @@ describe("dispatch controls cannot be bypassed by construction", () => {
 			"packages/lib/src/sentiment/enqueue.ts",
 			"packages/lib/src/sentiment/held-release.ts",
 			"packages/lib/src/sentiment/job.ts",
+			"packages/lib/src/sentiment/reanchor-apply.ts",
 			"packages/lib/src/sentiment/resume.ts",
 		]);
 	});
@@ -72,6 +73,7 @@ describe("dispatch controls cannot be bypassed by construction", () => {
 			"packages/lib/src/sentiment/enqueue.ts",
 			"packages/lib/src/sentiment/backfill.ts",
 			"packages/lib/src/sentiment/held-release.ts",
+			"packages/lib/src/sentiment/reanchor-apply.ts",
 		]) {
 			expect(readFileSync(path.join(repoRoot, file), "utf8"), file).toMatch(/readDispatchState/);
 		}
