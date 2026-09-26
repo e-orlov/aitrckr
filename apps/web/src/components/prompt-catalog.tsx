@@ -81,8 +81,12 @@ export function PromptCatalog({ brandId, page, search, premium }: PromptCatalogP
 
 	// Fresh loader data — another page, a filter, a reload after a save —
 	// replaces what is being edited. The blocker has already made sure nothing
-	// unsaved is lost by the navigation that produced it.
+	// unsaved is lost by a navigation; a refresh that lands while rows are
+	// being edited (the re-read after a save, finishing under load) must not
+	// wipe those edits, so it is skipped and the next clean refresh applies.
+	const dirtyRef = useRef(false);
 	useEffect(() => {
+		if (dirtyRef.current) return;
 		const next = toEditablePrompts(page.rows);
 		setBaseline(next);
 		setRows(next);
@@ -125,6 +129,7 @@ export function PromptCatalog({ brandId, page, search, premium }: PromptCatalogP
 	}, [rows, baseline]);
 
 	const isDirty = changedKeys.size > 0;
+	dirtyRef.current = isDirty;
 	const summary = [
 		addedCount && `${addedCount} added`,
 		editedCount && `${editedCount} edited`,

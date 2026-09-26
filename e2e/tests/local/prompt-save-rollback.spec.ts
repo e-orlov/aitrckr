@@ -48,7 +48,6 @@ test.describe("Prompt save rolls back as a whole", () => {
 
   let client: pg.Client;
   let baselineTags: string[];
-  let baselineCount: number;
   let nikeBefore: unknown[];
 
   test.beforeAll(async () => {
@@ -62,8 +61,6 @@ test.describe("Prompt save rolls back as a whole", () => {
     ]);
     if (fixture.rows.length !== 1) throw new Error("seeded fixture missing — not the disposable test database");
     baselineTags = fixture.rows[0].tags;
-    baselineCount = (await client.query("SELECT count(*)::int AS n FROM prompts WHERE brand_id = $1", [TEST_BRAND_ID]))
-      .rows[0].n;
     nikeBefore = (await client.query("SELECT id, value, tags FROM prompts WHERE brand_id = 'nike' ORDER BY id")).rows;
 
     await client.query(`
@@ -92,9 +89,9 @@ test.describe("Prompt save rolls back as a whole", () => {
       await client.query("UPDATE prompts SET tags = $1 WHERE id = $2", [baselineTags, PROMPT_IDS.branded1]);
       const triggers = await client.query("SELECT 1 FROM pg_trigger WHERE tgname = $1", [TRIGGER]);
       expect(triggers.rows).toHaveLength(0);
-      expect((await client.query("SELECT count(*)::int AS n FROM prompts WHERE brand_id = $1", [TEST_BRAND_ID])).rows[0].n).toBe(
-        baselineCount,
-      );
+      // Other specs add and remove their own rows in this brand concurrently,
+      // so the proof of "nothing left behind" is scoped to this spec's rows.
+      expect((await client.query("SELECT count(*)::int AS n FROM prompts WHERE value LIKE 'F04-CORR-IT-001 %'")).rows[0].n).toBe(0);
     } finally {
       await client.end();
     }
@@ -150,9 +147,6 @@ test.describe("Prompt save rolls back as a whole", () => {
     expect(seededAfter.rows[0].tags).toEqual(baselineTags);
     const batch = await client.query("SELECT value FROM prompts WHERE value = ANY($1::text[])", [[SENTINEL, VALID_NEW]]);
     expect(batch.rows).toEqual([]);
-    expect((await client.query("SELECT count(*)::int AS n FROM prompts WHERE brand_id = $1", [TEST_BRAND_ID])).rows[0].n).toBe(
-      baselineCount,
-    );
     expect((await client.query("SELECT id, value, tags FROM prompts WHERE brand_id = 'nike' ORDER BY id")).rows).toEqual(
       nikeBefore,
     );

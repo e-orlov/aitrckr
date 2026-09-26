@@ -53,8 +53,15 @@ async function brandPromptCount(client: pg.Client): Promise<number> {
   return rows[0].n;
 }
 
-/** Pending `process-prompt` jobs per prompt id — the canonical chain each enabled prompt owns. */
+/**
+ * Pending `process-prompt` jobs per prompt id — the canonical chain each
+ * enabled prompt owns. The web process creates the pgboss schema on its first
+ * send, and a stack that has only ever imported disabled prompts has never
+ * sent: no schema means no jobs.
+ */
 async function pendingChains(client: pg.Client, promptIds: string[]): Promise<Map<string, number>> {
+  const schema = await client.query("SELECT to_regclass('pgboss.job') IS NOT NULL AS present");
+  if (!schema.rows[0].present) return new Map();
   const { rows } = await client.query<{ prompt_id: string; n: number }>(
     `SELECT data->>'promptId' AS prompt_id, COUNT(*)::int AS n
        FROM pgboss.job
@@ -142,7 +149,7 @@ test.describe("Prompt catalog import and paging", () => {
       });
       expect(res.ok(), `cleanup of ${id}: ${res.status()}`).toBeTruthy();
     }
-    if (createdIds.length > 0) {
+    if (createdIds.length > 0 && (await pendingChains(client, createdIds)).size > 0) {
       await client.query("DELETE FROM pgboss.job WHERE name = 'process-prompt' AND data->>'promptId' = ANY($1::text[])", [
         createdIds,
       ]);
@@ -308,7 +315,7 @@ test.describe("Prompt catalog import and paging", () => {
     await expect(page).toHaveURL(/q=legal/);
     await expectPromptRows(page, NEW_PROMPTS.branded, 1);
     const { rows } = await client.query(
-      "SELECT value FROM prompts WHERE id = ANY($1::text[]) AND value LIKE '%(edited)'",
+      "SELECT value FROM prompts WHERE id = ANY($1::uuid[]) AND value LIKE '%(edited)'",
       [createdIds],
     );
     expect(rows).toEqual([]);
