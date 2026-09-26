@@ -311,6 +311,26 @@ describe("computeMaintenanceDecisions with a first run spread over the cadence",
 		expect(decisions.alertOverdueCount).toBe(1);
 	});
 
+	it("still expedites a prompt with run history that is overdue, even when its job is due within an interval", () => {
+		const decisions = computeMaintenanceDecisions(
+			[
+				state({
+					promptId: "p1",
+					lastRunAtByKey: new Map([[targetKey(CHATGPT), new Date(NOW.getTime() - 48 * HOUR)]]),
+					pendingJob: {
+						jobId: "job-1",
+						state: "created",
+						consecutiveFailures: 0,
+						startAfter: new Date(NOW.getTime() + 20 * HOUR),
+					},
+				}),
+			],
+			NOW,
+		);
+		expect(decisions.toExpedite).toEqual([{ promptId: "p1", jobId: "job-1" }]);
+		expect(decisions.alertOverdueCount).toBe(1);
+	});
+
 	it("treats a job without a known start time as it always did", () => {
 		const decisions = computeMaintenanceDecisions(
 			[neverRan({ jobId: "job-1", state: "created", consecutiveFailures: 0 })],

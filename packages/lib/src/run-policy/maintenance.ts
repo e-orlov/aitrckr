@@ -57,14 +57,15 @@ type MaintenanceAction =
 	| { kind: "expedite"; jobId: string };
 
 /**
- * A future job that is due within one run interval is the chain working as
- * designed — a first run spread over the cadence, or the next run of a prompt
- * that is simply between cycles — not a job to drag forward or to alert on.
- * Anything further out than a full interval is stalled by definition.
+ * A prompt that has never run (within the maintenance window) and whose first
+ * job is due within one run interval is a start spread over the cadence, not
+ * a stalled chain: nothing to drag forward, nothing to alert on. A prompt
+ * with run history keeps the old rule — overdue means the data is stale and
+ * its future job is pulled forward — so a revived chain still runs now.
  */
-function hasScheduledJobWithinInterval(state: MaintenancePromptState, nowMs: number): boolean {
+function hasScheduledFirstRun(state: MaintenancePromptState, nowMs: number): boolean {
 	const job = state.pendingJob;
-	if (!job || job.state !== "created" || !job.startAfter) return false;
+	if (state.lastRunAtByKey.size > 0 || !job || job.state !== "created" || !job.startAfter) return false;
 	const startMs = job.startAfter.getTime();
 	const intervalMs = Math.min(...state.plan.targets.map((t) => t.intervalHours)) * 3600 * 1000;
 	return startMs > nowMs && startMs - nowMs <= intervalMs;
@@ -73,7 +74,7 @@ function hasScheduledJobWithinInterval(state: MaintenancePromptState, nowMs: num
 function actionForPrompt(state: MaintenancePromptState, nowMs: number): MaintenanceAction {
 	// A job that is running or retrying is already being handled.
 	if (state.pendingJob && state.pendingJob.state !== "created") return { kind: "none" };
-	if (hasScheduledJobWithinInterval(state, nowMs)) return { kind: "none" };
+	if (hasScheduledFirstRun(state, nowMs)) return { kind: "none" };
 
 	// A prompt with no recorded runs is inherently overdue: there is nothing
 	// fresh. This covers brand-new prompts and revived chains whose history
@@ -110,7 +111,7 @@ export function computeMaintenanceDecisions(promptStates: MaintenancePromptState
 		// No targets (unentitled org, no picks, outside the pool): the prompt is
 		// meant to be stopped. Not overdue, nothing to start, no alert noise.
 		if (state.plan.targets.length === 0 || state.plan.rescheduleHours === null) continue;
-		if (isPromptOverdue(state, nowMs, OVERDUE_ALERT_GRACE_MS) && !hasScheduledJobWithinInterval(state, nowMs)) {
+		if (isPromptOverdue(state, nowMs, OVERDUE_ALERT_GRACE_MS) && !hasScheduledFirstRun(state, nowMs)) {
 			decisions.alertOverdueCount++;
 		}
 
