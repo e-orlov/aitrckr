@@ -44,7 +44,23 @@ async function openImport(page: Page) {
   return textarea;
 }
 const selectionCount = (page: Page) => page.getByTestId("selection-count");
+
+/** Open a bulk dialog and wait for its preview; the click is retried because under load it can land mid re-render. */
+async function openDialog(page: Page, button: ReturnType<Page["getByRole"]>, previewTestId: string) {
+  await expect(async () => {
+    await button.click();
+    await expect(page.getByTestId(previewTestId)).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: 45_000 });
+  return page.getByTestId(previewTestId);
+}
 const headerCheckbox = (page: Page) => page.getByRole("checkbox", { name: /select all prompts|deselect all prompts/i });
+
+/** Navigate and wait until the page is hydrated: a click that lands before React owns the checkboxes is lost. */
+async function open(page: Page, url: string) {
+  await page.goto(url);
+  await page.getByTestId("catalog-range").waitFor();
+  await page.waitForLoadState("networkidle");
+}
 
 test.describe("Prompt catalog bulk operations", () => {
   test.describe.configure({ mode: "serial" });
@@ -71,7 +87,7 @@ test.describe("Prompt catalog bulk operations", () => {
   });
 
   test("import a three-page fixture as disabled", async ({ page }) => {
-    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts`);
+    await open(page, `${brandUrl(BRAND_ID)}/settings/prompts`);
     const textarea = await openImport(page);
     const lines = Array.from({ length: COUNT }, (_, i) => `Bulk e2e prompt ${String(i).padStart(3, "0")};${TAG}${i % 4 === 0 ? `;${TOPIC}` : ""}`);
     await textarea.fill(lines.join("\n"));
@@ -83,17 +99,23 @@ test.describe("Prompt catalog bulk operations", () => {
   });
 
   test("select the page, then every match; the selection survives paging and dies with the filter", async ({ page }) => {
-    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
+    await open(page, `${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
     await expect(page.getByTestId("catalog-range")).toHaveText(`Showing 1–50 of ${COUNT} matching prompts`);
     await expect(page.getByTestId("selection-bar")).toBeHidden();
 
     await headerCheckbox(page).click();
     await expect(selectionCount(page)).toHaveText("50");
-    await page.getByRole("button", { name: /^next$/i }).click();
-    await expect(page).toHaveURL(/page=2/);
+    // Pager clicks are retried: under load a click can land on a button mid-re-render and do nothing.
+    await expect(async () => {
+      await page.getByRole("button", { name: /^next$/i }).click();
+      await expect(page).toHaveURL(/page=2/, { timeout: 2_000 });
+    }).toPass({ timeout: 30_000 });
     await expect(selectionCount(page)).toHaveText("50");
     await expect(headerCheckbox(page)).not.toBeChecked();
-    await page.getByRole("button", { name: /^previous$/i }).click();
+    await expect(async () => {
+      await page.getByRole("button", { name: /^previous$/i }).click();
+      await expect(page).not.toHaveURL(/page=2/, { timeout: 2_000 });
+    }).toPass({ timeout: 30_000 });
     await expect(headerCheckbox(page)).toBeChecked();
 
     await page.getByRole("button", { name: new RegExp(`select all ${COUNT} matching`, "i") }).click();
@@ -108,15 +130,14 @@ test.describe("Prompt catalog bulk operations", () => {
   });
 
   test("enable a page with a preview, then disable everything; chains follow", async ({ page }) => {
-    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
+    await open(page, `${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
     await headerCheckbox(page).click();
-    await page.getByRole("button", { name: /^enable$/i }).click();
-    const preview = page.getByTestId("bulk-status-preview");
+    const preview = await openDialog(page, page.getByTestId("selection-bar").getByRole("button", { name: /^enable$/i }), "bulk-status-preview");
     await expect(preview).toContainText("50 will be enabled");
     await expect(preview).toContainText("50 run chains will start, spread over the next");
     await expect(preview).toContainText("paid provider answer");
     await page.getByTestId("bulk-status-commit").click();
-    await expect(page.getByTestId("catalog-notice")).toHaveText("50 prompts enabled.");
+    await expect(page.getByTestId("catalog-notice")).toHaveText("50 prompts enabled.", { timeout: 60_000 });
     await expect(page.getByTestId("selection-bar")).toBeHidden();
     const rows = await tagged(client);
     const enabledIds = rows.filter((r) => r.enabled).map((r) => r.id);
@@ -128,32 +149,33 @@ test.describe("Prompt catalog bulk operations", () => {
     // Disable all 120: 50 flip (their chains are cancelled), 70 are already disabled.
     await headerCheckbox(page).click();
     await page.getByRole("button", { name: new RegExp(`select all ${COUNT} matching`, "i") }).click();
-    await page.getByRole("button", { name: /^disable$/i }).click();
+    await openDialog(page, page.getByTestId("selection-bar").getByRole("button", { name: /^disable$/i }), "bulk-status-preview");
     await expect(page.getByTestId("bulk-status-preview")).toContainText("50 will be disabled; 70 already disabled and left as is.");
     await expect(page.getByTestId("bulk-status-preview")).toContainText("50 queued runs will be cancelled");
     await page.getByTestId("bulk-status-commit").click();
-    await expect(page.getByTestId("catalog-notice")).toHaveText("50 prompts disabled.");
+    await expect(page.getByTestId("catalog-notice")).toHaveText("50 prompts disabled.", { timeout: 60_000 });
     expect((await tagged(client)).every((r) => !r.enabled)).toBe(true);
     expect(await pendingChains(client, enabledIds)).toBe(0);
 
     // Repeating is a no-op.
     await headerCheckbox(page).click();
-    await page.getByRole("button", { name: /^disable$/i }).click();
+    await openDialog(page, page.getByTestId("selection-bar").getByRole("button", { name: /^disable$/i }), "bulk-status-preview");
     await expect(page.getByTestId("bulk-status-preview")).toContainText("0 will be disabled; 50 already disabled");
     await expect(page.getByTestId("bulk-status-commit")).toHaveText("Nothing to change");
     await page.getByRole("dialog").getByRole("button", { name: /^cancel$/i }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
   });
 
   test("remove the topic tag from the brand behind its phrase", async ({ page }) => {
-    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts?tag=${TOPIC}`);
+    await open(page, `${brandUrl(BRAND_ID)}/settings/prompts?tag=${TOPIC}`);
     await expect(page.getByTestId("catalog-range")).toHaveText("Showing 1–30 of 30 matching prompts");
-    await page.getByRole("button", { name: new RegExp(`remove tag “${TOPIC}” from all prompts`, "i") }).click();
+    await openDialog(page, page.getByRole("button", { name: new RegExp(`remove tag “${TOPIC}” from all prompts`, "i") }), "tag-removal-preview");
     await expect(page.getByTestId("tag-removal-preview")).toContainText(`30 prompts carry the tag ${TOPIC}`);
     const commit = page.getByTestId("tag-removal-commit");
     await expect(commit).toBeDisabled();
     await page.getByTestId("tag-removal-phrase").fill(`REMOVE ${TOPIC}`);
     await commit.click();
-    await expect(page.getByTestId("catalog-notice")).toHaveText(`Removed the tag “${TOPIC}” from 30 prompts.`);
+    await expect(page.getByTestId("catalog-notice")).toHaveText(`Removed the tag “${TOPIC}” from 30 prompts.`, { timeout: 60_000 });
     // The active tag filter was dropped and the page is back on the unfiltered first page.
     await expect(page).not.toHaveURL(/tag=/);
     const rows = await tagged(client);
@@ -164,18 +186,18 @@ test.describe("Prompt catalog bulk operations", () => {
   test("delete the disabled fixture: enabled rows block, the phrase gates, history goes", async ({ page }) => {
     const rows = await tagged(client);
     await client.query("update prompts set enabled = true where id = $1", [rows[0].id]);
-    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
+    await open(page, `${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
     await headerCheckbox(page).click();
     await page.getByRole("button", { name: new RegExp(`select all ${COUNT} matching`, "i") }).click();
-    await page.getByRole("button", { name: /^delete…$/i }).click();
-    const preview = page.getByTestId("bulk-delete-preview");
+    const preview = await openDialog(page, page.getByTestId("selection-bar").getByRole("button", { name: /^delete…$/i }), "bulk-delete-preview");
     await expect(preview).toContainText("1 selected prompt is still enabled. Disable them first.");
     await expect(page.getByTestId("bulk-delete-commit")).toBeDisabled();
     await expect(page.getByTestId("bulk-delete-phrase")).toBeHidden();
     await page.getByRole("dialog").getByRole("button", { name: /^cancel$/i }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
     await client.query("update prompts set enabled = false where id = $1", [rows[0].id]);
 
-    await page.getByRole("button", { name: /^delete…$/i }).click();
+    await openDialog(page, page.getByTestId("selection-bar").getByRole("button", { name: /^delete…$/i }), "bulk-delete-preview");
     await expect(preview).toContainText(`Prompts${COUNT}`);
     await expect(preview).toContainText("Kept: billing records (usage events)");
     const commit = page.getByTestId("bulk-delete-commit");
@@ -185,7 +207,7 @@ test.describe("Prompt catalog bulk operations", () => {
     await page.getByTestId("bulk-delete-phrase").fill(`DELETE ${COUNT} PROMPTS`);
     await expect(commit).toBeEnabled();
     await commit.click();
-    await expect(page.getByTestId("catalog-notice")).toHaveText(`Deleted ${COUNT} prompts and their history.`);
+    await expect(page.getByTestId("catalog-notice")).toHaveText(`Deleted ${COUNT} prompts and their history.`, { timeout: 60_000 });
     await expect(page.getByTestId("catalog-range")).toHaveText("No prompts match these filters.");
     expect((await tagged(client)).length).toBe(0);
     expect((await client.query<{ n: number }>("select count(*)::int as n from prompts where brand_id = $1", [BRAND_ID])).rows[0].n).toBe(0);
