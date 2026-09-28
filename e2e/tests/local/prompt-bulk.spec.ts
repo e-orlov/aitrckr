@@ -1,0 +1,188 @@
+/**
+ * Bulk operations on the prompt catalog, end to end on the local test stack
+ * with the worker down: select a page and every match of a filter, lose the
+ * selection when the filter changes, disable and enable with previews, delete
+ * only disabled prompts behind the typed phrase, remove a tag from the brand.
+ *
+ * The prompts this creates are imported through the UI (disabled) and deleted
+ * through the UI, so the seeded fixtures other specs assert on are left alone.
+ */
+import { expect, type Page, test } from "@playwright/test";
+import pg from "pg";
+import { brandUrl, DATABASE_URL, TEST_BRAND_ID } from "../../fixtures";
+
+const TAG = "bulk-e2e";
+const TOPIC = "bulk-e2e-topic";
+const COUNT = 120; // three pages at fifty per page
+
+async function pgbossPresent(client: pg.Client) {
+  return (await client.query("select to_regclass('pgboss.job') is not null as present")).rows[0].present as boolean;
+}
+async function pendingChains(client: pg.Client, ids: string[]) {
+  if (!(await pgbossPresent(client))) return 0;
+  const { rows } = await client.query<{ n: number }>(
+    `select count(*)::int as n from pgboss.job where name = 'process-prompt' and state in ('created','retry','active') and data->>'promptId' = any($1::text[])`,
+    [ids],
+  );
+  return rows[0].n;
+}
+async function tagged(client: pg.Client) {
+  const { rows } = await client.query<{ id: string; enabled: boolean; tags: string[] }>(
+    "select id, enabled, tags from prompts where brand_id = $1 and $2 = any(tags) order by value",
+    [TEST_BRAND_ID, TAG],
+  );
+  return rows;
+}
+
+async function openImport(page: Page) {
+  const textarea = page.getByRole("textbox", { name: /prompts to import/i });
+  await expect(async () => {
+    await page.getByRole("button", { name: /^import prompts$/i }).click();
+    await expect(textarea).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 30_000 });
+  return textarea;
+}
+const selectionCount = (page: Page) => page.getByTestId("selection-count");
+const headerCheckbox = (page: Page) => page.getByRole("checkbox", { name: /select all prompts|deselect all prompts/i });
+
+test.describe("Prompt catalog bulk operations", () => {
+  test.describe.configure({ mode: "serial" });
+  let client: pg.Client;
+  let countBefore: number;
+
+  test.beforeAll(async () => {
+    client = new pg.Client({ connectionString: DATABASE_URL });
+    await client.connect();
+    countBefore = (await client.query<{ n: number }>("select count(*)::int as n from prompts where brand_id = $1", [TEST_BRAND_ID])).rows[0].n;
+  });
+  test.afterAll(async () => {
+    // Belt and braces: whatever the UI did not delete goes through SQL so other specs see the fixtures they expect.
+    const ids = (await tagged(client)).map((r) => r.id);
+    if (ids.length > 0) {
+      if (await pgbossPresent(client)) await client.query("delete from pgboss.job where name='process-prompt' and data->>'promptId' = any($1::text[])", [ids]);
+      await client.query("delete from prompts where id = any($1::uuid[])", [ids]);
+    }
+    await client.end();
+  });
+
+  test("import a three-page fixture as disabled", async ({ page }) => {
+    await page.goto(`${brandUrl()}/settings/prompts`);
+    const textarea = await openImport(page);
+    const lines = Array.from({ length: COUNT }, (_, i) => `Bulk e2e prompt ${String(i).padStart(3, "0")};${TAG}${i % 4 === 0 ? `;${TOPIC}` : ""}`);
+    await textarea.fill(lines.join("\n"));
+    await page.getByRole("button", { name: /^review$/i }).click();
+    await expect(page.getByTestId("prompt-import-review")).toContainText(`${COUNT} prompts will be added as disabled`);
+    await page.getByRole("button", { name: new RegExp(`^import ${COUNT} prompts$`, "i") }).click();
+    await expect(page.getByRole("status").filter({ hasText: `Imported ${COUNT} prompts as disabled.` })).toBeVisible({ timeout: 60_000 });
+    expect((await tagged(client)).length).toBe(COUNT);
+  });
+
+  test("select the page, then every match; the selection survives paging and dies with the filter", async ({ page }) => {
+    await page.goto(`${brandUrl()}/settings/prompts?tag=${TAG}`);
+    await expect(page.getByTestId("catalog-range")).toHaveText(`Showing 1–50 of ${COUNT} matching prompts`);
+    await expect(page.getByTestId("selection-bar")).toBeHidden();
+
+    await headerCheckbox(page).click();
+    await expect(selectionCount(page)).toHaveText("50");
+    await page.getByRole("button", { name: /^next$/i }).click();
+    await expect(page).toHaveURL(/page=2/);
+    await expect(selectionCount(page)).toHaveText("50");
+    await expect(headerCheckbox(page)).not.toBeChecked();
+    await page.getByRole("button", { name: /^previous$/i }).click();
+    await expect(headerCheckbox(page)).toBeChecked();
+
+    await page.getByRole("button", { name: new RegExp(`select all ${COUNT} matching`, "i") }).click();
+    await expect(selectionCount(page)).toHaveText(String(COUNT));
+
+    // Changing the filter clears the selection.
+    await page.getByRole("textbox", { name: /search prompt text/i }).fill("prompt 00");
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/q=prompt/);
+    await expect(page.getByTestId("selection-bar")).toBeHidden();
+    await page.getByRole("button", { name: /clear filters/i }).click();
+  });
+
+  test("enable a page with a preview, then disable everything; chains follow", async ({ page }) => {
+    await page.goto(`${brandUrl()}/settings/prompts?tag=${TAG}`);
+    await headerCheckbox(page).click();
+    await page.getByRole("button", { name: /^enable$/i }).click();
+    const preview = page.getByTestId("bulk-status-preview");
+    await expect(preview).toContainText("50 will be enabled");
+    await expect(preview).toContainText("50 run chains will start, spread over the next");
+    await expect(preview).toContainText("paid provider answer");
+    await page.getByTestId("bulk-status-commit").click();
+    await expect(page.getByTestId("catalog-notice")).toHaveText("50 prompts enabled.");
+    await expect(page.getByTestId("selection-bar")).toBeHidden();
+    const rows = await tagged(client);
+    const enabledIds = rows.filter((r) => r.enabled).map((r) => r.id);
+    expect(enabledIds).toHaveLength(50);
+    await expect.poll(() => pendingChains(client, enabledIds), { timeout: 30_000 }).toBe(50);
+    const starts = (await client.query<{ s: Date }>("select start_after as s from pgboss.job where name='process-prompt' and state='created' and data->>'promptId' = any($1::text[])", [enabledIds])).rows;
+    expect(new Set(starts.map((r) => r.s.getTime())).size).toBeGreaterThan(40);
+
+    // Disable all 120: 50 flip (their chains are cancelled), 70 are already disabled.
+    await headerCheckbox(page).click();
+    await page.getByRole("button", { name: new RegExp(`select all ${COUNT} matching`, "i") }).click();
+    await page.getByRole("button", { name: /^disable$/i }).click();
+    await expect(page.getByTestId("bulk-status-preview")).toContainText("50 will be disabled; 70 already disabled and left as is.");
+    await expect(page.getByTestId("bulk-status-preview")).toContainText("50 queued runs will be cancelled");
+    await page.getByTestId("bulk-status-commit").click();
+    await expect(page.getByTestId("catalog-notice")).toHaveText("50 prompts disabled.");
+    expect((await tagged(client)).every((r) => !r.enabled)).toBe(true);
+    expect(await pendingChains(client, enabledIds)).toBe(0);
+
+    // Repeating is a no-op.
+    await headerCheckbox(page).click();
+    await page.getByRole("button", { name: /^disable$/i }).click();
+    await expect(page.getByTestId("bulk-status-preview")).toContainText("0 will be disabled; 50 already disabled");
+    await expect(page.getByTestId("bulk-status-commit")).toHaveText("Nothing to change");
+    await page.getByRole("dialog").getByRole("button", { name: /^cancel$/i }).click();
+  });
+
+  test("remove the topic tag from the brand behind its phrase", async ({ page }) => {
+    await page.goto(`${brandUrl()}/settings/prompts?tag=${TOPIC}`);
+    await expect(page.getByTestId("catalog-range")).toHaveText("Showing 1–30 of 30 matching prompts");
+    await page.getByRole("button", { name: new RegExp(`remove tag “${TOPIC}” from all prompts`, "i") }).click();
+    await expect(page.getByTestId("tag-removal-preview")).toContainText(`30 prompts carry the tag ${TOPIC}`);
+    const commit = page.getByTestId("tag-removal-commit");
+    await expect(commit).toBeDisabled();
+    await page.getByTestId("tag-removal-phrase").fill(`REMOVE ${TOPIC}`);
+    await commit.click();
+    await expect(page.getByTestId("catalog-notice")).toHaveText(`Removed the tag “${TOPIC}” from 30 prompts.`);
+    // The active tag filter was dropped and the page is back on the unfiltered first page.
+    await expect(page).not.toHaveURL(/tag=/);
+    const rows = await tagged(client);
+    expect(rows).toHaveLength(COUNT);
+    expect(rows.every((r) => !r.tags.includes(TOPIC) && r.tags.includes(TAG))).toBe(true);
+  });
+
+  test("delete the disabled fixture: enabled rows block, the phrase gates, history goes", async ({ page }) => {
+    const rows = await tagged(client);
+    await client.query("update prompts set enabled = true where id = $1", [rows[0].id]);
+    await page.goto(`${brandUrl()}/settings/prompts?tag=${TAG}`);
+    await headerCheckbox(page).click();
+    await page.getByRole("button", { name: new RegExp(`select all ${COUNT} matching`, "i") }).click();
+    await page.getByRole("button", { name: /^delete…$/i }).click();
+    const preview = page.getByTestId("bulk-delete-preview");
+    await expect(preview).toContainText("1 selected prompt is still enabled. Disable them first.");
+    await expect(page.getByTestId("bulk-delete-commit")).toBeDisabled();
+    await expect(page.getByTestId("bulk-delete-phrase")).toBeHidden();
+    await page.getByRole("dialog").getByRole("button", { name: /^cancel$/i }).click();
+    await client.query("update prompts set enabled = false where id = $1", [rows[0].id]);
+
+    await page.getByRole("button", { name: /^delete…$/i }).click();
+    await expect(preview).toContainText(`Prompts${COUNT}`);
+    await expect(preview).toContainText("Kept: billing records (usage events)");
+    const commit = page.getByTestId("bulk-delete-commit");
+    await expect(commit).toBeDisabled();
+    await page.getByTestId("bulk-delete-phrase").fill(`DELETE ${COUNT} PROMPT`);
+    await expect(commit).toBeDisabled();
+    await page.getByTestId("bulk-delete-phrase").fill(`DELETE ${COUNT} PROMPTS`);
+    await expect(commit).toBeEnabled();
+    await commit.click();
+    await expect(page.getByTestId("catalog-notice")).toHaveText(`Deleted ${COUNT} prompts and their history.`);
+    await expect(page.getByTestId("catalog-range")).toHaveText("No prompts match these filters.");
+    expect((await tagged(client)).length).toBe(0);
+    expect((await client.query<{ n: number }>("select count(*)::int as n from prompts where brand_id = $1", [TEST_BRAND_ID])).rows[0].n).toBe(countBefore);
+  });
+});
