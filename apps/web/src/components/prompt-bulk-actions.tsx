@@ -20,7 +20,7 @@ import {
 import { Input } from "@workspace/ui/components/input";
 import { Spinner } from "@workspace/ui/components/spinner";
 import { Trash2 } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useWriteErrorMessage } from "@/lib/write-errors";
 import {
 	BULK_STATUS_FAILED,
@@ -73,10 +73,9 @@ export function SelectionBar({
 	const canSelectAll = matchingTotal > selectedCount && matchingTotal > pageSize;
 	const allTarget = Math.min(matchingTotal, selectionCap);
 	return (
-		<div
+		<section
 			className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-md border bg-muted/40 px-3 py-2 text-sm"
 			data-testid="selection-bar"
-			role="region"
 			aria-label="Selected prompts"
 		>
 			<div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -145,7 +144,7 @@ export function SelectionBar({
 					Clear selection
 				</Button>
 			</div>
-		</div>
+		</section>
 	);
 }
 
@@ -170,7 +169,6 @@ function useAction<P>(
 	const [preview, setPreview] = useState<P | null>(null);
 	const [phase, setPhase] = useState<Phase>("loading");
 	const [error, setError] = useState<string | null>(null);
-	const [nonce, setNonce] = useState(0);
 	const writeError = useWriteErrorMessage();
 	// The preview is fetched when the dialog opens (and on an explicit reload),
 	// not whenever the caller re-renders with a fresh `load` closure.
@@ -178,13 +176,7 @@ function useAction<P>(
 	loadRef.current = load;
 	const writeErrorRef = useRef(writeError);
 	writeErrorRef.current = writeError;
-	useEffect(() => {
-		if (!open) {
-			setPreview(null);
-			setError(null);
-			setPhase("loading");
-			return;
-		}
+	const run = useCallback(() => {
 		let cancelled = false;
 		setPhase("loading");
 		setError(null);
@@ -204,13 +196,66 @@ function useAction<P>(
 		return () => {
 			cancelled = true;
 		};
-	}, [open, nonce, fallback]);
-	return { preview, phase, error, setPhase, setError, reload: () => setNonce((v) => v + 1) };
+	}, [fallback]);
+	useEffect(() => {
+		if (!open) {
+			setPreview(null);
+			setError(null);
+			setPhase("loading");
+			return;
+		}
+		return run();
+	}, [open, run]);
+	return {
+		preview,
+		phase,
+		error,
+		setPhase,
+		setError,
+		reload: () => {
+			run();
+		},
+	};
 }
 
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
+
+function StatusPreview({ p, target }: { p: BulkStatusPreview; target: boolean }) {
+	return (
+		<ul className="space-y-1 text-sm" data-testid="bulk-status-preview">
+			<li>
+				<strong>{n(p.changing)}</strong> will be {target ? "enabled" : "disabled"}
+				{p.alreadyInState > 0 && (
+					<>
+						; <strong>{n(p.alreadyInState)}</strong> already {target ? "enabled" : "disabled"} and left as is
+					</>
+				)}
+				.
+			</li>
+			{p.unknown > 0 && (
+				<li className="text-destructive">
+					{plural(p.unknown, "selected prompt is", "selected prompts are")} not in this brand any more — the operation
+					will be refused. Clear the selection and select again.
+				</li>
+			)}
+			{target && p.chainsToStart > 0 && (
+				<li>
+					{plural(p.chainsToStart, "run chain")} will start, spread over the next {n(p.cadenceHours)} hours, and then
+					run every {n(p.cadenceHours)} hours. Every run is a paid provider answer, and each answer may add a sentiment
+					classification: expect the bill to grow with the number of enabled prompts. This is not an exact amount.
+				</li>
+			)}
+			{!target && (p.queuedJobs > 0 || p.activeJobs > 0) && (
+				<li>
+					{plural(p.queuedJobs, "queued run")} will be cancelled
+					{p.activeJobs > 0 && <>; {plural(p.activeJobs, "run")} already in progress will finish once and then stop</>}.
+				</li>
+			)}
+		</ul>
+	);
+}
 
 export function BulkStatusDialog({
 	brandId,
@@ -269,42 +314,7 @@ export function BulkStatusDialog({
 						<Spinner /> Checking the selection…
 					</p>
 				)}
-				{p && (
-					<ul className="space-y-1 text-sm" data-testid="bulk-status-preview">
-						<li>
-							<strong>{n(p.changing)}</strong> will be {target ? "enabled" : "disabled"}
-							{p.alreadyInState > 0 && (
-								<>
-									; <strong>{n(p.alreadyInState)}</strong> already {target ? "enabled" : "disabled"} and left as is
-								</>
-							)}
-							.
-						</li>
-						{p.unknown > 0 && (
-							<li className="text-destructive">
-								{plural(p.unknown, "selected prompt is", "selected prompts are")} not in this brand any more — the
-								operation will be refused. Clear the selection and select again.
-							</li>
-						)}
-						{target && p.chainsToStart > 0 && (
-							<li>
-								{plural(p.chainsToStart, "run chain")} will start, spread over the next {n(p.cadenceHours)} hours, and
-								then run every {n(p.cadenceHours)} hours. Every run is a paid provider answer, and each answer may add a
-								sentiment classification: expect the bill to grow with the number of enabled prompts. This is not an
-								exact amount.
-							</li>
-						)}
-						{!target && (p.queuedJobs > 0 || p.activeJobs > 0) && (
-							<li>
-								{plural(p.queuedJobs, "queued run")} will be cancelled
-								{p.activeJobs > 0 && (
-									<>; {plural(p.activeJobs, "run")} already in progress will finish once and then stop</>
-								)}
-								.
-							</li>
-						)}
-					</ul>
-				)}
+				{p && <StatusPreview p={p} target={target} />}
 				{action.error && (
 					<p role="alert" className="text-sm text-destructive">
 						{action.error}
