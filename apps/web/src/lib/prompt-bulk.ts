@@ -4,12 +4,14 @@ import { z } from "zod";
 export const MAX_BULK_SELECTION = 10_000;
 
 /**
- * Most prompts one delete commit may take. Measured on a restored copy with
- * representative history (see the R2 closeout): a full-cap delete of prompts
- * with runs, citations and sentiment graphs completes well inside the lock
- * and statement budget, so the cap equals the selection cap.
+ * Most prompts one delete commit may take. Measured on a restored copy of
+ * production with two answers, three citations and a full sentiment graph per
+ * prompt (migration 0027 indexes in place): 1 000 prompts delete in ≈1.8 s,
+ * 5 000 in ≈7 s, 10 000 in ≈14 s — all inside one transaction that holds the
+ * brand's insert lock. Five thousand keeps that lock, and the request, under
+ * ten seconds on the production VM; a larger selection is two operations.
  */
-export const MAX_DELETE_BATCH = 10_000;
+export const MAX_DELETE_BATCH = 5_000;
 
 export const promptIdListSchema = z
 	.array(z.string().uuid())
