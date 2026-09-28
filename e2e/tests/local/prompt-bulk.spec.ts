@@ -4,13 +4,14 @@
  * selection when the filter changes, disable and enable with previews, delete
  * only disabled prompts behind the typed phrase, remove a tag from the brand.
  *
- * The prompts this creates are imported through the UI (disabled) and deleted
- * through the UI, so the seeded fixtures other specs assert on are left alone.
+ * Everything happens in a brand this spec creates inside the test org, so the
+ * seeded brand other specs run against concurrently is never touched.
  */
 import { expect, type Page, test } from "@playwright/test";
 import pg from "pg";
-import { brandUrl, DATABASE_URL, TEST_BRAND_ID } from "../../fixtures";
+import { brandUrl, DATABASE_URL, TEST_ORG_SLUG } from "../../fixtures";
 
+const BRAND_ID = "bulk-e2e-brand";
 const TAG = "bulk-e2e";
 const TOPIC = "bulk-e2e-topic";
 const COUNT = 120; // three pages at fifty per page
@@ -29,7 +30,7 @@ async function pendingChains(client: pg.Client, ids: string[]) {
 async function tagged(client: pg.Client) {
   const { rows } = await client.query<{ id: string; enabled: boolean; tags: string[] }>(
     "select id, enabled, tags from prompts where brand_id = $1 and $2 = any(tags) order by value",
-    [TEST_BRAND_ID, TAG],
+    [BRAND_ID, TAG],
   );
   return rows;
 }
@@ -48,25 +49,29 @@ const headerCheckbox = (page: Page) => page.getByRole("checkbox", { name: /selec
 test.describe("Prompt catalog bulk operations", () => {
   test.describe.configure({ mode: "serial" });
   let client: pg.Client;
-  let countBefore: number;
 
   test.beforeAll(async () => {
     client = new pg.Client({ connectionString: DATABASE_URL });
     await client.connect();
-    countBefore = (await client.query<{ n: number }>("select count(*)::int as n from prompts where brand_id = $1", [TEST_BRAND_ID])).rows[0].n;
+    await client.query(
+      `insert into brands (id, organization_id, slug, name, website, enabled, onboarded, created_at, updated_at)
+       values ($1, $2, $1, 'Bulk E2E Brand', 'https://bulk-e2e.example', true, true, now(), now()) on conflict (id) do nothing`,
+      [BRAND_ID, TEST_ORG_SLUG],
+    );
   });
   test.afterAll(async () => {
-    // Belt and braces: whatever the UI did not delete goes through SQL so other specs see the fixtures they expect.
-    const ids = (await tagged(client)).map((r) => r.id);
+    // Belt and braces: whatever the UI did not delete goes through SQL, then the brand itself.
+    const ids = (await client.query<{ id: string }>("select id from prompts where brand_id = $1", [BRAND_ID])).rows.map((r) => r.id);
     if (ids.length > 0) {
       if (await pgbossPresent(client)) await client.query("delete from pgboss.job where name='process-prompt' and data->>'promptId' = any($1::text[])", [ids]);
       await client.query("delete from prompts where id = any($1::uuid[])", [ids]);
     }
+    await client.query("delete from brands where id = $1", [BRAND_ID]);
     await client.end();
   });
 
   test("import a three-page fixture as disabled", async ({ page }) => {
-    await page.goto(`${brandUrl()}/settings/prompts`);
+    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts`);
     const textarea = await openImport(page);
     const lines = Array.from({ length: COUNT }, (_, i) => `Bulk e2e prompt ${String(i).padStart(3, "0")};${TAG}${i % 4 === 0 ? `;${TOPIC}` : ""}`);
     await textarea.fill(lines.join("\n"));
@@ -78,7 +83,7 @@ test.describe("Prompt catalog bulk operations", () => {
   });
 
   test("select the page, then every match; the selection survives paging and dies with the filter", async ({ page }) => {
-    await page.goto(`${brandUrl()}/settings/prompts?tag=${TAG}`);
+    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
     await expect(page.getByTestId("catalog-range")).toHaveText(`Showing 1–50 of ${COUNT} matching prompts`);
     await expect(page.getByTestId("selection-bar")).toBeHidden();
 
@@ -103,7 +108,7 @@ test.describe("Prompt catalog bulk operations", () => {
   });
 
   test("enable a page with a preview, then disable everything; chains follow", async ({ page }) => {
-    await page.goto(`${brandUrl()}/settings/prompts?tag=${TAG}`);
+    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
     await headerCheckbox(page).click();
     await page.getByRole("button", { name: /^enable$/i }).click();
     const preview = page.getByTestId("bulk-status-preview");
@@ -140,7 +145,7 @@ test.describe("Prompt catalog bulk operations", () => {
   });
 
   test("remove the topic tag from the brand behind its phrase", async ({ page }) => {
-    await page.goto(`${brandUrl()}/settings/prompts?tag=${TOPIC}`);
+    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts?tag=${TOPIC}`);
     await expect(page.getByTestId("catalog-range")).toHaveText("Showing 1–30 of 30 matching prompts");
     await page.getByRole("button", { name: new RegExp(`remove tag “${TOPIC}” from all prompts`, "i") }).click();
     await expect(page.getByTestId("tag-removal-preview")).toContainText(`30 prompts carry the tag ${TOPIC}`);
@@ -159,7 +164,7 @@ test.describe("Prompt catalog bulk operations", () => {
   test("delete the disabled fixture: enabled rows block, the phrase gates, history goes", async ({ page }) => {
     const rows = await tagged(client);
     await client.query("update prompts set enabled = true where id = $1", [rows[0].id]);
-    await page.goto(`${brandUrl()}/settings/prompts?tag=${TAG}`);
+    await page.goto(`${brandUrl(BRAND_ID)}/settings/prompts?tag=${TAG}`);
     await headerCheckbox(page).click();
     await page.getByRole("button", { name: new RegExp(`select all ${COUNT} matching`, "i") }).click();
     await page.getByRole("button", { name: /^delete…$/i }).click();
@@ -183,6 +188,6 @@ test.describe("Prompt catalog bulk operations", () => {
     await expect(page.getByTestId("catalog-notice")).toHaveText(`Deleted ${COUNT} prompts and their history.`);
     await expect(page.getByTestId("catalog-range")).toHaveText("No prompts match these filters.");
     expect((await tagged(client)).length).toBe(0);
-    expect((await client.query<{ n: number }>("select count(*)::int as n from prompts where brand_id = $1", [TEST_BRAND_ID])).rows[0].n).toBe(countBefore);
+    expect((await client.query<{ n: number }>("select count(*)::int as n from prompts where brand_id = $1", [BRAND_ID])).rows[0].n).toBe(0);
   });
 });
