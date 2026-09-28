@@ -10,7 +10,7 @@
  * a tag removal touches only the tag array.
  */
 import pg from "pg";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must point at the seeded test stack");
@@ -287,6 +287,66 @@ describe("bulk status", () => {
 			),
 		).toBe(20);
 	}, 60_000);
+
+	/**
+	 * Enable starts the chains after the commit, off the request. This forces
+	 * the worst ordering: the chain start has already decided to send when the
+	 * disable of the same prompt begins. Either the disable waits for the
+	 * insert and cancels it, or it lands first and the send sees the prompt
+	 * disabled — but a queued chain for a disabled prompt must never remain.
+	 */
+	it("leaves no queued chain when a disable lands between the chain start's check and its send", async () => {
+		const brand = await loadBrand(BRAND);
+		const [id] = await seedPrompts(BRAND, 1, "BULK race");
+		await q(`update prompts set enabled = false where id = $1`, [id]);
+		const on = await bulk.commitBulkStatus(brand, [id], true);
+		expect(on.enabledIds).toEqual([id]);
+
+		const boss = await getBoss();
+		const realSend = boss.send.bind(boss);
+		let disable: Promise<unknown> | null = null;
+		const sendSpy = vi.spyOn(boss, "send").mockImplementation(async (...args: Parameters<typeof boss.send>) => {
+			if (!disable) {
+				disable = bulk.commitBulkStatus(brand, [id], false);
+				// Continue only once the disable has either finished or is blocked on
+				// a lock held by this chain start — both are stable, observable states.
+				let settled = false;
+				disable.finally(() => {
+					settled = true;
+				});
+				await expect
+					.poll(
+						async () =>
+							settled ||
+							(await n(
+								`select count(*)::text as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query ilike '%prompts%'`,
+							)) > 0,
+						{ timeout: 10_000, interval: 25 },
+					)
+					.toBe(true);
+			}
+			return realSend(...args);
+		});
+		try {
+			await scheduleFirstPromptRuns([id]);
+			expect(sendSpy).toHaveBeenCalled();
+			await disable;
+		} finally {
+			sendSpy.mockRestore();
+		}
+
+		expect((await q<{ enabled: boolean }>(`select enabled from prompts where id = $1`, [id]))[0].enabled).toBe(false);
+		const byState = Object.fromEntries(
+			(
+				await q<{ state: string; n: string }>(
+					`select state::text, count(*)::text as n from pgboss.job where name='process-prompt' and data->>'promptId' = $1 group by state`,
+					[id],
+				)
+			).map((r) => [r.state, Number(r.n)]),
+		);
+		// The disable waited for the insert and cancelled it: one cancelled job, nothing queued.
+		expect(byState).toEqual({ cancelled: 1 });
+	}, 30_000);
 
 	it("refuses a selection with a foreign id without touching anything", async () => {
 		const brand = await loadBrand(BRAND);
