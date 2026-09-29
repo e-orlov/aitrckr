@@ -356,9 +356,17 @@ export const openrouter: Provider = {
 			max_tokens: API_PROVIDER_MAX_OUTPUT_TOKENS.openrouter,
 		};
 
-		// Luna: optional web search with auto tool choice and disabled plugin.
-		// Other models: required search when enabled, for consistency with tracked runs.
+		// Luna: Flex routing only; optional web search with auto tool choice and disabled plugin.
+		// Other models: standard routing; required search when enabled, for consistency with tracked runs.
 		if (isLunaModel) {
+			// Enforce OpenAI Flex tier: Luna must route through openai/flex endpoint only.
+			// max_price filters by declared endpoint pricing; billing follows actual tier served.
+			body.service_tier = "flex";
+			body.provider = {
+				only: ["openai/flex"],
+				allow_fallbacks: false,
+				max_price: { prompt: 0.1, completion: 0.6 },
+			};
 			// Disable the default OpenRouter web plugin, which could bypass tool_choice: "auto"
 			body.plugins = [{ id: "web", enabled: false }];
 			if (options.webSearch) {
@@ -366,7 +374,7 @@ export const openrouter: Provider = {
 				Object.assign(body, webSearchRequestFields("auto"));
 			}
 		} else {
-			// Non-Luna models maintain required search behavior
+			// Non-Luna models maintain standard routing and required search behavior
 			if (options.webSearch) {
 				Object.assign(body, webSearchRequestFields("required"));
 			}
@@ -377,31 +385,67 @@ export const openrouter: Provider = {
 		// The SDK's Responses API (client.responses.send()) does preserve annotations
 		// via ResponseOutputText, but it's currently in beta. Consider switching to
 		// the Responses API + SDK when it's stable.
-		const res = await fetch(OPENROUTER_API_URL, {
-			method: "POST",
-			headers: openrouterHeaders(),
-			body: JSON.stringify(body),
-		});
 
-		if (!res.ok) {
-			throw new Error(`OpenRouter API error (${res.status}): ${await res.text()}`);
+		// Luna: Apply 15-minute timeout only for Luna queries.
+		// Other models use default fetch timeout.
+		let controller: AbortController | null = null;
+		let timeoutId: ReturnType<typeof setTimeout> | null = null;
+		if (isLunaModel) {
+			controller = new AbortController();
+			timeoutId = setTimeout(() => controller?.abort(), 900_000); // 15 minutes
 		}
 
-		const data: any = await res.json();
+		try {
+			const res = await fetch(OPENROUTER_API_URL, {
+				method: "POST",
+				headers: openrouterHeaders(),
+				body: JSON.stringify(body),
+				...(controller ? { signal: controller.signal } : {}),
+			});
 
-		warnIfOutputCapped("openrouter", modelSlug, data?.choices?.[0]?.finish_reason);
+			if (!res.ok) {
+				throw new Error(`OpenRouter API error (${res.status}): ${await res.text()}`);
+			}
 
-		const citations = extractCitationsFromOpenRouterResponse(data);
-		// OpenRouter doesn't expose what search queries the model made internally.
-		// Only mark as "unavailable" when citations prove a web search happened.
-		const webQueries = citations.length > 0 ? [WEB_QUERIES_UNAVAILABLE] : [];
+			const data: any = await res.json();
 
-		return {
-			rawOutput: data,
-			textContent: extractTextFromOpenRouterResponse(data),
-			webQueries,
-			citations,
-			modelVersion: data?.model ?? modelSlug,
-		};
+			// Luna: verify the response was actually served by Flex tier.
+			// If response carries a different tier, it's a billing contract violation.
+			if (isLunaModel) {
+				const responseTier = data?.service_tier;
+				if (responseTier !== "flex") {
+					// Billing contract violation: Luna was requested from Flex but served as something else.
+					// Mark with incident flag so worker can log to database and lock Luna queries.
+					const error = new Error(
+						`Luna service_tier contract violation: requested flex, received ${responseTier ?? "null"}. ` +
+							`Generation ID: ${data?.id ?? "unknown"}.`,
+					);
+					(error as any).generationId = data?.id;
+					(error as any).responseTier = responseTier;
+					(error as any).usageSnapshot = data?.usage;
+					(error as any).isFlexBillingIncident = true;
+					throw error;
+				}
+			}
+
+			warnIfOutputCapped("openrouter", modelSlug, data?.choices?.[0]?.finish_reason);
+
+			const citations = extractCitationsFromOpenRouterResponse(data);
+			// OpenRouter doesn't expose what search queries the model made internally.
+			// Only mark as "unavailable" when citations prove a web search happened.
+			const webQueries = citations.length > 0 ? [WEB_QUERIES_UNAVAILABLE] : [];
+
+			return {
+				rawOutput: data,
+				textContent: extractTextFromOpenRouterResponse(data),
+				webQueries,
+				citations,
+				modelVersion: data?.model ?? modelSlug,
+			};
+		} finally {
+			if (timeoutId !== null) {
+				clearTimeout(timeoutId);
+			}
+		}
 	},
 };

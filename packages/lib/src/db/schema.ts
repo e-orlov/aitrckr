@@ -1026,6 +1026,27 @@ export type SentimentDispatchPermit = typeof sentimentDispatchPermits.$inferSele
 export type SentimentProviderBreaker = typeof sentimentProviderBreakers.$inferSelect;
 export type SentimentAlertState = typeof sentimentAlertState.$inferSelect;
 
+// Luna Flex billing incident tracking: locks Luna queries after service_tier contract violation.
+// Reset only via explicit operator action after incident investigation.
+export const lunaFlexIncidents = pgTable(
+	"luna_flex_incidents",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		generationId: text("generation_id").notNull().unique(),
+		requestedTier: text("requested_tier").notNull().default("flex"),
+		responseTier: text("response_tier"),
+		usageSnapshot: jsonb("usage_snapshot"),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		status: text("status").notNull().default("active"), // 'active' | 'resolved'
+		operatorNotes: text("operator_notes"),
+	},
+	(table) => ({
+		statusIdx: index("luna_flex_incidents_status_idx").on(table.status),
+	}),
+).enableRLS();
+
+export type LunaFlexIncident = typeof lunaFlexIncidents.$inferSelect;
+
 // Encrypted overrides for credential environment variables, keyed by the env-var
 // name they stand in for. Separate table, strictest access.
 export const secrets = pgTable("secrets", {

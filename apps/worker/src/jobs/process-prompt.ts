@@ -7,6 +7,7 @@ import {
 	brands,
 	type Competitor,
 	citations,
+	lunaFlexIncidents,
 	promptRuns,
 	prompts,
 	usageEvents,
@@ -336,6 +337,25 @@ async function runModelIteration({
 }): Promise<Citation[]> {
 	const logPrefix = `[${config.model}_${runIndex}]`;
 
+	// Luna: Check for active billing incidents before attempting to run
+	if (config.model === "chatgpt" && config.version === "openai/gpt-5.6-luna") {
+		const activeIncident = await db
+			.select()
+			.from(lunaFlexIncidents)
+			.where(eq(lunaFlexIncidents.status, "active"))
+			.limit(1);
+
+		if (activeIncident.length > 0) {
+			const incident = activeIncident[0];
+			const error = new Error(
+				`Luna Flex billing incident lock: active incident ${incident.id} (generation ${incident.generationId}). ` +
+					`Manual operator action required to reset.`,
+			);
+			(error as any).isLunaIncidentLocked = true;
+			throw error;
+		}
+	}
+
 	try {
 		const result = await providerImpl.run(config.model, promptValue, {
 			webSearch: config.webSearch,
@@ -556,6 +576,64 @@ async function processPrompt(
 
 	const results = await Promise.allSettled(runPromises);
 	const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+
+	// Check for Luna Flex billing incidents and Luna lock status
+	const billingIncidents = failures.filter((f) => (f.reason as any)?.isFlexBillingIncident === true);
+	const lunaLocked = failures.filter((f) => (f.reason as any)?.isLunaIncidentLocked === true);
+
+	// Log billing incidents to database and alert
+	for (const incident of billingIncidents) {
+		const generationId = (incident.reason as any)?.generationId ?? "unknown";
+		const responseTier = (incident.reason as any)?.responseTier;
+		const usageSnapshot = (incident.reason as any)?.usageSnapshot;
+
+		try {
+			await db.insert(lunaFlexIncidents).values({
+				generationId,
+				requestedTier: "flex",
+				responseTier: responseTier ?? null,
+				usageSnapshot: usageSnapshot ?? null,
+			});
+			console.error(`Logged Luna Flex incident: generation ${generationId}, received tier ${responseTier ?? "null"}`);
+		} catch (dbError) {
+			console.error(`Failed to log Luna Flex incident to database:`, dbError);
+		}
+
+		Sentry.withScope((scope) => {
+			scope.setLevel("error");
+			scope.setTag("incident_type", "flex_billing_contract_violation");
+			scope.setTag("queue", "process-prompt");
+			scope.setTag("provider", "openrouter");
+			scope.setTag("model", "openai/gpt-5.6-luna");
+			scope.setContext("billing_incident", {
+				promptId,
+				brandId: brand.id,
+				generationId,
+				requestedTier: "flex",
+				responseTier: responseTier ?? "null",
+			});
+			Sentry.captureMessage(
+				`Luna Flex tier mismatch: generation ${generationId} was not served by Flex tier. ` +
+					`Incident logged; Luna is now locked until manual operator reset.`,
+				"error",
+			);
+		});
+	}
+
+	// Log if Luna is locked by a prior incident
+	if (lunaLocked.length > 0) {
+		console.warn(`Luna is locked by a prior Flex billing incident. ${lunaLocked.length} Luna run(s) skipped.`);
+		Sentry.withScope((scope) => {
+			scope.setLevel("warning");
+			scope.setTag("incident_type", "luna_locked_by_prior_incident");
+			scope.setTag("queue", "process-prompt");
+			Sentry.captureMessage(
+				`Luna locked by prior Flex billing incident: ${lunaLocked.length} run(s) skipped. ` +
+					`Operator must manually reset incident.`,
+				"warning",
+			);
+		});
+	}
 
 	const savedCitations = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
 	await enqueueSourceClassifications(savedCitations, brand, competitorsList);
