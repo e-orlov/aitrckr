@@ -21,8 +21,10 @@ import {
 	type PromptRunPlan,
 	resolveBrandPromptRunPlans,
 	selectRunTargets,
+	sendChainJobIfEnabled,
 	targetKey,
 } from "@workspace/lib/run-policy";
+import { brandEntity, competitorEntity, enqueueSentimentBestEffort, extractAnswerBody } from "@workspace/lib/sentiment";
 import { enqueueSourceClassificationsBestEffort } from "@workspace/lib/source-classification";
 import type { Citation } from "@workspace/lib/text-extraction";
 import { estimateRunCostUsd } from "@workspace/lib/usage";
@@ -57,11 +59,14 @@ interface PromptContext {
  * Schedule the next run for a prompt through the shared exactly-one-chain
  * logic (see ensureNextRunScheduled): an existing future chain job is kept
  * as-is, a missing one is created, and a silently throttled send is revived.
+ * The send re-checks the prompt under its row lock: a prompt disabled or
+ * deleted while this run was in flight finishes this one call and queues no
+ * next one (see sendChainJobIfEnabled).
  */
 async function scheduleNextRun(promptId: string, cadenceHours: number, consecutiveFailures: number): Promise<void> {
 	try {
 		const outcome = await ensureNextRunScheduled(promptId, cadenceHours, consecutiveFailures, {
-			send: (queue, data, options) => boss.send(queue, data, options),
+			send: (queue, data, options) => sendChainJobIfEnabled(db.$client, boss, promptId, queue, data, options),
 			listScheduledChainJobs: async (singletonKey) => {
 				const rows = await db.execute(
 					sql`select id from pgboss.job where name = 'process-prompt' and singleton_key = ${singletonKey} and state = 'created' order by created_on`,
@@ -373,6 +378,7 @@ async function runModelIteration({
 			eventType: "prompt_run",
 			config,
 		});
+		await enqueueSentiment(promptRunId, brand, competitorsList, rawOutput, config, logPrefix);
 		return extractedCitations;
 	} catch (error) {
 		// A single run's failure doesn't fail the job, so report it here to keep
@@ -393,6 +399,32 @@ async function runModelIteration({
 		});
 		throw error;
 	}
+}
+
+/**
+ * Best-effort supplemental sentiment for a freshly persisted run: deterministic
+ * mention rows for the own brand and the ACTIVE competitor roster, then at most
+ * one queued classify-sentiment job when something was mentioned. Never fails
+ * the run — the outcome is logged and a missed run is recovered by the
+ * sentiment backfill/repair scan.
+ */
+async function enqueueSentiment(
+	promptRunId: string,
+	brand: Brand,
+	competitorsList: Competitor[],
+	rawOutput: unknown,
+	config: ModelConfig,
+	logPrefix: string,
+): Promise<void> {
+	const outcome = await enqueueSentimentBestEffort({
+		promptRunId,
+		brandId: brand.id,
+		answerBody: extractAnswerBody(rawOutput, config.provider, config.model),
+		entities: [brandEntity(brand), ...competitorsList.map(competitorEntity)],
+		sender: boss,
+	});
+	const detail = "mentions" in outcome ? ` (${outcome.mentions} mention${outcome.mentions === 1 ? "" : "s"})` : "";
+	console.log(`${logPrefix} Sentiment enqueue for run ${promptRunId}: ${outcome.status}${detail}`);
 }
 
 /**
@@ -455,9 +487,11 @@ async function processPrompt(
 	const { prompt, brand, competitors: competitorsList } = context;
 
 	if (!prompt.enabled || !brand.enabled) {
-		console.log(`Prompt ${promptId} or brand ${brand.id} is disabled, skipping but rescheduling`);
-		// Still reschedule at the brand cadence - the prompt might be enabled later
-		await scheduleNextRun(promptId, brand.delayOverrideHours ?? getDefaultDelayHours(), 0);
+		// The chain ends here: a disabled prompt owns no future job. Enabling it
+		// starts a new chain (the save that enables it, or schedule-maintenance
+		// within one pass), so ten thousand disabled prompts cost nothing, not
+		// ten thousand no-op jobs per cadence.
+		console.log(`Prompt ${promptId} or brand ${brand.id} is disabled, skipping (no reschedule)`);
 		return;
 	}
 

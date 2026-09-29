@@ -29,12 +29,135 @@ export interface StructuredResearchOptions<T> {
 	 * supplied entirely in the prompt — no tools, no agent loop.
 	 */
 	webSearch?: boolean;
+	/** Cancels the underlying request (job shutdown/expiry); providers forward it to their HTTP call. */
+	signal?: AbortSignal;
+	/**
+	 * Hard cap on generated tokens for this call. Only sent when supplied, so
+	 * callers that never set it keep their provider's default behaviour.
+	 */
+	maxOutputTokens?: number;
+}
+
+/**
+ * Safe, numeric-only usage metadata of one structured call. Never carries the
+ * prompt, the answer, headers, credentials or the raw provider payload; a
+ * field the provider did not report is `null`.
+ */
+export interface StructuredResearchUsage {
+	inputTokens: number | null;
+	outputTokens: number | null;
+	reasoningTokens: number | null;
+	/** Total amount charged for the call in USD, as reported by the provider. */
+	costUsd: number | null;
+	/**
+	 * Server-side web searches the provider performed for the call. `null` when
+	 * not reported, or when the provider reported it in more than one place
+	 * with different values — see `webSearchRequestsConflict`.
+	 */
+	webSearchRequests: number | null;
+	/** The provider reported contradicting web-search counts; none of them is trusted. */
+	webSearchRequestsConflict: boolean;
+}
+
+/**
+ * What the provider was actually asked to do on one structured call, as
+ * numbers and flags only — the fields a caller must be able to verify
+ * without seeing the request body.
+ */
+export interface StructuredResearchRequestSummary {
+	model: string;
+	webSearch: boolean;
+	/** Server-tool call budget sent with the request; `null` when no tool was sent. */
+	maxToolCalls: number | null;
+	/** `max_tokens` sent with the request; `null` when the provider default applied. */
+	maxOutputTokens: number | null;
+	/** `response_format.json_schema.strict` was sent as `true`; absent when the summary predates the flag. */
+	strictJsonSchema?: boolean;
+	/** `provider.require_parameters` was sent as `true` (routing may not drop a request parameter); absent when the summary predates the flag. */
+	requireParameters?: boolean;
 }
 
 export interface StructuredResearchResult<T> {
 	object: T;
 	/** Resolved model id (after any `:online` suffixing etc.). */
 	modelVersion?: string;
+	usage?: StructuredResearchUsage;
+	request?: StructuredResearchRequestSummary;
+	/** Opaque provider generation id, for audit and billing reconciliation; null when not reported. */
+	generationId?: string | null;
+}
+
+/**
+ * The provider answered (and charged) but the content could not be turned
+ * into the requested object: no content, invalid JSON, or a schema mismatch.
+ * Carries only the paid response's envelope — never the completion text.
+ */
+export class StructuredResearchResponseError extends Error {
+	constructor(
+		readonly code: "no-content" | "invalid-json" | "schema",
+		readonly envelope: {
+			provider: string;
+			model: string | null;
+			generationId: string | null;
+			request: StructuredResearchRequestSummary;
+			usage: StructuredResearchUsage | undefined;
+		},
+	) {
+		super(`structured research response rejected: ${code}`);
+		this.name = "StructuredResearchResponseError";
+	}
+}
+
+/**
+ * The typed error code the provider itself put on a refusal — for OpenRouter
+ * the canonical `error.metadata.error_type` (`rate_limit_exceeded`,
+ * `provider_overloaded`, `provider_unavailable`, `authentication`,
+ * `payment_required`, `invalid_request`, `server`, `timeout`, `unmapped`, …).
+ * Carried verbatim; never derived from the HTTP status, the message text or
+ * any raw upstream payload. Null when the response carried no well-formed
+ * typed code, which no consumer may treat as safe to repeat.
+ */
+export type StructuredResearchErrorType = string;
+
+/** The shape a provider-supplied typed code must have to be carried at all. */
+export const STRUCTURED_RESEARCH_ERROR_TYPE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+
+/**
+ * The provider refused the structured-research request with a non-2xx
+ * response. `structured` says the body was the provider's own error envelope
+ * (so the status describes a refusal the provider itself reported);
+ * `errorType` is the provider's own typed code or null; `carriesOutput` says
+ * the body nevertheless carried a generation id, usage, cost, content or
+ * partial output — such a response was not a free refusal. Only the safe
+ * fields land here; the message never includes a credential.
+ */
+export class StructuredResearchRequestError extends Error {
+	readonly provider: string;
+	readonly httpStatus: number;
+	readonly errorType: StructuredResearchErrorType | null;
+	readonly structured: boolean;
+	readonly carriesOutput: boolean;
+	/** Parsed `Retry-After`, when the response carried one. */
+	readonly retryAfterMs: number | null;
+
+	constructor(args: {
+		provider: string;
+		httpStatus: number;
+		errorType: StructuredResearchErrorType | null;
+		structured: boolean;
+		carriesOutput: boolean;
+		retryAfterMs: number | null;
+		message: string;
+	}) {
+		super(args.message);
+		this.name = "StructuredResearchRequestError";
+		this.provider = args.provider;
+		this.httpStatus = args.httpStatus;
+		this.errorType = args.errorType;
+		this.structured = args.structured;
+		this.carriesOutput = args.carriesOutput;
+		this.retryAfterMs = args.retryAfterMs;
+	}
 }
 
 /**

@@ -179,6 +179,29 @@ interface PromptsListEditorProps {
 	changedKeys?: ReadonlySet<string>;
 	/** Omit to hide the premium column — self-hosted, or a plan with no pool. */
 	premium?: PremiumAllowance;
+	/** Most prompts this list may hold. Defaults to the brand cap. */
+	capacity?: number;
+	/**
+	 * Show the editor's own "Add Prompt" / "Add Multiple" controls and its
+	 * capacity footer. Off when the caller pages the list and owns adding —
+	 * the rows on screen are then one page, not the whole list the footer
+	 * would be counting.
+	 */
+	addControls?: boolean;
+	/** Tag suggestions beyond the tags on the rows shown — the rest of a paged catalog's tags. */
+	tagOptions?: readonly string[];
+	/**
+	 * Selection owned by the caller, keyed by prompt id. A paged catalog keeps a
+	 * selection across pages and acts on it server-side, so the editor only
+	 * renders the checkboxes and hides its own client-side bulk bar. Rows with
+	 * no id yet (unsaved) cannot be selected.
+	 */
+	selection?: {
+		selected: ReadonlySet<string>;
+		onToggle: (id: string) => void;
+		/** Header checkbox: select or clear every saved row on screen. */
+		onToggleAll: (ids: string[], select: boolean) => void;
+	};
 }
 
 /**
@@ -186,13 +209,13 @@ interface PromptsListEditorProps {
  * the rules (trim, dedupe, cap) are tested without a DOM; it runs on every
  * keystroke only to label the button and warn about what will be dropped.
  */
-function useBulkPaste(filledValues: string[], onAdd: (records: BulkPromptRecord[]) => void) {
+function useBulkPaste(filledValues: string[], capacity: number, onAdd: (records: BulkPromptRecord[]) => void) {
 	const [bulkOpen, setBulkOpen] = useState(false);
 	const [bulkText, setBulkText] = useState("");
 
 	const bulkPreview = useMemo(
-		() => parseBulkPrompts(bulkText, { existing: filledValues, limit: MAX_PROMPTS }),
-		[bulkText, filledValues],
+		() => parseBulkPrompts(bulkText, { existing: filledValues, limit: capacity }),
+		[bulkText, filledValues, capacity],
 	);
 
 	// A line with tags but no prompt, or going over capacity, blocks the whole
@@ -202,7 +225,7 @@ function useBulkPaste(filledValues: string[], onAdd: (records: BulkPromptRecord[
 	const bulkError =
 		describeMissingPrompt(bulkPreview.skipped.missingPrompt) ??
 		(overCapacity > 0
-			? `This paste is ${overCapacity} prompt${overCapacity === 1 ? "" : "s"} over the ${MAX_PROMPTS} limit. Remove ${overCapacity === 1 ? "a line" : "some lines"} to continue.`
+			? `This paste is ${overCapacity} prompt${overCapacity === 1 ? "" : "s"} over the ${capacity.toLocaleString("en-US")} limit. Remove ${overCapacity === 1 ? "a line" : "some lines"} to continue.`
 			: null);
 	const closeBulk = () => {
 		setBulkOpen(false);
@@ -491,18 +514,22 @@ export function PromptsListEditor({
 	showSystemTags = true,
 	changedKeys,
 	premium,
+	capacity = MAX_PROMPTS,
+	addControls = true,
+	tagOptions,
+	selection,
 }: PromptsListEditorProps) {
 	const allTagOptions = useMemo(() => {
-		const set = new Set<string>();
+		const set = new Set<string>(tagOptions ?? []);
 		for (const p of prompts) for (const t of p.tags) set.add(t);
 		return [...set].sort().map((t) => ({ value: t }));
-	}, [prompts]);
+	}, [prompts, tagOptions]);
 
 	const update = (index: number, patch: Partial<EditablePrompt>) => {
 		onChange(prompts.map((p, i) => (i === index ? { ...p, ...patch } : p)));
 	};
 	const add = () => {
-		if (prompts.length >= MAX_PROMPTS) return;
+		if (prompts.length >= capacity) return;
 		onChange([...prompts, newPromptEntry()]);
 	};
 
@@ -510,18 +537,29 @@ export function PromptsListEditor({
 	// stages a new prompt and they're dropped on save, so counting them against
 	// the cap would refuse prompts the list still has room for.
 	const filledValues = useMemo(() => prompts.map((p) => p.value).filter((v) => v.trim().length > 0), [prompts]);
-	const atCapacity = filledValues.length >= MAX_PROMPTS;
+	const atCapacity = filledValues.length >= capacity;
 
-	const bulk = useBulkPaste(filledValues, (added) =>
+	const bulk = useBulkPaste(filledValues, capacity, (added) =>
 		onChange([...prompts, ...added.map(({ value, tags }) => newPromptEntry({ value, tags }))]),
 	);
 
-	const { selectedKeys, liveSelectedCount, allSelected, toggleSelect, toggleSelectAll, clearSelection } =
-		useRowSelection(prompts);
+	const own = useRowSelection(prompts);
+	const savedIds = prompts.flatMap((p) => (p.id ? [p.id] : []));
+	const externalAllSelected = savedIds.length > 0 && savedIds.every((id) => selection?.selected.has(id));
+	const isSelected = (p: EditablePrompt) =>
+		selection ? p.id !== undefined && selection.selected.has(p.id) : own.selectedKeys.has(p._key);
+	const toggleRow = (p: EditablePrompt) => {
+		if (selection) {
+			if (p.id) selection.onToggle(p.id);
+		} else own.toggleSelect(p._key);
+	};
+	const allSelected = selection ? externalAllSelected : own.allSelected;
+	const toggleSelectAll = selection ? () => selection.onToggleAll(savedIds, !externalAllSelected) : own.toggleSelectAll;
+	const liveSelectedCount = selection ? 0 : own.liveSelectedCount;
 
 	const applyEnabledToSelection = (enabled: boolean) => {
 		if (liveSelectedCount === 0) return;
-		onChange(prompts.map((p) => (selectedKeys.has(p._key) ? { ...p, enabled } : p)));
+		onChange(prompts.map((p) => (own.selectedKeys.has(p._key) ? { ...p, enabled } : p)));
 	};
 
 	const validCount = prompts.filter((p) => p.enabled && p.value.trim().length > 0).length;
@@ -562,7 +600,7 @@ export function PromptsListEditor({
 						>
 							Disable
 						</Button>
-						<Button type="button" size="sm" variant="ghost" onClick={clearSelection} className="cursor-pointer">
+						<Button type="button" size="sm" variant="ghost" onClick={own.clearSelection} className="cursor-pointer">
 							Clear
 						</Button>
 					</div>
@@ -616,16 +654,16 @@ export function PromptsListEditor({
 							premium={premium}
 							premiumAtCapacity={premiumAtCapacity}
 							gridCols={gridCols}
-							selected={selectedKeys.has(prompt._key)}
-							onToggleSelect={() => toggleSelect(prompt._key)}
+							selected={isSelected(prompt)}
+							onToggleSelect={() => toggleRow(prompt)}
 						/>
 					))}
 				</div>
 			)}
 
-			{!atCapacity && (
+			{addControls && !atCapacity && (
 				<div className="flex flex-wrap items-center gap-2">
-					{prompts.length < MAX_PROMPTS && (
+					{prompts.length < capacity && (
 						<Button
 							variant="outline"
 							size="sm"
@@ -648,20 +686,22 @@ export function PromptsListEditor({
 				</div>
 			)}
 
-			{bulk.bulkOpen && !atCapacity && <BulkPasteBox bulk={bulk} />}
+			{addControls && bulk.bulkOpen && !atCapacity && <BulkPasteBox bulk={bulk} />}
 
-			{atCapacity && (
+			{addControls && atCapacity && (
 				<p className="text-xs text-muted-foreground">
-					Maximum of {MAX_PROMPTS} prompts allowed. Remove a prompt to add a new one.
+					Maximum of {capacity.toLocaleString("en-US")} prompts allowed. Remove a prompt to add a new one.
 				</p>
 			)}
 
-			<p className="text-xs text-muted-foreground">
-				<strong>
-					{validCount}/{MAX_PROMPTS}
-				</strong>{" "}
-				prompts configured
-			</p>
+			{addControls && (
+				<p className="text-xs text-muted-foreground">
+					<strong>
+						{validCount.toLocaleString("en-US")}/{capacity.toLocaleString("en-US")}
+					</strong>{" "}
+					prompts configured
+				</p>
+			)}
 		</div>
 	);
 }

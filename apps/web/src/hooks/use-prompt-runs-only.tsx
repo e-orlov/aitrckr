@@ -1,11 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
-import { getPromptRunsFn } from "@/server/prompts";
+import { getPromptRunFn, getPromptRunsFn } from "@/server/prompts";
 
 export const promptRunsKeys = {
 	all: ["prompt-runs"] as const,
 	list: (promptId: string, options: { page: number; limit: number; days: number }) =>
 		[...promptRunsKeys.all, promptId, options] as const,
 };
+
+/** A single run addressed by a deep link (`?tab=responses&run=<id>`), independent of the page it would fall on. */
+export function usePromptRun(promptId: string | undefined, runId: string | undefined) {
+	const query = useQuery({
+		queryKey: [...promptRunsKeys.all, "one", promptId ?? "", runId ?? ""] as const,
+		queryFn: () => getPromptRunFn({ data: { promptId: promptId as string, runId: runId as string } }),
+		enabled: !!promptId && !!runId,
+		staleTime: 60_000,
+		retry: false,
+	});
+	return { run: query.data ?? null, isLoading: query.isLoading, isError: query.isError };
+}
 
 export function usePromptRunsOnly(promptId?: string, options?: { page?: number; limit?: number; days?: number }) {
 	const page = options?.page || 1;

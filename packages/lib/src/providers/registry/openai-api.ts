@@ -10,6 +10,7 @@ import {
 	RESEARCH_WEB_SEARCH_MAX_USES,
 	warnIfOutputCapped,
 } from "../config";
+import { prepareStructuredOutputSchema } from "../schema-contract";
 import type {
 	Provider,
 	ProviderOptions,
@@ -102,6 +103,8 @@ export const openaiApi: Provider = {
 		schema,
 		webSearch = true,
 	}: StructuredResearchOptions<T>): Promise<StructuredResearchResult<T>> {
+		// The SDK serializes the same Zod schema; refuse locally what strict mode would refuse.
+		prepareStructuredOutputSchema(schema as never);
 		const result = await generateText({
 			model: getOpenAIResponsesModel(DEFAULT_RESEARCH_MODEL),
 			...(webSearch

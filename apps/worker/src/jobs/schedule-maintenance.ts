@@ -11,8 +11,10 @@ import {
 	type MaintenancePromptState,
 	type PromptRunPlan,
 	resolveBrandPromptRunPlans,
+	sendChainJobIfEnabled,
 	targetKey,
 } from "@workspace/lib/run-policy";
+import { enqueueResumableSentimentRuns } from "@workspace/lib/sentiment";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Job } from "pg-boss";
 import boss from "../boss";
@@ -46,11 +48,35 @@ export async function scheduleMaintenanceJob(jobs: Job<ScheduleMaintenanceData>[
 			console.error("[schedule-maintenance] Maintenance check failed:", error);
 			throw error; // Will trigger retry
 		}
+		await wakeResumableSentimentRuns();
+	}
+}
+
+/**
+ * Durable wake-up for sentiment cases parked on an unknown provider outcome
+ * whose own late answer has since been recorded: the worker that recorded it
+ * may have lost its immediate enqueue (exclusive-queue refusal, process gone),
+ * so every schedule tick rediscovers them from the database. Isolated from the
+ * prompt schedule: a failure here is logged and reported, never a retry of the
+ * whole maintenance job.
+ */
+async function wakeResumableSentimentRuns(): Promise<void> {
+	try {
+		const result = await enqueueResumableSentimentRuns(boss);
+		if (result.discovered > 0) {
+			console.log(
+				`[schedule-maintenance] Resumable sentiment cases: ${result.discovered} discovered, ${result.enqueued} enqueued, ${result.deduplicated} already queued or active, ${result.failed} failed`,
+			);
+		}
+	} catch (error) {
+		console.error("[schedule-maintenance] Resumable sentiment wake-up failed:", error);
+		Sentry.captureException(error);
 	}
 }
 
 type EnabledBrand = Awaited<ReturnType<typeof db.query.brands.findMany>>[number];
-type EnabledPrompt = Awaited<ReturnType<typeof db.query.prompts.findMany>>[number];
+/** What the run plans and pool positions need of a prompt — not its text or tags. */
+type EnabledPrompt = { id: string; brandId: string; createdAt: Date; premiumModels: string[] };
 
 /**
  * Pool positions are decided across the whole org, while run plans resolve per
@@ -169,35 +195,53 @@ async function expediteJobs(jobIds: string[]): Promise<void> {
 
 const SCHEDULE_BATCH_SIZE = 50;
 
-async function scheduleNewJobs(promptIds: string[]): Promise<void> {
+/**
+ * Start chains for prompts that have none. Up to a batch's worth start now, as
+ * a revived chain always has; more than that is a mass event — an import
+ * enabled at once, a worker that was down for a day — and those start spread
+ * evenly over each prompt's cadence, so the fan-outs do not all fire in the
+ * same minute and then keep firing in that minute on every cycle.
+ *
+ * The enabled-prompt read that produced `toSchedule` is minutes stale by now;
+ * each send re-checks its prompt under the row lock, so a prompt disabled or
+ * deleted since then gets no job (see sendChainJobIfEnabled).
+ */
+async function scheduleNewJobs(toSchedule: { promptId: string; cadenceHours: number }[]): Promise<void> {
 	let successCount = 0;
+	let stoppedCount = 0;
 	let failCount = 0;
+	const spread = toSchedule.length > SCHEDULE_BATCH_SIZE;
 
-	for (let i = 0; i < promptIds.length; i += SCHEDULE_BATCH_SIZE) {
+	for (let i = 0; i < toSchedule.length; i += SCHEDULE_BATCH_SIZE) {
 		const results = await Promise.allSettled(
-			promptIds.slice(i, i + SCHEDULE_BATCH_SIZE).map((promptId) =>
-				boss.send(
+			toSchedule.slice(i, i + SCHEDULE_BATCH_SIZE).map(({ promptId, cadenceHours }, offset) => {
+				const startAfter = spread ? Math.floor(((i + offset) / toSchedule.length) * cadenceHours * 3600) : 0;
+				return sendChainJobIfEnabled(
+					db.$client,
+					boss,
+					promptId,
 					"process-prompt",
 					{ promptId },
 					{
 						singletonKey: `prompt-${promptId}`,
-						singletonSeconds: 60 * 60, // 1 hour - prevent duplicates
+						singletonSeconds: Math.max(startAfter, 60 * 60), // the slot covers the wait, at least an hour
+						startAfter,
 						...PROMPT_JOB_OPTIONS,
 					},
-				),
-			),
+				);
+			}),
 		);
 		for (const result of results) {
-			if (result.status === "fulfilled") successCount++;
-			else {
+			if (result.status === "rejected") {
 				failCount++;
 				console.error("[schedule-maintenance] Failed to schedule job:", result.reason);
-			}
+			} else if (typeof result.value === "object" && result.value !== null) stoppedCount++;
+			else successCount++;
 		}
 	}
 
 	console.log(
-		`[schedule-maintenance] Scheduled ${successCount} new jobs${failCount > 0 ? ` (${failCount} failed)` : ""}`,
+		`[schedule-maintenance] Scheduled ${successCount} new jobs${spread ? " spread over the cadence" : ""}${stoppedCount > 0 ? ` (${stoppedCount} disabled or deleted meanwhile)` : ""}${failCount > 0 ? ` (${failCount} failed)` : ""}`,
 	);
 }
 
@@ -208,15 +252,23 @@ async function runMaintenanceCheck(): Promise<void> {
 		return;
 	}
 
-	const enabledPrompts = await db.query.prompts.findMany({
-		where: and(
-			eq(prompts.enabled, true),
-			inArray(
-				prompts.brandId,
-				enabledBrands.map((b) => b.id),
+	const enabledPrompts: EnabledPrompt[] = await db
+		.select({
+			id: prompts.id,
+			brandId: prompts.brandId,
+			createdAt: prompts.createdAt,
+			premiumModels: prompts.premiumModels,
+		})
+		.from(prompts)
+		.where(
+			and(
+				eq(prompts.enabled, true),
+				inArray(
+					prompts.brandId,
+					enabledBrands.map((b) => b.id),
+				),
 			),
-		),
-	});
+		);
 	if (enabledPrompts.length === 0) {
 		console.log("[schedule-maintenance] No enabled prompts found");
 		return;
@@ -256,7 +308,7 @@ async function runMaintenanceCheck(): Promise<void> {
 	);
 
 	if (decisions.toExpedite.length > 0) await expediteJobs(decisions.toExpedite.map((d) => d.jobId));
-	if (decisions.toSchedule.length > 0) await scheduleNewJobs(decisions.toSchedule.map((d) => d.promptId));
+	if (decisions.toSchedule.length > 0) await scheduleNewJobs(decisions.toSchedule);
 }
 
 /**
@@ -290,11 +342,12 @@ interface PendingJobInfo {
 	state: "created" | "active" | "retry";
 	/** Failure streak the job carries, so a deliberate backoff is distinguishable. */
 	consecutiveFailures: number;
+	startAfter: Date;
 }
 
 async function getPendingJobMap(): Promise<Map<string, PendingJobInfo>> {
 	const result = await db.execute(sql`
-		SELECT id, data->>'promptId' as prompt_id, state,
+		SELECT id, data->>'promptId' as prompt_id, state, start_after,
 		       COALESCE((data->>'consecutiveFailures')::int, 0) as consecutive_failures
 		FROM pgboss.job
 		WHERE name = 'process-prompt'
@@ -313,6 +366,7 @@ async function getPendingJobMap(): Promise<Map<string, PendingJobInfo>> {
 		id: string;
 		prompt_id: string;
 		state: string;
+		start_after: Date | string;
 		consecutive_failures: number | string | null;
 	};
 	for (const row of result.rows as PendingJobRow[]) {
@@ -321,6 +375,7 @@ async function getPendingJobMap(): Promise<Map<string, PendingJobInfo>> {
 				jobId: row.id,
 				state: row.state as "created" | "active" | "retry",
 				consecutiveFailures: Number(row.consecutive_failures ?? 0),
+				startAfter: new Date(row.start_after),
 			});
 		}
 	}

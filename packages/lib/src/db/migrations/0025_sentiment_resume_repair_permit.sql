@@ -1,0 +1,3 @@
+ALTER TABLE "sentiment_dispatch_permits" DROP CONSTRAINT "sentiment_dispatch_permits_purpose_check";--> statement-breakpoint
+ALTER TABLE "sentiment_dispatch_permits" ADD CONSTRAINT "sentiment_dispatch_permits_resume_repair_check" CHECK ("sentiment_dispatch_permits"."purpose" <> 'resume-repair' OR (coalesce(("sentiment_dispatch_permits"."phase_budget"->>'classify')::int, 0) = 0 AND "sentiment_dispatch_permits"."contract_sha256" IS NOT NULL));--> statement-breakpoint
+ALTER TABLE "sentiment_dispatch_permits" ADD CONSTRAINT "sentiment_dispatch_permits_purpose_check" CHECK ("sentiment_dispatch_permits"."purpose" IN ('canary', 'resume-verify', 'resume-repair'));

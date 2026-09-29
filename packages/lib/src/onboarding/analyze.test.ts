@@ -12,8 +12,9 @@ vi.mock("../website-excerpt", () => ({
 	getWebsiteExcerpt: vi.fn(async () => ""),
 }));
 
+import { toStructuredOutputJsonSchema } from "../providers/json-schema";
 import { getWebsiteExcerpt } from "../website-excerpt";
-import { analyzeBrand, buildAnalysisContext } from "./analyze";
+import { analyzeBrand, buildAnalysisContext, buildOnboardingAnalysisSchema } from "./analyze";
 import { runStructuredResearchPrompt } from "./llm";
 
 afterEach(() => {
@@ -232,6 +233,25 @@ describe("analyzeBrand", () => {
 		});
 		expect(result.competitors).toEqual([]);
 		expect(result.suggestedPrompts).toEqual([]);
+	});
+
+	it("sends the provider the schema built by the exported factory for the run's limits", async () => {
+		(runStructuredResearchPrompt as any).mockResolvedValueOnce({
+			brandName: "Acme",
+			additionalDomains: [],
+			aliases: [],
+			competitors: [],
+			suggestedPrompts: [],
+		});
+
+		await analyzeBrand({ website: "acme.com", maxCompetitors: 4, maxPrompts: 7 });
+		const sent = vi.mocked(runStructuredResearchPrompt).mock.calls[0]?.[1];
+		expect(toStructuredOutputJsonSchema(sent as any)).toEqual(
+			toStructuredOutputJsonSchema(buildOnboardingAnalysisSchema({ maxCompetitors: 4, maxPrompts: 7 })),
+		);
+		expect(toStructuredOutputJsonSchema(sent as any)).not.toEqual(
+			toStructuredOutputJsonSchema(buildOnboardingAnalysisSchema({ maxCompetitors: 10, maxPrompts: 30 })),
+		);
 	});
 
 	it("caps competitors and prompts at the requested maxes", async () => {

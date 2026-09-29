@@ -1,0 +1,407 @@
+import { SentimentValidationError } from "./errors-validation";
+import {
+	type AnalyzableText,
+	analyzeAnswerRanges,
+	hasNaturalContent,
+	isExcludedOffset,
+	naturalSlices,
+	naturalTextOf,
+} from "./ranges";
+import { EVIDENCE_QUOTE_MAX_LENGTH } from "./types";
+
+/**
+ * Version of the evidence contract between the classifier and the provider:
+ * the answer is handed over as ordered, identified natural-language segments
+ * (citation ranges are never segments and are elided from what the model
+ * reads) and the model cites segment ids, never text. Since v3 every cell of
+ * a Markdown table row is segmented on its own, so a citation can never span
+ * the cells of two different columns. Frozen into the canary contract.
+ */
+export const SENTIMENT_EVIDENCE_VERSION = "sent-evidence-v3";
+
+/** Hard cap on anchors per answer; a longer answer is refused before any call. */
+export const ANCHOR_MAX_COUNT = 400;
+
+/** Where a table-cell anchor sits: the row's line index in the answer and the cell's column, both 0-based. */
+export interface AnchorTableCell {
+	row: number;
+	column: number;
+}
+
+/** One exact, immutable slice of the raw answer the model may cite by id. */
+export interface EvidenceAnchor {
+	id: string;
+	start: number;
+	end: number;
+	/** The exact raw slice `answerBody.slice(start, end)` — what is stored as evidence. */
+	text: string;
+	/** The natural-language text of the slice with citation ranges elided — what the provider reads. */
+	naturalText: string;
+	/** Set when the slice lies inside a cell of a Markdown table row; absent for every other line. */
+	table?: AnchorTableCell;
+}
+
+const ANCHOR_ID = /^s\d{4}$/;
+const LINE_BREAK = /\r\n|\r|\n/g;
+/** A Markdown table row opens with a pipe; the alignment row (pipes, colons, dashes, spaces) carries no content. */
+const TABLE_ROW = /^\s*\|/u;
+const TABLE_SEPARATOR = /^\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*$/u;
+/** An unescaped pipe separates two cells of a table row. */
+const CELL_SEPARATOR = /(?<!\\)\|/gu;
+/** Inside a table cell a semicolon followed by whitespace separates two statements. */
+const CELL_STATEMENT_END = /;(?=\s)/gu;
+/** Bullet, numbered and quote markers that open a Markdown line; never part of an anchor. */
+const LINE_MARKER = /^(?:[ \t]*)(?:(?:[-*+•▪◦]|\d{1,3}[.)]|[a-z][.)]|>)[ \t]+)+/iu;
+const SENTENCE_END = /[.!?…]+["'”’»)]?(?=\s)/gu;
+const WHITESPACE = /\s/u;
+const CONTENT = /[\p{L}\p{N}]/u;
+
+/**
+ * Tokens after which a period does not end a sentence (German and English
+ * abbreviations, ordinals are handled by the digit rule). Lower-cased, no
+ * trailing period.
+ */
+const ABBREVIATIONS = new Set([
+	"z",
+	"b",
+	"bzw",
+	"ca",
+	"nr",
+	"dr",
+	"prof",
+	"u",
+	"a",
+	"inkl",
+	"exkl",
+	"ggf",
+	"evtl",
+	"str",
+	"vgl",
+	"usw",
+	"etc",
+	"mio",
+	"mrd",
+	"tel",
+	"abs",
+	"art",
+	"max",
+	"min",
+	"e.g",
+	"i.e",
+	"vs",
+	"mr",
+	"mrs",
+	"ms",
+	"jr",
+	"sr",
+	"st",
+	"no",
+	"approx",
+	"dept",
+	"inc",
+	"ltd",
+	"co",
+]);
+
+export function isAnchorId(value: string): boolean {
+	return ANCHOR_ID.test(value);
+}
+
+/** Is this line a Markdown table row with content (not the alignment row)? */
+export function isTableRowLine(line: string): boolean {
+	return TABLE_ROW.test(line) && !TABLE_SEPARATOR.test(line);
+}
+
+/** Is this line the alignment row of a Markdown table? */
+export function isTableSeparatorLine(line: string): boolean {
+	return TABLE_SEPARATOR.test(line) && line.includes("-");
+}
+
+/** Does the answer contain a table row — the one structure the v3 evidence contract segments differently from v2? */
+export function hasTableRows(answerBody: string): boolean {
+	return answerBody.split(LINE_BREAK).some(isTableRowLine);
+}
+
+/**
+ * The cells of one table row as ranges relative to the line: the text between
+ * unescaped pipes, the empty edge left of a leading pipe or right of a trailing
+ * pipe dropped, columns numbered from 0 in reading order.
+ */
+export function tableCellRanges(line: string): { start: number; end: number; column: number }[] {
+	const pieces: { start: number; end: number }[] = [];
+	let from = 0;
+	for (const cut of line.matchAll(CELL_SEPARATOR)) {
+		pieces.push({ start: from, end: cut.index });
+		from = cut.index + 1;
+	}
+	pieces.push({ start: from, end: line.length });
+	const blank = (piece: { start: number; end: number }) => line.slice(piece.start, piece.end).trim() === "";
+	if (pieces.length > 0 && blank(pieces[0])) pieces.shift();
+	if (pieces.length > 0 && blank(pieces[pieces.length - 1])) pieces.pop();
+	return pieces.map((piece, column) => ({ ...piece, column }));
+}
+
+function anchorIdFor(index: number): string {
+	return `s${String(index + 1).padStart(4, "0")}`;
+}
+
+/** Is the character at `index` inside a URL-like token (no whitespace back to a scheme or `www.`)? */
+function insideUrl(text: string, index: number): boolean {
+	let from = index;
+	while (from > 0 && !WHITESPACE.test(text[from - 1])) from -= 1;
+	const token = text.slice(from, index + 1);
+	return /^(?:https?:\/\/|www\.)/iu.test(token) || /^[\w.-]+\.[a-z]{2,}\//iu.test(token);
+}
+
+function wordBefore(text: string, index: number): string {
+	let from = index;
+	while (from > 0 && !WHITESPACE.test(text[from - 1]) && text[from - 1] !== "(") from -= 1;
+	return text.slice(from, index).toLowerCase();
+}
+
+/**
+ * Sentence boundaries inside one line (or one table cell), as end offsets
+ * relative to `line`; punctuation inside a citation range never ends a
+ * sentence. Inside a table cell a semicolon followed by whitespace ends a
+ * statement too, so two clauses of one cell can be cited apart.
+ */
+function sentenceEnds(line: string, lineStart: number, analysis: AnalyzableText, cell = false): number[] {
+	const ends = punctuationEnds(line, lineStart, analysis);
+	if (!cell) return ends;
+	const statements = [...line.matchAll(CELL_STATEMENT_END)]
+		.filter((match) => !isExcludedOffset(analysis, lineStart + match.index))
+		.map((match) => match.index + 1);
+	return [...new Set([...ends, ...statements])].sort((a, b) => a - b);
+}
+
+function punctuationEnds(line: string, lineStart: number, analysis: AnalyzableText): number[] {
+	const ends: number[] = [];
+	for (const match of line.matchAll(SENTENCE_END)) {
+		const at = match.index;
+		const end = at + match[0].length;
+		const punctuationStart = at;
+		if (isExcludedOffset(analysis, lineStart + at)) continue;
+		// A sentence does not end where the text continues in lower case ("slower… but", "z. B. günstig").
+		const next = line.slice(end).match(/\S/u)?.[0];
+		if (next !== undefined && /\p{Ll}/u.test(next)) continue;
+		if (line[punctuationStart] === "." && match[0].startsWith(".") && match[0].length === 1) {
+			// A single period: not a boundary after an abbreviation (incl. dotted ones like z.B./e.g.),
+			// a single letter, a decimal/ordinal number or inside a URL.
+			const before = wordBefore(line, punctuationStart);
+			if (ABBREVIATIONS.has(before) || before.includes(".") || /^\p{L}$/u.test(before)) continue;
+			if (/^\d+$/u.test(before)) continue;
+			if (insideUrl(line, punctuationStart)) continue;
+		}
+		ends.push(end);
+	}
+	return ends;
+}
+
+interface Span {
+	start: number;
+	end: number;
+	/** Raw range of a stripped list marker (`1.`, `2)`, `-`, `>`); markup, not answer content. */
+	marker?: { start: number; end: number };
+	table?: AnchorTableCell;
+}
+
+/**
+ * Trim whitespace and a leading Markdown marker, then shrink the span to its
+ * natural-language extent: a citation at either edge is cut off, a citation
+ * inside stays inside the raw slice. Returns null when no natural-language
+ * content is left.
+ */
+function contentSpan(text: string, start: number, end: number, analysis: AnalyzableText): Span | null {
+	let s = start;
+	let e = end;
+	while (s < e && WHITESPACE.test(text[s])) s += 1;
+	const marker = LINE_MARKER.exec(text.slice(s, e));
+	const markerRange = marker ? { start: s, end: s + marker[0].length } : undefined;
+	if (marker) s += marker[0].length;
+	const slices = naturalSlices(analysis, { start: s, end: e }).filter((slice) =>
+		CONTENT.test(text.slice(slice.start, slice.end)),
+	);
+	if (slices.length === 0) return null;
+	s = Math.max(s, slices[0].start);
+	e = Math.min(e, slices[slices.length - 1].end);
+	while (s < e && WHITESPACE.test(text[s])) s += 1;
+	while (e > s && WHITESPACE.test(text[e - 1])) e -= 1;
+	if (s >= e || !hasNaturalContent(analysis, { start: s, end: e })) return null;
+	return markerRange ? { start: s, end: e, marker: markerRange } : { start: s, end: e };
+}
+
+/** A code-unit index is a safe split point when it does not fall inside a surrogate pair or before a combining mark. */
+function isSafeCut(text: string, index: number): boolean {
+	const code = text.charCodeAt(index);
+	if (code >= 0xdc00 && code <= 0xdfff) return false;
+	return !/\p{M}/u.test(text[index] ?? "");
+}
+
+const SOFT_BOUNDARIES = new Set(["; ", ", ", "– ", "- ", ": "]);
+
+/** Last soft boundary (`; ` `, ` ` – ` ` - ` `: `) at or before `limit`, as a safe cut index, or -1. */
+function lastBoundaryCut(text: string, from: number, limit: number): number {
+	for (let i = limit; i > from + 1; i -= 1) {
+		if (SOFT_BOUNDARIES.has(text.slice(i - 2, i)) && isSafeCut(text, i)) return i;
+	}
+	return -1;
+}
+
+/** Last whitespace→non-whitespace transition at or before `limit`, as a safe cut index, or -1. */
+function lastWhitespaceCut(text: string, from: number, limit: number): number {
+	for (let i = limit; i > from + 1; i -= 1) {
+		if (WHITESPACE.test(text[i - 1]) && !WHITESPACE.test(text[i]) && isSafeCut(text, i)) return i;
+	}
+	return -1;
+}
+
+/** Hard cut at `limit`, moved back until it neither splits a surrogate pair nor precedes a combining mark. */
+function hardCut(text: string, from: number, limit: number): number {
+	let cut = limit;
+	while (cut > from + 1 && !isSafeCut(text, cut)) cut -= 1;
+	return cut;
+}
+
+/** A cut inside a citation range moves to the range's start, or past its end when the range begins at the cursor. */
+function outsideExcluded(analysis: AnalyzableText, cursor: number, cut: number): number {
+	const inside = analysis.excluded.find((range) => range.start < cut && cut < range.end);
+	if (!inside) return cut;
+	return inside.start > cursor + 1 ? inside.start : inside.end;
+}
+
+/**
+ * Split one over-long span deterministically: prefer the last soft boundary
+ * before the limit, then the last whitespace, then a hard cut that never
+ * breaks a surrogate pair, a mark or a citation range.
+ */
+function splitLongSpan(text: string, start: number, end: number, analysis: AnalyzableText): Span[] {
+	const pieces: Span[] = [];
+	let cursor = start;
+	while (end - cursor > EVIDENCE_QUOTE_MAX_LENGTH) {
+		const limit = cursor + EVIDENCE_QUOTE_MAX_LENGTH;
+		let cut = lastBoundaryCut(text, cursor, limit);
+		if (cut === -1) cut = lastWhitespaceCut(text, cursor, limit);
+		if (cut === -1) cut = hardCut(text, cursor, limit);
+		cut = Math.min(end, outsideExcluded(analysis, cursor, cut));
+		const piece = contentSpan(text, cursor, cut, analysis);
+		if (piece) pieces.push(piece);
+		cursor = cut;
+	}
+	const last = contentSpan(text, cursor, end, analysis);
+	if (last) pieces.push(last);
+	return pieces;
+}
+
+/**
+ * Deterministic segmentation of a raw answer into citable anchors: line by
+ * line (CRLF/LF/CR), a table row cell by cell (a cell's statements split at
+ * `; ` as well), sentence by sentence (German/English abbreviations, numbers
+ * and URLs do not end a sentence), each span trimmed of whitespace, list
+ * markers and edge citations, over-long spans split at safe boundaries, ids
+ * assigned in answer order. Citation ranges (`analyzeAnswerRanges`) are
+ * never anchors: a source line yields none, a trailing `([domain](url))` is
+ * cut off, a citation inside a sentence stays inside the raw slice but is
+ * elided from `naturalText`. Two environments holding the same answer produce
+ * the same anchors; nothing depends on locale, time, storage or randomness.
+ *
+ * Invariants (checked here and in tests): `text === answerBody.slice(start,
+ * end)`, every span ≤ `EVIDENCE_QUOTE_MAX_LENGTH`, spans are ordered and do
+ * not overlap, every span holds natural-language content, and every letter or
+ * digit of the answer lies inside a span or inside a citation range.
+ */
+export function segmentAnswer(
+	answerBody: string,
+	analysis: AnalyzableText = analyzeAnswerRanges(answerBody),
+): EvidenceAnchor[] {
+	const spans: Span[] = [];
+	let lineStart = 0;
+	const lines: { start: number; end: number }[] = [];
+	for (const brk of answerBody.matchAll(LINE_BREAK)) {
+		lines.push({ start: lineStart, end: brk.index });
+		lineStart = brk.index + brk[0].length;
+	}
+	lines.push({ start: lineStart, end: answerBody.length });
+
+	const segmentRange = (start: number, end: number, table?: AnchorTableCell) => {
+		const text = answerBody.slice(start, end);
+		let from = 0;
+		for (const sentenceEnd of [...sentenceEnds(text, start, analysis, table !== undefined), text.length]) {
+			if (sentenceEnd <= from) continue;
+			const span = contentSpan(answerBody, start + from, start + sentenceEnd, analysis);
+			from = sentenceEnd;
+			if (!span) continue;
+			const pieces =
+				span.end - span.start > EVIDENCE_QUOTE_MAX_LENGTH
+					? splitLongSpan(answerBody, span.start, span.end, analysis)
+					: [span];
+			for (const piece of pieces) spans.push(table ? { ...piece, table } : piece);
+		}
+	};
+	lines.forEach((line, row) => {
+		const text = answerBody.slice(line.start, line.end);
+		if (!isTableRowLine(text)) {
+			segmentRange(line.start, line.end);
+			return;
+		}
+		for (const cell of tableCellRanges(text))
+			segmentRange(line.start + cell.start, line.start + cell.end, { row, column: cell.column });
+	});
+
+	if (spans.length > ANCHOR_MAX_COUNT) {
+		throw new SentimentValidationError(
+			"answer-unsegmentable",
+			`answer needs ${spans.length} anchors, cap ${ANCHOR_MAX_COUNT}`,
+		);
+	}
+	const anchors = spans.map((span, index) => ({
+		id: anchorIdFor(index),
+		start: span.start,
+		end: span.end,
+		text: answerBody.slice(span.start, span.end),
+		naturalText: naturalTextOf(analysis, span),
+		...(span.table ? { table: span.table } : {}),
+	}));
+	assertCoverage(
+		answerBody,
+		anchors,
+		spans.flatMap((span) => (span.marker ? [span.marker] : [])),
+		analysis,
+	);
+	return anchors;
+}
+
+/**
+ * Every letter or digit of the answer must be inside an anchor — except the
+ * digits/letters of a stripped list marker and the citation ranges, which are
+ * not answer content — and anchors must be ordered and non-overlapping.
+ */
+function assertCoverage(
+	answerBody: string,
+	anchors: EvidenceAnchor[],
+	markers: { start: number; end: number }[],
+	analysis: AnalyzableText,
+): void {
+	const isMarkup = (i: number) => markers.some((m) => i >= m.start && i < m.end) || isExcludedOffset(analysis, i);
+	const uncovered = (from: number, to: number) => {
+		for (let i = from; i < to; i += 1) if (CONTENT.test(answerBody[i]) && !isMarkup(i)) return true;
+		return false;
+	};
+	let cursor = 0;
+	for (const anchor of anchors) {
+		if (anchor.start < cursor || anchor.end <= anchor.start || anchor.end - anchor.start > EVIDENCE_QUOTE_MAX_LENGTH) {
+			throw new SentimentValidationError("answer-unsegmentable", `anchor ${anchor.id} is out of order or over-long`);
+		}
+		if (uncovered(cursor, anchor.start)) {
+			throw new SentimentValidationError("answer-unsegmentable", `content before ${anchor.id} is not covered`);
+		}
+		cursor = anchor.end;
+	}
+	if (uncovered(cursor, answerBody.length)) {
+		throw new SentimentValidationError("answer-unsegmentable", "trailing content is not covered");
+	}
+}
+
+/** Anchors keyed by id, for O(1) membership checks during validation. */
+export function anchorMap(anchors: EvidenceAnchor[]): Map<string, EvidenceAnchor> {
+	return new Map(anchors.map((anchor) => [anchor.id, anchor]));
+}
