@@ -76,6 +76,51 @@ function bareModelSlug(modelSlug: string): string {
 }
 
 /**
+ * Identify Luna model from the version slug (may include deprecated :online suffix).
+ * Used for Flex routing, timeout, tier verification, and incident locking.
+ */
+export function isLunaModelSlug(versionSlug: string | undefined): boolean {
+	if (!versionSlug) return false;
+	const bare = bareModelSlug(versionSlug);
+	return bare === "openai/gpt-5.6-luna";
+}
+
+/**
+ * Handle OpenRouter HTTP error responses, with special handling for Luna Flex errors.
+ * Returns structured error with httpStatus, isResourceUnavailable, retryAfterMs, and isLunaFlexError flags.
+ */
+function createOpenRouterError(res: Response, text: string, isLunaModel: boolean): Error {
+	if (isLunaModel && res.status === 429) {
+		const isResourceUnavailable = text.includes("Resource Unavailable") || text.includes("resource_unavailable");
+		const retryAfter = res.headers.get("retry-after");
+		let retryAfterMs: number | null = null;
+		if (retryAfter) {
+			const seconds = Number(retryAfter);
+			if (Number.isFinite(seconds) && seconds >= 0) {
+				retryAfterMs = Math.round(seconds * 1000);
+			} else {
+				const at = Date.parse(retryAfter);
+				retryAfterMs = Number.isNaN(at) ? null : Math.max(0, at - Date.now());
+			}
+		}
+
+		const error = new Error(
+			`Luna Flex 429: ${isResourceUnavailable ? "Resource Unavailable" : "other 429"}. ` +
+				`Retry-After: ${retryAfterMs !== null ? retryAfterMs + "ms" : "none"}.`,
+		);
+		(error as any).httpStatus = 429;
+		(error as any).isResourceUnavailable = isResourceUnavailable;
+		(error as any).retryAfterMs = retryAfterMs;
+		(error as any).isLunaFlexError = true;
+		return error;
+	}
+
+	const error = new Error(`OpenRouter API error (${res.status}): ${text.substring(0, 200)}`);
+	(error as any).httpStatus = res.status;
+	return error;
+}
+
+/**
  * OpenRouter's canonical typed code, `error.metadata.error_type`, which its
  * documentation designates as the field to switch on programmatically instead
  * of the HTTP status. It is the only source of a refusal's type: the status,
@@ -348,7 +393,7 @@ export const openrouter: Provider = {
 			);
 		}
 		const modelSlug = bareModelSlug(options.version);
-		const isLunaModel = modelSlug === "openai/gpt-5.6-luna";
+		const isLunaModel = isLunaModelSlug(options.version);
 
 		const body: Record<string, unknown> = {
 			model: modelSlug,
@@ -404,7 +449,8 @@ export const openrouter: Provider = {
 			});
 
 			if (!res.ok) {
-				throw new Error(`OpenRouter API error (${res.status}): ${await res.text()}`);
+				const text = await res.text();
+				throw createOpenRouterError(res, text, isLunaModel);
 			}
 
 			const data: any = await res.json();
