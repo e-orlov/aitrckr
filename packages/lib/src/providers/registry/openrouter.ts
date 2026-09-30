@@ -86,28 +86,47 @@ export function isLunaModelSlug(versionSlug: string | undefined): boolean {
 }
 
 /**
- * Parse error details from OpenRouter error response body.
+ * Parse error details from OpenRouter error response object.
  * Extracts error.code, error.metadata.error_type, error.metadata.provider_code.
  */
-function parseOpenRouterErrorDetails(text: string): {
+function parseOpenRouterErrorDetails(error: any): {
 	errorCode: number | null;
 	errorType: string | null;
 	providerCode: string | null;
 } {
-	try {
-		const data = JSON.parse(text);
-		const error = data?.error;
-		if (error && typeof error === "object") {
-			return {
-				errorCode: typeof error.code === "number" ? error.code : null,
-				errorType: typeof error.metadata?.error_type === "string" ? error.metadata.error_type : null,
-				providerCode: typeof error.metadata?.provider_code === "string" ? error.metadata.provider_code : null,
-			};
-		}
-	} catch {
-		/* JSON parse failed; return nulls */
+	if (!error || typeof error !== "object") {
+		return { errorCode: null, errorType: null, providerCode: null };
 	}
-	return { errorCode: null, errorType: null, providerCode: null };
+	return {
+		errorCode: typeof error.code === "number" ? error.code : null,
+		errorType: typeof error.metadata?.error_type === "string" ? error.metadata.error_type : null,
+		providerCode: typeof error.metadata?.provider_code === "string" ? error.metadata.provider_code : null,
+	};
+}
+
+/**
+ * Check if a response layer contains an error. Returns error object and metadata or null.
+ */
+function extractResponseError(data: any): {
+	error: any;
+	errorCode: number | null;
+	errorType: string | null;
+	providerCode: string | null;
+} | null {
+	// Check top-level error (HTTP 200 errors documented by OpenRouter)
+	if (data?.error && typeof data.error === "object") {
+		const { errorCode, errorType, providerCode } = parseOpenRouterErrorDetails(data.error);
+		return { error: data.error, errorCode, errorType, providerCode };
+	}
+
+	// Check first choice error (provider-specific error in streaming context)
+	const choiceError = data?.choices?.[0]?.error;
+	if (choiceError && typeof choiceError === "object") {
+		const { errorCode, errorType, providerCode } = parseOpenRouterErrorDetails(choiceError);
+		return { error: choiceError, errorCode, errorType, providerCode };
+	}
+
+	return null;
 }
 
 /**
@@ -124,15 +143,28 @@ function parseRetryAfterMs(header: string | null | undefined): number | null {
 }
 
 /**
- * Handle OpenRouter HTTP error responses, with special handling for Luna Flex 429s.
- * Extracts: httpStatus, errorCode, errorType, providerCode, retryAfterMs, isResourceUnavailable.
+ * Handle OpenRouter HTTP error responses.
+ * Extracts: httpStatus, errorCode, errorType, providerCode, retryAfterMs.
+ * For Luna 429s: flags isLunaFlexError. Does NOT claim "no charge" without explicit confirmation.
  */
 function createOpenRouterError(res: Response, text: string, isLunaModel: boolean): Error {
-	const { errorCode, errorType, providerCode } = parseOpenRouterErrorDetails(text);
-	const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after") ?? null);
+	let errorCode: number | null = null;
+	let errorType: string | null = null;
+	let providerCode: string | null = null;
 
-	// Check if this is a confirmed "Resource Unavailable" only for 429 with matching error type
-	const isResourceUnavailable = isLunaModel && res.status === 429 && errorType === "rate_limit_exceeded";
+	try {
+		const data = JSON.parse(text);
+		const extracted = extractResponseError(data);
+		if (extracted) {
+			errorCode = extracted.errorCode;
+			errorType = extracted.errorType;
+			providerCode = extracted.providerCode;
+		}
+	} catch {
+		/* JSON parse failed */
+	}
+
+	const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after") ?? null);
 
 	const error = new Error(`OpenRouter API error (${res.status}): ${text.substring(0, 200)}`);
 	(error as any).httpStatus = res.status;
@@ -143,7 +175,8 @@ function createOpenRouterError(res: Response, text: string, isLunaModel: boolean
 
 	if (isLunaModel && res.status === 429) {
 		(error as any).isLunaFlexError = true;
-		(error as any).isResourceUnavailable = isResourceUnavailable;
+		// Do NOT set isResourceUnavailable: cost remains unknown unless explicitly confirmed
+		(error as any).costUnknown = true;
 	}
 
 	return error;
@@ -509,23 +542,29 @@ export const openrouter: Provider = {
 
 			const data: any = await res.json();
 
-			// Check for top-level error in HTTP 200 response.
-			// OpenRouter documents responses with error but no choices for both successful calls
-			// that turned into errors (e.g., safety filter) and provider errors.
+			// Check for errors at all layers before verifying service_tier or returning success.
+			// Errors can appear as: top-level error, or first choice error.
 			// Use error.metadata.error_type for programmatic error classification.
-			if (data?.error && typeof data.error === "object") {
-				const { errorCode, errorType, providerCode } = parseOpenRouterErrorDetails(JSON.stringify(data));
+			const responseError = extractResponseError(data);
+			if (responseError) {
 				const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after") ?? null);
 
 				const error = new Error(
-					`OpenRouter HTTP 200 error: ${data.error.message ?? "(no message)"} ` +
-						`(error_type: ${errorType ?? "unknown"})`,
+					`OpenRouter HTTP 200 error: ${responseError.error.message ?? "(no message)"} ` +
+						`(error_type: ${responseError.errorType ?? "unknown"})`,
 				);
 				(error as any).httpStatus = 200;
-				(error as any).errorCode = errorCode;
-				(error as any).errorType = errorType;
-				(error as any).providerCode = providerCode;
+				(error as any).errorCode = responseError.errorCode;
+				(error as any).errorType = responseError.errorType;
+				(error as any).providerCode = responseError.providerCode;
 				(error as any).retryAfterMs = retryAfterMs;
+
+				// Luna 429s are flagged for retry, but cost remains unknown
+				if (isLunaModel && responseError.errorCode === 429) {
+					(error as any).isLunaFlexError = true;
+					(error as any).costUnknown = true;
+				}
+
 				throw error;
 			}
 
