@@ -86,37 +86,66 @@ export function isLunaModelSlug(versionSlug: string | undefined): boolean {
 }
 
 /**
- * Handle OpenRouter HTTP error responses, with special handling for Luna Flex errors.
- * Returns structured error with httpStatus, isResourceUnavailable, retryAfterMs, and isLunaFlexError flags.
+ * Parse error details from OpenRouter error response body.
+ * Extracts error.code, error.metadata.error_type, error.metadata.provider_code.
+ */
+function parseOpenRouterErrorDetails(text: string): {
+	errorCode: number | null;
+	errorType: string | null;
+	providerCode: string | null;
+} {
+	try {
+		const data = JSON.parse(text);
+		const error = data?.error;
+		if (error && typeof error === "object") {
+			return {
+				errorCode: typeof error.code === "number" ? error.code : null,
+				errorType: typeof error.metadata?.error_type === "string" ? error.metadata.error_type : null,
+				providerCode: typeof error.metadata?.provider_code === "string" ? error.metadata.provider_code : null,
+			};
+		}
+	} catch {
+		/* JSON parse failed; return nulls */
+	}
+	return { errorCode: null, errorType: null, providerCode: null };
+}
+
+/**
+ * Parse Retry-After header as either numeric seconds or HTTP date, returning milliseconds to wait.
+ */
+function parseRetryAfterMs(header: string | null | undefined): number | null {
+	if (!header) return null;
+	const seconds = Number(header);
+	if (Number.isFinite(seconds) && seconds >= 0) {
+		return Math.round(seconds * 1000);
+	}
+	const at = Date.parse(header);
+	return Number.isNaN(at) ? null : Math.max(0, at - Date.now());
+}
+
+/**
+ * Handle OpenRouter HTTP error responses, with special handling for Luna Flex 429s.
+ * Extracts: httpStatus, errorCode, errorType, providerCode, retryAfterMs, isResourceUnavailable.
  */
 function createOpenRouterError(res: Response, text: string, isLunaModel: boolean): Error {
-	if (isLunaModel && res.status === 429) {
-		const isResourceUnavailable = text.includes("Resource Unavailable") || text.includes("resource_unavailable");
-		const retryAfter = res.headers.get("retry-after");
-		let retryAfterMs: number | null = null;
-		if (retryAfter) {
-			const seconds = Number(retryAfter);
-			if (Number.isFinite(seconds) && seconds >= 0) {
-				retryAfterMs = Math.round(seconds * 1000);
-			} else {
-				const at = Date.parse(retryAfter);
-				retryAfterMs = Number.isNaN(at) ? null : Math.max(0, at - Date.now());
-			}
-		}
+	const { errorCode, errorType, providerCode } = parseOpenRouterErrorDetails(text);
+	const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after") ?? null);
 
-		const error = new Error(
-			`Luna Flex 429: ${isResourceUnavailable ? "Resource Unavailable" : "other 429"}. ` +
-				`Retry-After: ${retryAfterMs !== null ? retryAfterMs + "ms" : "none"}.`,
-		);
-		(error as any).httpStatus = 429;
-		(error as any).isResourceUnavailable = isResourceUnavailable;
-		(error as any).retryAfterMs = retryAfterMs;
-		(error as any).isLunaFlexError = true;
-		return error;
-	}
+	// Check if this is a confirmed "Resource Unavailable" only for 429 with matching error type
+	const isResourceUnavailable = isLunaModel && res.status === 429 && errorType === "rate_limit_exceeded";
 
 	const error = new Error(`OpenRouter API error (${res.status}): ${text.substring(0, 200)}`);
 	(error as any).httpStatus = res.status;
+	(error as any).errorCode = errorCode;
+	(error as any).errorType = errorType;
+	(error as any).providerCode = providerCode;
+	(error as any).retryAfterMs = retryAfterMs;
+
+	if (isLunaModel && res.status === 429) {
+		(error as any).isLunaFlexError = true;
+		(error as any).isResourceUnavailable = isResourceUnavailable;
+	}
+
 	return error;
 }
 
@@ -177,6 +206,47 @@ async function structuredRequestError(res: Response): Promise<StructuredResearch
 		retryAfterMs: retryAfterMs(res),
 		message: `OpenRouter API error (${status}): ${text}`,
 	});
+}
+
+/**
+ * Configure Luna Flex routing and parameters in the request body.
+ */
+function setupLunaFlexRouting(body: Record<string, unknown>, webSearch: boolean | undefined): void {
+	// Enforce OpenAI Flex tier: Luna must route through openai/flex endpoint only.
+	// max_price filters by declared endpoint pricing; billing follows actual tier served.
+	body.service_tier = "flex";
+	body.provider = {
+		only: ["openai/flex"],
+		allow_fallbacks: false,
+		max_price: { prompt: 0.1, completion: 0.6 },
+	};
+	// Disable the default OpenRouter web plugin, which could bypass tool_choice: "auto"
+	body.plugins = [{ id: "web", enabled: false }];
+	if (webSearch) {
+		// Luna can choose whether to search (0 or 1)
+		Object.assign(body, webSearchRequestFields("auto"));
+	}
+}
+
+/**
+ * Verify Luna response was served by Flex tier. Tier mismatch indicates a billing
+ * contract violation; mark for worker to record and lock Luna queries.
+ */
+function verifyLunaFlexTier(data: any): { isValid: boolean; error?: Error } {
+	const responseTier = data?.service_tier;
+	if (responseTier === "flex") {
+		return { isValid: true };
+	}
+
+	const error = new Error(
+		`Luna service_tier contract violation: requested flex, received ${responseTier ?? "null"}. ` +
+			`Generation ID: ${data?.id ?? "unknown"}.`,
+	);
+	(error as any).generationId = data?.id;
+	(error as any).responseTier = responseTier;
+	(error as any).usageSnapshot = data?.usage;
+	(error as any).isFlexBillingIncident = true;
+	return { isValid: false, error };
 }
 
 function openrouterHeaders(): Record<string, string> {
@@ -404,25 +474,9 @@ export const openrouter: Provider = {
 		// Luna: Flex routing only; optional web search with auto tool choice and disabled plugin.
 		// Other models: standard routing; required search when enabled, for consistency with tracked runs.
 		if (isLunaModel) {
-			// Enforce OpenAI Flex tier: Luna must route through openai/flex endpoint only.
-			// max_price filters by declared endpoint pricing; billing follows actual tier served.
-			body.service_tier = "flex";
-			body.provider = {
-				only: ["openai/flex"],
-				allow_fallbacks: false,
-				max_price: { prompt: 0.1, completion: 0.6 },
-			};
-			// Disable the default OpenRouter web plugin, which could bypass tool_choice: "auto"
-			body.plugins = [{ id: "web", enabled: false }];
-			if (options.webSearch) {
-				// Luna can choose whether to search (0 or 1)
-				Object.assign(body, webSearchRequestFields("auto"));
-			}
-		} else {
-			// Non-Luna models maintain standard routing and required search behavior
-			if (options.webSearch) {
-				Object.assign(body, webSearchRequestFields("required"));
-			}
+			setupLunaFlexRouting(body, options.webSearch);
+		} else if (options.webSearch) {
+			Object.assign(body, webSearchRequestFields("required"));
 		}
 
 		// Use raw fetch instead of SDK — the SDK's ChatAssistantMessage Zod schema
@@ -455,22 +509,32 @@ export const openrouter: Provider = {
 
 			const data: any = await res.json();
 
+			// Check for top-level error in HTTP 200 response.
+			// OpenRouter documents responses with error but no choices for both successful calls
+			// that turned into errors (e.g., safety filter) and provider errors.
+			// Use error.metadata.error_type for programmatic error classification.
+			if (data?.error && typeof data.error === "object") {
+				const { errorCode, errorType, providerCode } = parseOpenRouterErrorDetails(JSON.stringify(data));
+				const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after") ?? null);
+
+				const error = new Error(
+					`OpenRouter HTTP 200 error: ${data.error.message ?? "(no message)"} ` +
+						`(error_type: ${errorType ?? "unknown"})`,
+				);
+				(error as any).httpStatus = 200;
+				(error as any).errorCode = errorCode;
+				(error as any).errorType = errorType;
+				(error as any).providerCode = providerCode;
+				(error as any).retryAfterMs = retryAfterMs;
+				throw error;
+			}
+
 			// Luna: verify the response was actually served by Flex tier.
-			// If response carries a different tier, it's a billing contract violation.
+			// Check service_tier only for successful responses (no error field).
 			if (isLunaModel) {
-				const responseTier = data?.service_tier;
-				if (responseTier !== "flex") {
-					// Billing contract violation: Luna was requested from Flex but served as something else.
-					// Mark with incident flag so worker can log to database and lock Luna queries.
-					const error = new Error(
-						`Luna service_tier contract violation: requested flex, received ${responseTier ?? "null"}. ` +
-							`Generation ID: ${data?.id ?? "unknown"}.`,
-					);
-					(error as any).generationId = data?.id;
-					(error as any).responseTier = responseTier;
-					(error as any).usageSnapshot = data?.usage;
-					(error as any).isFlexBillingIncident = true;
-					throw error;
+				const verification = verifyLunaFlexTier(data);
+				if (!verification.isValid) {
+					throw verification.error;
 				}
 			}
 

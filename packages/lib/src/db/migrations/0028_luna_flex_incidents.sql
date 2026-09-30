@@ -3,9 +3,12 @@
 
 create table public.luna_flex_incidents (
   id uuid primary key default gen_random_uuid(),
-  generation_id text not null unique,
+  generation_id text unique,
   requested_tier text not null default 'flex',
   response_tier text,
+  error_code numeric,
+  error_type text,
+  error_provider_code text,
   usage_snapshot jsonb,
   created_at timestamp with time zone not null default now(),
   status text not null default 'active' check (status in ('active', 'resolved')),
