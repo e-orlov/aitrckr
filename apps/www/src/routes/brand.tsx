@@ -247,7 +247,7 @@ function BrandPage() {
 							rel="noopener noreferrer"
 							className="group rounded-md border border-zinc-200 bg-white p-6 transition-colors hover:bg-zinc-50"
 						>
-							<p className="font-titan-one text-4xl lowercase text-blue-600">elmo</p>
+							<p className="font-titan-one text-4xl lowercase text-blue-600">aitrckr</p>
 							<p className="mt-3 text-sm font-medium text-zinc-950 group-hover:text-blue-600">Titan One</p>
 							<p className="text-xs text-zinc-500">Used for the logo wordmark and icon glyph</p>
 						</a>

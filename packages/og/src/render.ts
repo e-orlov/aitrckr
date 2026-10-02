@@ -77,7 +77,7 @@ export function renderOgImage({ appName, title, description, accentColors, iconD
 								marginBottom: 40,
 							},
 						},
-						"elmo",
+						"aitrckr",
 					)
 				: iconDataUri
 					? createElement("img", {

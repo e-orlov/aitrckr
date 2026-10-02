@@ -222,7 +222,7 @@ function YouTubeThumbnail() {
 						lineHeight: 1,
 					}}
 				>
-					elmo
+					aitrckr
 				</div>
 				<div
 					style={{

@@ -93,7 +93,7 @@ export function renderStatusOgImage(data: TargetStatus[]) {
 						lineHeight: 1,
 					}}
 				>
-					elmo
+					aitrckr
 				</div>
 				<div
 					style={{

@@ -75,5 +75,14 @@ export default defineConfig({
       timeout: 150_000,
       use: { ...devices["Desktop Chrome"] },
     },
+    // The marketing site (apps/www) is a separate server with no session;
+    // run explicitly (--project=www) against a running instance, default
+    // `pnpm -C apps/www dev` on 3001, overridable with WWW_BASE_URL.
+    {
+      name: "www",
+      testMatch: ["www/**/*.spec.ts"],
+      outputDir: "test-results-www",
+      use: { ...devices["Desktop Chrome"], baseURL: process.env.WWW_BASE_URL || "http://localhost:3001" },
+    },
   ],
 });
