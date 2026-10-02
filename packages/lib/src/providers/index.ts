@@ -6,7 +6,7 @@ import { dataforseo } from "./registry/dataforseo";
 import { mistralApi } from "./registry/mistral-api";
 import { olostep } from "./registry/olostep";
 import { openaiApi } from "./registry/openai-api";
-import { openrouter } from "./registry/openrouter";
+import { isLunaModelSlug, openrouter } from "./registry/openrouter";
 import { oxylabs } from "./registry/oxylabs";
 import { stub } from "./registry/stub";
 import type { ModelConfig, Provider, ProviderAccess } from "./types";
@@ -14,6 +14,7 @@ import type { ModelConfig, Provider, ProviderAccess } from "./types";
 export { STATUS_TARGETS } from "@workspace/config/scrape-targets";
 export { parseScrapeTargets, validateScrapeTargets } from "./config";
 export { toStructuredOutputJsonSchema } from "./json-schema";
+export { isLunaModelSlug } from "./registry/openrouter";
 export { selectTargetsForBrand } from "./runner";
 export {
 	assertStructuredOutputSchema,

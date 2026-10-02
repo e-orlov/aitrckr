@@ -76,6 +76,113 @@ function bareModelSlug(modelSlug: string): string {
 }
 
 /**
+ * Identify Luna model from the version slug (may include deprecated :online suffix).
+ * Used for Flex routing, timeout, tier verification, and incident locking.
+ */
+export function isLunaModelSlug(versionSlug: string | undefined): boolean {
+	if (!versionSlug) return false;
+	const bare = bareModelSlug(versionSlug);
+	return bare === "openai/gpt-5.6-luna";
+}
+
+/**
+ * Parse error details from OpenRouter error response object.
+ * Extracts error.code, error.metadata.error_type, error.metadata.provider_code.
+ */
+function parseOpenRouterErrorDetails(error: any): {
+	errorCode: number | null;
+	errorType: string | null;
+	providerCode: string | null;
+} {
+	if (!error || typeof error !== "object") {
+		return { errorCode: null, errorType: null, providerCode: null };
+	}
+	return {
+		errorCode: typeof error.code === "number" ? error.code : null,
+		errorType: typeof error.metadata?.error_type === "string" ? error.metadata.error_type : null,
+		providerCode: typeof error.metadata?.provider_code === "string" ? error.metadata.provider_code : null,
+	};
+}
+
+/**
+ * Check if a response layer contains an error. Returns error object and metadata or null.
+ */
+function extractResponseError(data: any): {
+	error: any;
+	errorCode: number | null;
+	errorType: string | null;
+	providerCode: string | null;
+} | null {
+	// Check top-level error (HTTP 200 errors documented by OpenRouter)
+	if (data?.error && typeof data.error === "object") {
+		const { errorCode, errorType, providerCode } = parseOpenRouterErrorDetails(data.error);
+		return { error: data.error, errorCode, errorType, providerCode };
+	}
+
+	// Check first choice error (provider-specific error in streaming context)
+	const choiceError = data?.choices?.[0]?.error;
+	if (choiceError && typeof choiceError === "object") {
+		const { errorCode, errorType, providerCode } = parseOpenRouterErrorDetails(choiceError);
+		return { error: choiceError, errorCode, errorType, providerCode };
+	}
+
+	return null;
+}
+
+/**
+ * Parse Retry-After header as either numeric seconds or HTTP date, returning milliseconds to wait.
+ */
+function parseRetryAfterMs(header: string | null | undefined): number | null {
+	if (!header) return null;
+	const seconds = Number(header);
+	if (Number.isFinite(seconds) && seconds >= 0) {
+		return Math.round(seconds * 1000);
+	}
+	const at = Date.parse(header);
+	return Number.isNaN(at) ? null : Math.max(0, at - Date.now());
+}
+
+/**
+ * Handle OpenRouter HTTP error responses.
+ * Extracts: httpStatus, errorCode, errorType, providerCode, retryAfterMs.
+ * For Luna 429s: flags isLunaFlexError. Does NOT claim "no charge" without explicit confirmation.
+ */
+function createOpenRouterError(res: Response, text: string, isLunaModel: boolean): Error {
+	let errorCode: number | null = null;
+	let errorType: string | null = null;
+	let providerCode: string | null = null;
+
+	try {
+		const data = JSON.parse(text);
+		const extracted = extractResponseError(data);
+		if (extracted) {
+			errorCode = extracted.errorCode;
+			errorType = extracted.errorType;
+			providerCode = extracted.providerCode;
+		}
+	} catch {
+		/* JSON parse failed */
+	}
+
+	const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after") ?? null);
+
+	const error = new Error(`OpenRouter API error (${res.status}): ${text.substring(0, 200)}`);
+	(error as any).httpStatus = res.status;
+	(error as any).errorCode = errorCode;
+	(error as any).errorType = errorType;
+	(error as any).providerCode = providerCode;
+	(error as any).retryAfterMs = retryAfterMs;
+
+	if (isLunaModel && res.status === 429) {
+		(error as any).isLunaFlexError = true;
+		// Do NOT set isResourceUnavailable: cost remains unknown unless explicitly confirmed
+		(error as any).costUnknown = true;
+	}
+
+	return error;
+}
+
+/**
  * OpenRouter's canonical typed code, `error.metadata.error_type`, which its
  * documentation designates as the field to switch on programmatically instead
  * of the HTTP status. It is the only source of a refusal's type: the status,
@@ -132,6 +239,47 @@ async function structuredRequestError(res: Response): Promise<StructuredResearch
 		retryAfterMs: retryAfterMs(res),
 		message: `OpenRouter API error (${status}): ${text}`,
 	});
+}
+
+/**
+ * Configure Luna Flex routing and parameters in the request body.
+ */
+function setupLunaFlexRouting(body: Record<string, unknown>, webSearch: boolean | undefined): void {
+	// Enforce OpenAI Flex tier: Luna must route through openai/flex endpoint only.
+	// max_price filters by declared endpoint pricing; billing follows actual tier served.
+	body.service_tier = "flex";
+	body.provider = {
+		only: ["openai/flex"],
+		allow_fallbacks: false,
+		max_price: { prompt: 0.1, completion: 0.6 },
+	};
+	// Disable the default OpenRouter web plugin, which could bypass tool_choice: "auto"
+	body.plugins = [{ id: "web", enabled: false }];
+	if (webSearch) {
+		// Luna can choose whether to search (0 or 1)
+		Object.assign(body, webSearchRequestFields("auto"));
+	}
+}
+
+/**
+ * Verify Luna response was served by Flex tier. Tier mismatch indicates a billing
+ * contract violation; mark for worker to record and lock Luna queries.
+ */
+function verifyLunaFlexTier(data: any): { isValid: boolean; error?: Error } {
+	const responseTier = data?.service_tier;
+	if (responseTier === "flex") {
+		return { isValid: true };
+	}
+
+	const error = new Error(
+		`Luna service_tier contract violation: requested flex, received ${responseTier ?? "null"}. ` +
+			`Generation ID: ${data?.id ?? "unknown"}.`,
+	);
+	(error as any).generationId = data?.id;
+	(error as any).responseTier = responseTier;
+	(error as any).usageSnapshot = data?.usage;
+	(error as any).isFlexBillingIncident = true;
+	return { isValid: false, error };
 }
 
 function openrouterHeaders(): Record<string, string> {
@@ -348,7 +496,7 @@ export const openrouter: Provider = {
 			);
 		}
 		const modelSlug = bareModelSlug(options.version);
-		const isLunaModel = modelSlug === "openai/gpt-5.6-luna";
+		const isLunaModel = isLunaModelSlug(options.version);
 
 		const body: Record<string, unknown> = {
 			model: modelSlug,
@@ -356,20 +504,12 @@ export const openrouter: Provider = {
 			max_tokens: API_PROVIDER_MAX_OUTPUT_TOKENS.openrouter,
 		};
 
-		// Luna: optional web search with auto tool choice and disabled plugin.
-		// Other models: required search when enabled, for consistency with tracked runs.
+		// Luna: Flex routing only; optional web search with auto tool choice and disabled plugin.
+		// Other models: standard routing; required search when enabled, for consistency with tracked runs.
 		if (isLunaModel) {
-			// Disable the default OpenRouter web plugin, which could bypass tool_choice: "auto"
-			body.plugins = [{ id: "web", enabled: false }];
-			if (options.webSearch) {
-				// Luna can choose whether to search (0 or 1)
-				Object.assign(body, webSearchRequestFields("auto"));
-			}
-		} else {
-			// Non-Luna models maintain required search behavior
-			if (options.webSearch) {
-				Object.assign(body, webSearchRequestFields("required"));
-			}
+			setupLunaFlexRouting(body, options.webSearch);
+		} else if (options.webSearch) {
+			Object.assign(body, webSearchRequestFields("required"));
 		}
 
 		// Use raw fetch instead of SDK — the SDK's ChatAssistantMessage Zod schema
@@ -377,31 +517,84 @@ export const openrouter: Provider = {
 		// The SDK's Responses API (client.responses.send()) does preserve annotations
 		// via ResponseOutputText, but it's currently in beta. Consider switching to
 		// the Responses API + SDK when it's stable.
-		const res = await fetch(OPENROUTER_API_URL, {
-			method: "POST",
-			headers: openrouterHeaders(),
-			body: JSON.stringify(body),
-		});
 
-		if (!res.ok) {
-			throw new Error(`OpenRouter API error (${res.status}): ${await res.text()}`);
+		// Luna: Apply 15-minute timeout only for Luna queries.
+		// Other models use default fetch timeout.
+		let controller: AbortController | null = null;
+		let timeoutId: ReturnType<typeof setTimeout> | null = null;
+		if (isLunaModel) {
+			controller = new AbortController();
+			timeoutId = setTimeout(() => controller?.abort(), 900_000); // 15 minutes
 		}
 
-		const data: any = await res.json();
+		try {
+			const res = await fetch(OPENROUTER_API_URL, {
+				method: "POST",
+				headers: openrouterHeaders(),
+				body: JSON.stringify(body),
+				...(controller ? { signal: controller.signal } : {}),
+			});
 
-		warnIfOutputCapped("openrouter", modelSlug, data?.choices?.[0]?.finish_reason);
+			if (!res.ok) {
+				const text = await res.text();
+				throw createOpenRouterError(res, text, isLunaModel);
+			}
 
-		const citations = extractCitationsFromOpenRouterResponse(data);
-		// OpenRouter doesn't expose what search queries the model made internally.
-		// Only mark as "unavailable" when citations prove a web search happened.
-		const webQueries = citations.length > 0 ? [WEB_QUERIES_UNAVAILABLE] : [];
+			const data: any = await res.json();
 
-		return {
-			rawOutput: data,
-			textContent: extractTextFromOpenRouterResponse(data),
-			webQueries,
-			citations,
-			modelVersion: data?.model ?? modelSlug,
-		};
+			// Check for errors at all layers before verifying service_tier or returning success.
+			// Errors can appear as: top-level error, or first choice error.
+			// Use error.metadata.error_type for programmatic error classification.
+			const responseError = extractResponseError(data);
+			if (responseError) {
+				const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after") ?? null);
+
+				const error = new Error(
+					`OpenRouter HTTP 200 error: ${responseError.error.message ?? "(no message)"} ` +
+						`(error_type: ${responseError.errorType ?? "unknown"})`,
+				);
+				(error as any).httpStatus = 200;
+				(error as any).errorCode = responseError.errorCode;
+				(error as any).errorType = responseError.errorType;
+				(error as any).providerCode = responseError.providerCode;
+				(error as any).retryAfterMs = retryAfterMs;
+
+				// Luna 429s are flagged for retry, but cost remains unknown
+				if (isLunaModel && responseError.errorCode === 429) {
+					(error as any).isLunaFlexError = true;
+					(error as any).costUnknown = true;
+				}
+
+				throw error;
+			}
+
+			// Luna: verify the response was actually served by Flex tier.
+			// Check service_tier only for successful responses (no error field).
+			if (isLunaModel) {
+				const verification = verifyLunaFlexTier(data);
+				if (!verification.isValid) {
+					throw verification.error;
+				}
+			}
+
+			warnIfOutputCapped("openrouter", modelSlug, data?.choices?.[0]?.finish_reason);
+
+			const citations = extractCitationsFromOpenRouterResponse(data);
+			// OpenRouter doesn't expose what search queries the model made internally.
+			// Only mark as "unavailable" when citations prove a web search happened.
+			const webQueries = citations.length > 0 ? [WEB_QUERIES_UNAVAILABLE] : [];
+
+			return {
+				rawOutput: data,
+				textContent: extractTextFromOpenRouterResponse(data),
+				webQueries,
+				citations,
+				modelVersion: data?.model ?? modelSlug,
+			};
+		} finally {
+			if (timeoutId !== null) {
+				clearTimeout(timeoutId);
+			}
+		}
 	},
 };

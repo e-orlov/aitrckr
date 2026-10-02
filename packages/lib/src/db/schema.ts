@@ -1026,6 +1026,48 @@ export type SentimentDispatchPermit = typeof sentimentDispatchPermits.$inferSele
 export type SentimentProviderBreaker = typeof sentimentProviderBreakers.$inferSelect;
 export type SentimentAlertState = typeof sentimentAlertState.$inferSelect;
 
+// Luna Flex billing incident tracking: locks Luna queries after service_tier contract violation.
+// Reset only via explicit operator action after incident investigation.
+export const lunaFlexIncidents = pgTable(
+	"luna_flex_incidents",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		generationId: text("generation_id").unique(),
+		requestedTier: text("requested_tier").notNull().default("flex"),
+		responseTier: text("response_tier"),
+		errorCode: numeric("error_code"),
+		errorType: text("error_type"),
+		errorProviderCode: text("error_provider_code"),
+		usageSnapshot: jsonb("usage_snapshot"),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		status: text("status").notNull().default("active"), // 'active' | 'resolved'
+		operatorNotes: text("operator_notes"),
+	},
+	(table) => ({
+		statusIdx: index("luna_flex_incidents_status_idx").on(table.status),
+	}),
+).enableRLS();
+
+export type LunaFlexIncident = typeof lunaFlexIncidents.$inferSelect;
+
+// Luna Flex Retry-After tracking: persist retry-until timestamps across worker restarts.
+// Single row per prompt to prevent hammering Flex endpoint when temporarily unavailable.
+export const lunaRetryState = pgTable(
+	"luna_retry_state",
+	{
+		id: uuid("id").defaultRandom().primaryKey().notNull(),
+		promptId: text("prompt_id").notNull().unique(),
+		retryUntilAt: timestamp("retry_until_at", { withTimezone: true }).notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => ({
+		retryUntilAtIdx: index("luna_retry_state_retry_until_at_idx").on(table.retryUntilAt),
+	}),
+).enableRLS();
+
+export type LunaRetryState = typeof lunaRetryState.$inferSelect;
+
 // Encrypted overrides for credential environment variables, keyed by the env-var
 // name they stand in for. Separate table, strictest access.
 export const secrets = pgTable("secrets", {

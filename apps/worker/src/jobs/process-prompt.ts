@@ -7,12 +7,20 @@ import {
 	brands,
 	type Competitor,
 	citations,
+	lunaFlexIncidents,
+	lunaRetryState,
 	promptRuns,
 	prompts,
 	usageEvents,
 } from "@workspace/lib/db/schema";
 import { type Entitlements, getOrgEntitlements } from "@workspace/lib/entitlements";
-import { getProvider, type ModelConfig, type Provider, parseScrapeTargets } from "@workspace/lib/providers";
+import {
+	getProvider,
+	isLunaModelSlug,
+	type ModelConfig,
+	type Provider,
+	parseScrapeTargets,
+} from "@workspace/lib/providers";
 import {
 	dailyRunCeiling,
 	ensureNextRunScheduled,
@@ -82,6 +90,181 @@ async function scheduleNextRun(promptId: string, cadenceHours: number, consecuti
 	} catch (error) {
 		console.error(`Failed to schedule next run for prompt ${promptId}:`, error);
 		// Don't throw - we don't want to fail the job just because rescheduling failed
+	}
+}
+
+/**
+ * Handle Luna Flex error state: record incidents and persist Retry-After waits.
+ */
+async function handleLunaFlexErrorState(
+	error: unknown,
+	config: ModelConfig,
+	promptId: string,
+	logPrefix: string,
+): Promise<void> {
+	if (!isLunaModelSlug(config.version)) return;
+
+	// Record billing incident if tier mismatch
+	if ((error as any)?.isFlexBillingIncident === true) {
+		await recordLunaFlexIncident(error, config, logPrefix);
+	}
+
+	// Save Retry-After wait time
+	if ((error as any)?.retryAfterMs) {
+		await saveLunaRetryWait(promptId, (error as any).retryAfterMs);
+	}
+}
+
+/**
+ * Pre-flight checks for Luna Flex: active incident lock and Retry-After wait.
+ * Throws if cannot proceed. Include forceDue in check so forced runs still respect Retry-After.
+ */
+async function checkLunaFlexPrerequisites(promptId: string, forceDue: boolean): Promise<void> {
+	// Check active incident lock
+	const activeIncident = await db
+		.select()
+		.from(lunaFlexIncidents)
+		.where(eq(lunaFlexIncidents.status, "active"))
+		.limit(1);
+
+	if (activeIncident.length > 0) {
+		const incident = activeIncident[0];
+		const error = new Error(
+			`Luna Flex billing incident lock: active incident ${incident.id} (generation ${incident.generationId}). ` +
+				`Manual operator action required to reset.`,
+		);
+		(error as any).isLunaIncidentLocked = true;
+		throw error;
+	}
+
+	// Check Retry-After wait, even with forceDue
+	const waitMs = await getLunaRetryWaitMs(promptId, forceDue);
+	if (waitMs !== null && waitMs > 0) {
+		const error = new Error(
+			`Luna Flex Retry-After: must wait ${Math.ceil(waitMs / 1000)}s before next attempt. ` +
+				`Retry at: ${new Date(Date.now() + waitMs).toISOString()}`,
+		);
+		(error as any).isLunaRetryAfter = true;
+		(error as any).retryAfterMs = waitMs;
+		throw error;
+	}
+}
+
+/**
+ * Check and enforce Luna Retry-After state. Returns remaining milliseconds to wait,
+ * or null if retry window has passed. Include forceDue in check so forced runs still respect wait.
+ */
+async function getLunaRetryWaitMs(promptId: string, forceDue: boolean): Promise<number | null> {
+	try {
+		const state = await db.query.lunaRetryState.findFirst({
+			where: eq(lunaRetryState.promptId, promptId),
+		});
+
+		if (!state) return null;
+
+		const nowMs = Date.now();
+		const retryUntilMs = state.retryUntilAt.getTime();
+
+		if (nowMs >= retryUntilMs) {
+			// Window has passed, clean it up
+			await db.delete(lunaRetryState).where(eq(lunaRetryState.promptId, promptId));
+			return null;
+		}
+
+		// Still waiting, even if forceDue
+		return retryUntilMs - nowMs;
+	} catch (error) {
+		console.error(`Failed to check Luna retry state for prompt ${promptId}:`, error);
+		// Fail-safe: don't send Luna if we can't check state
+		throw new Error(`Failed to check Luna Flex retry state: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+/**
+ * Save Luna Retry-After time based on Retry-After header from error.
+ * Handles both numeric seconds and HTTP-date formats.
+ */
+async function saveLunaRetryWait(promptId: string, retryAfterMs: number | null | undefined): Promise<void> {
+	if (!retryAfterMs || retryAfterMs <= 0) return;
+
+	try {
+		const retryUntilAt = new Date(Date.now() + retryAfterMs);
+
+		// Upsert: update if exists, insert if not
+		await db
+			.insert(lunaRetryState)
+			.values({
+				promptId,
+				retryUntilAt,
+			})
+			.onConflictDoUpdate({
+				target: lunaRetryState.promptId,
+				set: { retryUntilAt },
+			});
+
+		console.log(`Saved Luna retry-until: ${retryUntilAt.toISOString()} (${retryAfterMs}ms from now)`);
+	} catch (error) {
+		console.error(`Failed to save Luna retry state for prompt ${promptId}:`, error);
+		Sentry.captureException(error, { tags: { incident_type: "retry_state_save_failed" } });
+	}
+}
+
+/**
+ * Clear Luna Retry-After state after successful Flex response.
+ */
+async function clearLunaRetryWait(promptId: string): Promise<void> {
+	try {
+		await db.delete(lunaRetryState).where(eq(lunaRetryState.promptId, promptId));
+	} catch (error) {
+		console.warn(`Failed to clear Luna retry state for prompt ${promptId}:`, error);
+	}
+}
+
+/**
+ * Record Luna Flex billing incident immediately when tier mismatch is detected.
+ * This locks Luna queries before Promise.allSettled completes, ensuring no subsequent
+ * requests bypass the incident check.
+ *
+ * Mandatory: If recording fails, throws error to block Luna continuation.
+ * Failure to record incident across workers is BLOCKED per requirements.
+ */
+async function recordLunaFlexIncident(error: unknown, config: ModelConfig, logPrefix: string): Promise<void> {
+	if (!isLunaModelSlug(config.version) || (error as any)?.isFlexBillingIncident !== true) {
+		return;
+	}
+
+	const generationId = (error as any)?.generationId;
+	const responseTier = (error as any)?.responseTier;
+	const usageSnapshot = (error as any)?.usageSnapshot;
+
+	try {
+		await db.insert(lunaFlexIncidents).values({
+			generationId: generationId ?? null,
+			requestedTier: "flex",
+			responseTier: responseTier ?? null,
+			usageSnapshot: usageSnapshot ?? null,
+		});
+		console.error(
+			`${logPrefix} Logged Luna Flex tier mismatch incident: gen ${generationId ?? "none"}, tier ${responseTier ?? "null"}`,
+		);
+		Sentry.captureMessage(
+			`Luna Flex tier mismatch recorded: generation ${generationId ?? "unknown"}. Incident locked; Luna blocked.`,
+			"error",
+		);
+	} catch (dbError) {
+		console.error(`${logPrefix} CRITICAL: Failed to log Luna Flex incident to database:`, dbError);
+		Sentry.captureException(dbError, {
+			tags: { incident_type: "flex_incident_db_critical", severity: "critical" },
+			contexts: { billing_incident: { generationId, responseTier } },
+		});
+		// BLOCKED per task requirements: cannot continue Luna if incident recording fails.
+		// Multi-worker coordination requires distributed lock or centralized state.
+		const wrappedError = new Error(
+			`BLOCKED: Failed to record Luna Flex incident. Manual intervention required. ` +
+				`Original issue: ${responseTier ? `served as ${responseTier}` : "unknown tier"}`,
+		);
+		(wrappedError as any).isLunaIncidentRecordingFailed = true;
+		throw wrappedError;
 	}
 }
 
@@ -325,6 +508,7 @@ async function runModelIteration({
 	config,
 	providerImpl,
 	runIndex,
+	forceDue,
 }: {
 	promptId: string;
 	promptValue: string;
@@ -333,8 +517,30 @@ async function runModelIteration({
 	config: ModelConfig;
 	providerImpl: Provider;
 	runIndex: number;
+	forceDue: boolean;
 }): Promise<Citation[]> {
 	const logPrefix = `[${config.model}_${runIndex}]`;
+
+	// Luna: Check for active billing incidents and Retry-After waits before attempting to run
+	if (isLunaModelSlug(config.version)) {
+		try {
+			await checkLunaFlexPrerequisites(promptId, forceDue);
+		} catch (dbError) {
+			// Fail-safe: if we can't read state or prerequisites fail, don't send Luna
+			if (
+				(dbError as any).isLunaIncidentLocked ||
+				(dbError as any).isLunaRetryAfter ||
+				(dbError as any).isLunaIncidentCheckFailed
+			) {
+				throw dbError;
+			}
+			const error = new Error(
+				`Failed to check Luna Flex state: ${dbError instanceof Error ? dbError.message : String(dbError)}`,
+			);
+			(error as any).isLunaStateCheckFailed = true;
+			throw error;
+		}
+	}
 
 	try {
 		const result = await providerImpl.run(config.model, promptValue, {
@@ -379,8 +585,17 @@ async function runModelIteration({
 			config,
 		});
 		await enqueueSentiment(promptRunId, brand, competitorsList, rawOutput, config, logPrefix);
+
+		// Clear Luna Retry-After wait on successful run
+		if (isLunaModelSlug(config.version)) {
+			await clearLunaRetryWait(promptId);
+		}
+
 		return extractedCitations;
 	} catch (error) {
+		// Handle Luna Flex error state: record incidents and save Retry-After
+		await handleLunaFlexErrorState(error, config, promptId, logPrefix);
+
 		// A single run's failure doesn't fail the job, so report it here to keep
 		// per-provider failure rates visible.
 		Sentry.withScope((scope) => {
@@ -461,6 +676,30 @@ async function enqueueSourceClassifications(
 			`Source-classification enqueue for brand ${brand.id}: ` +
 				`${accepted} accepted, ${deduplicated} deduplicated, ${failed} failed of ${attempted} attempted`,
 		);
+	}
+}
+
+/**
+ * Summarize run failures: log Luna Flex specific failures (incidents already recorded in
+ * runModelIteration), incident locks, and 429 Resource Unavailable conditions.
+ */
+async function handleRunFailures(failures: Array<{ reason: unknown }>): Promise<void> {
+	const lunaLocked = failures.filter((f) => (f.reason as any)?.isLunaIncidentLocked === true);
+	const resourceUnavailable = failures.filter(
+		(f) => (f.reason as any)?.isLunaFlexError === true && (f.reason as any)?.isResourceUnavailable === true,
+	);
+
+	if (lunaLocked.length > 0) {
+		console.warn(`Luna locked by prior incident. ${lunaLocked.length} run(s) skipped.`);
+		Sentry.captureMessage(`Luna locked: ${lunaLocked.length} run(s) skipped pending operator reset.`, "warning");
+	}
+
+	if (resourceUnavailable.length > 0) {
+		for (const error of resourceUnavailable) {
+			const retryAfterMs = (error.reason as any)?.retryAfterMs;
+			console.warn(`Luna Flex 429 Resource Unavailable (no charge). Retry-After: ${retryAfterMs ?? "none"}`);
+			Sentry.captureMessage(`Luna Flex 429 Resource Unavailable (no charge): will retry with backoff.`, "warning");
+		}
 	}
 }
 
@@ -550,12 +789,16 @@ async function processPrompt(
 				config: target.config,
 				providerImpl,
 				runIndex: i + 1,
+				forceDue,
 			}),
 		);
 	});
 
 	const results = await Promise.allSettled(runPromises);
 	const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+
+	// Summarize Luna Flex specific failures (incidents already recorded in runModelIteration)
+	await handleRunFailures(failures);
 
 	const savedCitations = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
 	await enqueueSourceClassifications(savedCitations, brand, competitorsList);

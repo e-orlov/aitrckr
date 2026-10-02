@@ -71,8 +71,8 @@ afterEach(() => {
 });
 
 describe("openrouter run", () => {
-	it("Luna + webSearch: true uses auto tool choice, disabled web plugin, and German search location", async () => {
-		const fetchMock = stubFetch();
+	it("Luna + webSearch: true enforces Flex routing with auto tool choice, disabled plugin, German location", async () => {
+		const fetchMock = stubFetch({ service_tier: "flex" });
 
 		await openrouter.run("chatgpt", "prompt", { webSearch: true, version: "openai/gpt-5.6-luna" });
 
@@ -81,6 +81,13 @@ describe("openrouter run", () => {
 		expect(body.model).toBe("openai/gpt-5.6-luna");
 		expect(body.messages).toEqual([{ role: "user", content: "prompt" }]);
 		expect(body.max_tokens).toBe(API_PROVIDER_MAX_OUTPUT_TOKENS.openrouter);
+		// Luna Flex routing
+		expect(body.service_tier).toBe("flex");
+		expect(body.provider).toEqual({
+			only: ["openai/flex"],
+			allow_fallbacks: false,
+			max_price: { prompt: 0.1, completion: 0.6 },
+		});
 		// Luna with webSearch: tool_choice is "auto" not "required"
 		expect(body.tools).toEqual(GERMAN_WEB_SEARCH_TOOLS);
 		expect(body.tool_choice).toBe("auto");
@@ -93,24 +100,32 @@ describe("openrouter run", () => {
 			"messages",
 			"model",
 			"plugins",
+			"provider",
+			"service_tier",
 			"tool_choice",
 			"tools",
 		]);
 	});
 
-	it("Luna drops a legacy terminal :online suffix and uses auto tool choice", async () => {
-		const fetchMock = stubFetch();
+	it("Luna drops a legacy terminal :online suffix and enforces Flex routing", async () => {
+		const fetchMock = stubFetch({ service_tier: "flex" });
 
 		await openrouter.run("chatgpt", "prompt", { webSearch: true, version: "openai/gpt-5.6-luna:online" });
 
 		const { body } = sentRequest(fetchMock);
 		expect(body.model).toBe("openai/gpt-5.6-luna");
+		expect(body.service_tier).toBe("flex");
+		expect(body.provider).toEqual({
+			only: ["openai/flex"],
+			allow_fallbacks: false,
+			max_price: { prompt: 0.1, completion: 0.6 },
+		});
 		expect(body.tools).toHaveLength(1);
 		expect(body.tool_choice).toBe("auto");
 		expect(body.plugins).toEqual([{ id: "web", enabled: false }]);
 	});
 
-	it("non-Luna models keep required tool choice", async () => {
+	it("non-Luna models keep required tool choice and do not get Flex routing", async () => {
 		const fetchMock = stubFetch();
 
 		await openrouter.run("chatgpt", "prompt", { webSearch: true, version: "meta-llama/llama-4-maverick:free:online" });
@@ -121,10 +136,12 @@ describe("openrouter run", () => {
 		expect(body.tool_choice).toBe("required");
 		expect(body.max_tool_calls).toBe(1);
 		expect(body).not.toHaveProperty("plugins");
+		expect(body).not.toHaveProperty("service_tier");
+		expect(body).not.toHaveProperty("provider");
 	});
 
-	it("Luna sends no web tool or tool budget when web search is off, but still disables the plugin", async () => {
-		const fetchMock = stubFetch();
+	it("Luna sends no web tool or tool budget when web search is off, but still enforces Flex routing and disables plugin", async () => {
+		const fetchMock = stubFetch({ service_tier: "flex" });
 
 		await openrouter.run("chatgpt", "prompt", { webSearch: false, version: "openai/gpt-5.6-luna" });
 
@@ -132,6 +149,12 @@ describe("openrouter run", () => {
 		expect(body.model).toBe("openai/gpt-5.6-luna");
 		expect(body.max_tokens).toBe(API_PROVIDER_MAX_OUTPUT_TOKENS.openrouter);
 		expect(body.messages).toEqual([{ role: "user", content: "prompt" }]);
+		expect(body.service_tier).toBe("flex");
+		expect(body.provider).toEqual({
+			only: ["openai/flex"],
+			allow_fallbacks: false,
+			max_price: { prompt: 0.1, completion: 0.6 },
+		});
 		expect(body.plugins).toEqual([{ id: "web", enabled: false }]);
 		expect(body).not.toHaveProperty("tools");
 		expect(body).not.toHaveProperty("tool_choice");
@@ -160,6 +183,7 @@ describe("openrouter run", () => {
 
 	it("keeps text, deduplicated citations, model version and web-query marker intact", async () => {
 		stubFetch({
+			service_tier: "flex",
 			model: "openai/gpt-5.6-luna-2026-05-01",
 			choices: [
 				{
@@ -192,7 +216,7 @@ describe("openrouter run", () => {
 	});
 
 	it("falls back to the bare slug as model version and reports no web queries without citations", async () => {
-		stubFetch({ model: undefined, choices: [{ message: { content: "plain" } }] });
+		stubFetch({ service_tier: "flex", model: undefined, choices: [{ message: { content: "plain" } }] });
 
 		const result = await openrouter.run("chatgpt", "prompt", {
 			webSearch: true,
@@ -202,6 +226,45 @@ describe("openrouter run", () => {
 		expect(result.modelVersion).toBe("openai/gpt-5.6-luna");
 		expect(result.webQueries).toEqual([]);
 		expect(result.citations).toEqual([]);
+	});
+
+	it("Luna rejects a 2xx response with service_tier other than flex, marking it as a billing incident", async () => {
+		stubFetch({
+			id: "gen-12345",
+			service_tier: "default",
+			choices: [{ message: { content: "answer" } }],
+			usage: { cost: 0.001 },
+		});
+
+		await expect(
+			openrouter.run("chatgpt", "prompt", { webSearch: true, version: "openai/gpt-5.6-luna" }),
+		).rejects.toSatisfy((error: unknown) => {
+			const err = error as any;
+			expect(err.message).toContain("Luna service_tier contract violation");
+			expect(err.message).toContain("requested flex, received default");
+			expect(err.generationId).toBe("gen-12345");
+			expect(err.responseTier).toBe("default");
+			expect(err.isFlexBillingIncident).toBe(true);
+			return true;
+		});
+	});
+
+	it("Luna rejects a 2xx response with null service_tier, marking it as a billing incident", async () => {
+		stubFetch({
+			id: "gen-67890",
+			service_tier: null,
+			choices: [{ message: { content: "answer" } }],
+		});
+
+		await expect(
+			openrouter.run("chatgpt", "prompt", { webSearch: false, version: "openai/gpt-5.6-luna" }),
+		).rejects.toSatisfy((error: unknown) => {
+			const err = error as any;
+			expect(err.message).toContain("Luna service_tier contract violation");
+			expect(err.message).toContain("received null");
+			expect(err.isFlexBillingIncident).toBe(true);
+			return true;
+		});
 	});
 
 	it("logs a warning when the response stops on the output cap", async () => {
@@ -233,7 +296,7 @@ describe("openrouter run", () => {
 	it("authenticates with the bearer key and app attribution headers", async () => {
 		vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test-key");
 		vi.stubEnv("APP_URL", "http://localhost:1515");
-		const fetchMock = stubFetch();
+		const fetchMock = stubFetch({ service_tier: "flex" });
 
 		await openrouter.run("chatgpt", "prompt", { webSearch: true, version: "openai/gpt-5.6-luna" });
 
@@ -246,13 +309,45 @@ describe("openrouter run", () => {
 			"X-Title": "Elmo AEO",
 		});
 	});
+
+	it("Luna incident captures usage snapshot", async () => {
+		stubFetch({
+			id: "gen-incident-001",
+			service_tier: "default",
+			choices: [{ message: { content: "answer" } }],
+			usage: { prompt_tokens: 100, completion_tokens: 50, cost: 0.001 },
+		});
+
+		await expect(
+			openrouter.run("chatgpt", "prompt", { webSearch: true, version: "openai/gpt-5.6-luna" }),
+		).rejects.toSatisfy((error: unknown) => {
+			const err = error as any;
+			expect(err.usageSnapshot).toEqual({
+				prompt_tokens: 100,
+				completion_tokens: 50,
+				cost: 0.001,
+			});
+			return true;
+		});
+	});
+
+	it("non-Luna models do not trigger 15-minute timeout", async () => {
+		// Verify fetch was called without signal (or with undefined signal)
+		const fetchMock = stubFetch();
+
+		await openrouter.run("chatgpt", "prompt", { webSearch: false, version: "openai/gpt-5-mini" });
+
+		const { init } = sentRequest(fetchMock);
+		// Non-Luna requests should not have signal property
+		expect(init.signal).toBeUndefined();
+	});
 });
 
 describe("openrouter runStructuredResearch", () => {
 	const schema = z.object({ summary: z.string(), competitors: z.array(z.string()) });
 	const structured = { summary: "ok", competitors: ["a", "b"] };
 
-	it("keeps the research model and strict JSON schema while adding the German web search", async () => {
+	it("keeps the research model and strict JSON schema while adding the German web search, no Flex routing", async () => {
 		const fetchMock = stubFetch({ choices: [{ message: { content: JSON.stringify(structured) } }] });
 
 		const result = await openrouter.runStructuredResearch!({ prompt: "research", schema, webSearch: true });
@@ -266,6 +361,9 @@ describe("openrouter runStructuredResearch", () => {
 		});
 		expectWebSearchContract(body);
 		expect(body).not.toHaveProperty("max_tokens");
+		expect(body).not.toHaveProperty("service_tier");
+		// runStructuredResearch uses STRICT_ROUTING, which is a provider filter, not Flex routing
+		expect(body.provider).toEqual({ require_parameters: true });
 		expect(result).toEqual({
 			object: structured,
 			modelVersion: "openai/gpt-5-mini",
